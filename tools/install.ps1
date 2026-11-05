@@ -49,6 +49,22 @@ if (Test-Path $fragment) {
     Set-Content -Path $fragment -Value $json -Encoding UTF8
 }
 
+# Windows Terminal materialises fragment profiles into settings.json the first
+# time they are used; those copies do not pick up later fragment changes, so
+# make sure the font and commandline are right there too.
+$settingsCandidates = @(
+    (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json'),
+    (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState\settings.json')
+)
+foreach ($settingsPath in $settingsCandidates) {
+    if (-not (Test-Path $settingsPath)) { continue }
+    $text = Get-Content $settingsPath -Raw
+    if ($text -notmatch '"name":\s*"mibi"') { continue }
+    $text = [regex]::Replace($text, '("name":\s*"mibi")(\s*\})', ('$1,' + "`n" + '                "font": { "face": "' + $Font + '" }$2'), 'None')
+    Set-Content -Path $settingsPath -Value $text -Encoding UTF8
+    if (-not $Quiet) { Write-Host "  settings.json: font face set for the mibi profile" }
+}
+
 if (-not $Quiet) {
     Write-Host "Installed mibi in $Target"
     Write-Host "  binary:   $(Join-Path $Target 'mibi.exe')"
