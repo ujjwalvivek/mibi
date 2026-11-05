@@ -225,13 +225,6 @@ pub const Screen = struct {
                     continue;
                 }
 
-                // Never touch the bottom-right cell: writing it can scroll the
-                // whole screen on some terminals.
-                if (x == self.cols - 1 and y == self.rows - 1) {
-                    self.front[i] = b;
-                    continue;
-                }
-
                 if (!colorEql(last_fg, b.fg) or !colorEql(last_bg, b.bg) or
                     @as(u3, @bitCast(last_attr)) != @as(u3, @bitCast(b.attr)))
                 {

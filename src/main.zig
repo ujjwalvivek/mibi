@@ -1107,6 +1107,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
 
     const sel = session.current().selectionRange();
     const rc = session.current().rowCol();
+    const line_bg = theme.lineHighlight();
     const cur_dcol = session.current().cursorDisplayCol();
 
     // Syntax state at the top of the viewport, carried down the visible rows.
@@ -1122,6 +1123,12 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
         const line_start = ed.rowStart(lr);
         const line_end = line_start + line.len;
         const nspans = ed.highlightLine(lr, &syn_state, &spans);
+        const cursor_line = lr == rc.row and std.meta.activeTag(line_bg) != .default;
+        const row_bg = if (cursor_line) line_bg else theme.background;
+        if (cursor_line) {
+            var cx: usize = 0;
+            while (cx < w) : (cx += 1) s.put(@intCast(cx), y, .{ .ch = ' ', .bg = line_bg });
+        }
 
         // Gutter.
         if (gutter > 0) {
@@ -1129,8 +1136,8 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
             const num = std.fmt.bufPrint(&num_buf, "{d}", .{lr + 1}) catch "";
             const gx = gutter - 1;
             var k: usize = 0;
-            while (k + num.len < gx) : (k += 1) s.put(@intCast(k), y, .{ .ch = ' ', .bg = theme.background });
-            s.putStr(@intCast(gx - num.len), y, num, .{ .fg = gutter_fg, .bg = theme.background });
+            while (k + num.len < gx) : (k += 1) s.put(@intCast(k), y, .{ .ch = ' ', .bg = row_bg });
+            s.putStr(@intCast(gx - num.len), y, num, .{ .fg = gutter_fg, .bg = row_bg });
         }
 
         // Text (wide characters take two cells; the second is marked cont).
@@ -1154,7 +1161,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
                 const next = (dcol / tab + 1) * tab;
                 while (dcol < next) : (dcol += 1) {
                     if (dcol >= ed.scroll_col) {
-                        var cell = render.Cell{ .ch = ' ', .fg = fg, .bg = theme.background };
+                        var cell = render.Cell{ .ch = ' ', .fg = fg, .bg = row_bg };
                         if (selected) cell.bg = sel_bg;
                         s.put(@intCast(sx), y, cell);
                         sx += 1;
@@ -1167,11 +1174,11 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
             if (cw == 0) continue; // combining mark: attaches to the previous cell
             if (dcol >= ed.scroll_col) {
                 if (sx + cw > w) break;
-                var cell = render.Cell{ .ch = cp, .fg = fg, .bg = theme.background };
+                var cell = render.Cell{ .ch = cp, .fg = fg, .bg = row_bg };
                 if (selected) cell.bg = sel_bg;
                 s.put(@intCast(sx), y, cell);
                 if (cw == 2) {
-                    var cont = render.Cell{ .ch = ' ', .fg = fg, .bg = theme.background, .cont = true };
+                    var cont = render.Cell{ .ch = ' ', .fg = fg, .bg = row_bg, .cont = true };
                     if (selected) cont.bg = sel_bg;
                     s.put(@intCast(sx + 1), y, cont);
                 }

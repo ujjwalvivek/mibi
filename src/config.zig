@@ -31,7 +31,31 @@ pub const Theme = struct {
     keyword2: Color = rgb(0xe5, 0xc0, 0x7b),
     string: Color = rgb(0x98, 0xc3, 0x79),
     number: Color = rgb(0xd1, 0x9a, 0x66),
+    /// Current-line tint. Unset means "background nudged toward the text".
+    line_hl: Color = .default,
+
+    /// The tint painted behind the line holding the cursor.
+    pub fn lineHighlight(self: Theme) Color {
+        if (std.meta.activeTag(self.line_hl) != .default) return self.line_hl;
+        switch (self.background) {
+            .rgb => |bg| switch (self.text) {
+                .rgb => |fg| return rgb(
+                    blend(bg.r, fg.r, 7),
+                    blend(bg.g, fg.g, 7),
+                    blend(bg.b, fg.b, 7),
+                ),
+                else => return self.background,
+            },
+            else => return self.background,
+        }
+    }
 };
+
+fn blend(a: u8, b: u8, pct: u32) u8 {
+    const av: u32 = a;
+    const bv: u32 = b;
+    return @intCast((av * (100 - pct) + bv * pct) / 100);
+}
 
 fn rgb(r: u8, g: u8, b: u8) Color {
     return .{ .rgb = .{ .r = r, .g = g, .b = b } };
@@ -422,6 +446,20 @@ test "loads a named theme from themes/" {
     try std.testing.expectEqual(rgb(0xff, 0x79, 0xc6), dracula.keyword1);
     try std.testing.expect(loadTheme(std.testing.allocator, null, "nope") == null);
     try std.testing.expect(loadTheme(std.testing.allocator, null, "../etc/passwd") == null);
+}
+
+test "the current-line tint is derived or explicit" {
+    var theme = Theme{ .background = rgb(0x1e, 0x1e, 0x2e), .text = rgb(0xcd, 0xd6, 0xf4) };
+    const derived = theme.lineHighlight();
+    try std.testing.expect(std.meta.activeTag(derived) == .rgb);
+    try std.testing.expect(!std.meta.eql(derived, theme.background));
+    // Light theme: the tint goes darker instead of lighter.
+    var light = Theme{ .background = rgb(0xf0, 0xf0, 0xf0), .text = rgb(0x20, 0x20, 0x20) };
+    const dark_tint = light.lineHighlight();
+    try std.testing.expect(dark_tint.rgb.r < 0xf0);
+    // An explicit colour wins.
+    theme.line_hl = rgb(0x11, 0x22, 0x33);
+    try std.testing.expectEqual(rgb(0x11, 0x22, 0x33), theme.lineHighlight());
 }
 
 test "inline theme keys override a named theme" {

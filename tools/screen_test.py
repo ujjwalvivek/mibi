@@ -614,7 +614,8 @@ def theme_background_covers_the_text_area(m, path):
         assert proc.wait_for("one"), "editor did not start"
         proc.wait_quiet()
         theme_bg = (16, 15, 15)  # flexoki-dark #100f0f
-        for row in range(1, proc.screen.rows - 1):
+        # Row 1 is the cursor line and carries the tint; check the others.
+        for row in range(2, proc.screen.rows - 1):
             for col in range(proc.screen.cols):
                 bg = proc.screen.bg_at(row, col)
                 assert bg in (None, theme_bg), f"row {row} col {col} has bg {bg}"
@@ -693,6 +694,39 @@ def mouse_click_toggles_the_help_hint(m, path):
     m.send("\x1b[<0;76;24M")  # the hint sits at the right edge of the last row
     assert m.wait_for("mibi controls"), "help hint click did not open the panel"
     m.shot("21-help-hint")
+
+
+@check
+def status_bar_fills_the_last_cell(m, path):
+    """The bottom-right cell is painted, leaving no unpainted block."""
+    m.wait_quiet()
+    row = m.screen.rows - 1
+    bg = m.screen.bg_at(row, m.screen.cols - 1)
+    assert bg is not None, "bottom-right cell has no background"
+    m.shot("22-status-edge")
+
+
+@check
+def cursor_line_has_a_tint(m, path):
+    """The line holding the cursor is tinted; other lines keep the background."""
+    work = os.path.join(SHOT_DIR, "work-tint")
+    os.makedirs(work, exist_ok=True)
+    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
+        f.write("[editor]\ntheme = flexoki-dark\n")
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("one\ntwo\nthree")
+
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("one"), "editor did not start"
+        proc.wait_quiet()
+        cursor_bg = proc.screen.bg_at(1, 40)  # cursor is on the first text line
+        other_bg = proc.screen.bg_at(2, 40)
+        assert cursor_bg is not None, "cursor line has no background"
+        assert cursor_bg != other_bg, f"no line tint: {cursor_bg} vs {other_bg}"
+        proc.shot("23-line-tint")
+    finally:
+        proc.close()
 
 
 @check

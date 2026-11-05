@@ -53,6 +53,9 @@ comment = #6a7382
 The theme controls the whole palette: editor text, gutter, selection, tab bar,
 status line, help panel and the syntax classes. Colours are `#rrggbb` or `#rgb`.
 
+The current line is tinted with `line_hl` (derived from the background and
+text colours when a theme does not set it).
+
 27 themes ship in `themes/` (VS Code Dark+/Light+, Catppuccin Mocha/Macchiato/
 Frappé/Latte, Rosé Pine/Moon/Dawn, Tokyo Night/Storm, Kanagawa, Everforest,
 GitHub Dark/Light, Ayu Dark, Horizon, Dracula, Nord, Gruvbox, One Dark,
@@ -178,10 +181,10 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu |  82,752 |
-| x86_64-linux-gnu  |  90,952 |
+| aarch64-linux-gnu |  83,152 |
+| x86_64-linux-gnu  |  91,080 |
 | x86_64-macos      |  95,716 |
-| aarch64-macos     | 126,328 |
+| aarch64-macos     | 126,216 |
 | x86_64-windows    | 147,968 |
 
 ## Not yet

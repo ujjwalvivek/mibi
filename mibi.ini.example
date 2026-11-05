@@ -17,6 +17,7 @@ syntax = true
 [theme]
 ; Colours are #rrggbb or #rgb. Uncomment to override the default palette.
 ; background = #0e0e0e   ; unset keeps the terminal's own background
+; line_hl = #1c1b1a     ; current-line tint (derived from bg/text when unset)
 ; text = #d8dee9
 ; gutter = #5c6370
 ; selection = #334566
