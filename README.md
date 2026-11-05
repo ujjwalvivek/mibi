@@ -132,6 +132,8 @@ packaging.
 - Clipboard register plus **OSC 52** so copy reaches the system clipboard.
 - Undo/redo with typing grouped into single steps.
 - Find (incremental), replace all, and go-to-line.
+- File tree sidebar (`Ctrl+B`): directories expand with Enter/`j`/`k` or a
+  click, files open in a tab, and every entry has a one-cell type icon.
 - Mouse: click text to place the cursor, click a tab to switch to it, click
   picker rows (click again to accept), click the status-bar hint for help;
   the wheel moves one line per notch. Quick-edit mode is turned off so the
@@ -181,11 +183,11 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu |  83,152 |
-| x86_64-linux-gnu  |  91,080 |
-| x86_64-macos      |  95,716 |
-| aarch64-macos     | 126,216 |
-| x86_64-windows    | 147,968 |
+| aarch64-linux-gnu |  89,840 |
+| x86_64-linux-gnu  |  99,000 |
+| x86_64-macos      |  108,012 |
+| aarch64-macos     | 127,384 |
+| x86_64-windows    | 157,184 |
 
 ## Not yet
 

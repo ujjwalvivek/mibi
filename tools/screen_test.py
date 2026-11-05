@@ -730,6 +730,39 @@ def cursor_line_has_a_tint(m, path):
 
 
 @check
+def file_tree_lists_and_opens(m, path):
+    """Ctrl+B opens the tree; Enter expands a directory and opens a file."""
+    work = os.path.join(SHOT_DIR, "work-tree")
+    os.makedirs(os.path.join(work, "sub"), exist_ok=True)
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello\nworld")
+    with open(os.path.join(work, "sub", "inner.txt"), "w", encoding="utf-8") as f:
+        f.write("inner body")
+
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        proc.send("\x02")  # Ctrl+B
+        proc.wait_quiet()
+        text = proc.screen_text()
+        assert "> sub" in text, f"tree missing the directory entry: {text[:160]!r}"
+        assert "t notes.txt" in text, "tree missing the file icon"
+
+        proc.send("\r")  # the selected entry is the sub directory
+        proc.wait_quiet()
+        assert "inner.txt" in proc.screen_text(), "directory did not expand"
+
+        proc.send("\x1b[B")  # down to inner.txt
+        proc.wait_quiet()
+        proc.send("\r")
+        assert proc.wait_for("inner body"), "tree did not open the file"
+        proc.shot("24-tree")
+    finally:
+        proc.close()
+
+
+@check
 def unicode_and_wide_cells(m, path):
     """A CJK character takes two cells and does not break the layout."""
     m.send("\x1b[F")  # End of the current line

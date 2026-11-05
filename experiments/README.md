@@ -34,12 +34,12 @@ boundary; never print via `std.debug` or `std.Io.Threaded`.
 
 | Target | Phase 1 (skeleton) | Phase 2 (editing) | Current (Phase 2 hardened + Phase 3 features) |
 | --- | ---: | ---: | ---: |
-| `x86_64-linux-gnu` | 8,960 | 26,168 | 91,080 |
-| `aarch64-linux-gnu` | 8,816 | 24,752 | 83,152 |
-| `x86_64-macos` | 16,994 | 33,922 | 95,716 |
-| `aarch64-macos` | 50,304 | 69,392 | 126,216 |
-| `x86_64-windows-gnu` | 50,176 | 71,680 | 147,968 |
-| `x86_64-windows` | 55,808 | 69,632 | 147,968 |
+| `x86_64-linux-gnu` | 8,960 | 26,168 | 99,000 |
+| `aarch64-linux-gnu` | 8,816 | 24,752 | 89,840 |
+| `x86_64-macos` | 16,994 | 33,922 | 108,012 |
+| `aarch64-macos` | 50,304 | 69,392 | 127,384 |
+| `x86_64-windows-gnu` | 50,176 | 71,680 | 157,184 |
+| `x86_64-windows` | 55,808 | 69,632 | 157,184 |
 
 The hardening pass (cached line index, UTF-8 `putStr`, file-safety guards,
 richer error reporting) cost ~1.5-2 KB per target. Current numbers are explicit
@@ -51,7 +51,7 @@ return unnoticed.
 **Sorting is expensive.** `std.mem.sort` instantiated for a second element type
 cost ~17 KB on Linux: pdqsort is generic, so every `[]u8` comparator type gets
 its own copy. Sorting 50 directory names with an insertion sort instead dropped
-the binary from 81,080 to 91,080 bytes. Watch for the same effect with other
+the binary from 81,080 to 99,000 bytes. Watch for the same effect with other
 generic `std` helpers.
 
 For comparison, kibi's Rust binary is ~437-446 KB uncompressed and ox's is

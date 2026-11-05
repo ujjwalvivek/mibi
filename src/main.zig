@@ -19,6 +19,7 @@ const utf8 = @import("text.zig");
 const width = @import("width.zig");
 const syntax = @import("syntax.zig");
 const picker = @import("picker.zig");
+const tree_mod = @import("tree.zig");
 const config_mod = @import("config.zig");
 const keys = @import("keys.zig");
 
@@ -56,6 +57,7 @@ const help_rows = [_]HelpRow{
     .{ .actions = &.{.help}, .desc = "toggle this help" },
     .{ .actions = &.{.quit}, .desc = "quit (asks if unsaved)" },
     .{ .literal = "click / wheel", .desc = "cursor, tabs, pickers / scroll" },
+    .{ .literal = "ctrl+b", .desc = "file tree (j/k, Enter, click)" },
 };
 
 pub const std_options: std.Options = .{
@@ -117,12 +119,16 @@ const Session = struct {
     /// the same regions the user sees.
     tab_spans: [MAX_TABS][2]u16 = undefined,
     tab_count: usize = 0,
+    /// File tree sidebar; null when closed.
+    tree: ?tree_mod.Tree = null,
+    tree_focus: bool = false,
 
     fn init(allocator: std.mem.Allocator) Session {
         return .{ .allocator = allocator, .docs = std.ArrayList(*Editor).empty, .active = 0 };
     }
 
     fn deinit(self: *Session) void {
+        if (self.tree) |*t| t.deinit();
         for (self.docs.items) |ed| {
             ed.deinit();
             self.allocator.destroy(ed);
@@ -370,6 +376,12 @@ fn run(init: std.process.Init.Minimal) !void {
         var off: usize = 0;
         while (off < pending_len and running) {
             const chunk = pending[off..pending_len];
+            if (session.tree_focus and session.tree != null and prompt == null and picker_state == null) {
+                if (handleTreeInput(&session, chunk, &msg_buf, &msg)) |consumed| {
+                    off += consumed;
+                    continue;
+                }
+            }
             const used = if (picker_state != null)
                 try handlePickerInput(&session, &picker_state, picker_mode, &theme_before, exe_dir, &registry, chunk, &running, &msg_buf, &msg)
             else if (prompt != null)
@@ -446,7 +458,7 @@ fn processInput(
                 if (j >= buf.len) return i; // incomplete
                 if (buf[i + 2] == '<') {
                     // SGR mouse: ESC [ < button ; x ; y M
-                    handleMouse(session, buf[i + 2 .. j], help);
+                    handleMouse(session, buf[i + 2 .. j], help, msg_buf, msg);
                 } else {
                     applyCsi(session, buf[i + 2 .. j], buf[j], view_rows, running, prompt, msg_buf, msg, help, true) catch |e| setMsg(msg_buf, msg, @errorName(e));
                 }
@@ -489,17 +501,34 @@ fn parseMouse(params: []const u8) [3]u16 {
 /// Mouse in the editor: click the tab bar to switch tabs, click the status-bar
 /// hint to toggle help, click text to place the cursor. The wheel moves one
 /// line per notch.
-fn handleMouse(session: *Session, params: []const u8, help: *bool) void {
+fn handleMouse(session: *Session, params: []const u8, help: *bool, msg_buf: []u8, msg: *[]const u8) void {
     const nums = parseMouse(params);
     const button = nums[0];
     const x = nums[1];
     const y = nums[2];
     const ed = session.current();
+    const size = term.size();
     if (button == 64 or button == 65) { // wheel up / down
         ed.movePage(if (button == 64) -1 else 1, 1, false);
         return;
     }
     if (button != 0) return; // primary button only
+
+    // File tree: click a row to select it, click again to open or expand.
+    if (session.tree) |*t| {
+        if (x <= TREE_WIDTH and y >= 2 and y + 1 <= size.rows) {
+            const rows = @as(usize, size.rows) - 2;
+            t.ensureVisible(rows);
+            const idx = t.scroll + (y - 2);
+            if (idx < t.count()) {
+                const was = idx == t.selected;
+                t.selected = idx;
+                session.tree_focus = true;
+                if (was) openTreeSelection(session, msg_buf, msg);
+            }
+            return;
+        }
+    }
 
     // Tab bar: switch to the tab under the pointer.
     if (y == 1) {
@@ -515,7 +544,6 @@ fn handleMouse(session: *Session, params: []const u8, help: *bool) void {
     }
 
     // Status line: the right-hand help hint toggles the panel.
-    const size = term.size();
     if (y == size.rows and size.cols > 10 and x + 10 > size.cols) {
         help.* = !help.*;
         return;
@@ -705,6 +733,16 @@ fn applyByte(
         } else {
             session.closeActive();
             if (session.count() == 0) running.* = false;
+        }
+    } else if (b == 0x02) { // Ctrl+B: file tree
+        if (session.tree != null) {
+            session.tree_focus = false;
+            session.tree.?.deinit();
+            session.tree = null;
+        } else {
+            const dir = if (session.current().path) |p| promptDir(p) else ".";
+            session.tree = tree_mod.Tree.init(session.allocator, dir) catch null;
+            session.tree_focus = session.tree != null;
         }
     } else if (b == 0x10) { // Ctrl+P: command palette
         session.ui_request = .command_palette;
@@ -1084,7 +1122,8 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
     const view_rows = h - 2; // row 0 is the tab bar, row h-1 the status line
     const total = ed.lineCount();
     const gutter: usize = if (session.config.line_numbers) digits(total) + 1 else 0;
-    const text_cols: usize = if (w > gutter + 1) w - gutter - 1 else 0;
+    const side: usize = if (session.tree != null) TREE_WIDTH else 0;
+    const text_cols: usize = if (w > side + gutter + 1) w - side - gutter - 1 else 0;
     ed.scrollToCursor(view_rows, text_cols);
 
     const gutter_fg = theme.gutter;
@@ -1104,6 +1143,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
     }
 
     drawTabBar(s, session, w, text_fg, gutter_fg);
+    if (session.tree) |*t| drawTree(s, t, session.tree_focus, h, theme);
 
     const sel = session.current().selectionRange();
     const rc = session.current().rowCol();
@@ -1136,13 +1176,13 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
             const num = std.fmt.bufPrint(&num_buf, "{d}", .{lr + 1}) catch "";
             const gx = gutter - 1;
             var k: usize = 0;
-            while (k + num.len < gx) : (k += 1) s.put(@intCast(k), y, .{ .ch = ' ', .bg = row_bg });
-            s.putStr(@intCast(gx - num.len), y, num, .{ .fg = gutter_fg, .bg = row_bg });
+            while (k + num.len < gx) : (k += 1) s.put(@intCast(side + k), y, .{ .ch = ' ', .bg = row_bg });
+            s.putStr(@intCast(side + gx - num.len), y, num, .{ .fg = gutter_fg, .bg = row_bg });
         }
 
         // Text (wide characters take two cells; the second is marked cont).
         var dcol: usize = 0;
-        var sx: usize = gutter;
+        var sx: usize = side + gutter;
         var bi: usize = 0;
         var span_i: usize = 0;
         while (bi < line.len) {
@@ -1197,7 +1237,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
 
         // Block cursor (drawn last so it wins over selection).
         if (lr == rc.row and cur_dcol >= ed.scroll_col) {
-            const cx = gutter + (cur_dcol - ed.scroll_col);
+            const cx = side + gutter + (cur_dcol - ed.scroll_col);
             if (cx < w) {
                 var under: u21 = ' ';
                 if (rc.col < line.len) under = utf8.cpAt(line, rc.col);
@@ -1241,6 +1281,154 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
 }
 
 /// One row of tabs: ` name [+] ` per document, the active one highlighted.
+const TREE_WIDTH = 28;
+
+fn drawTree(s: *render.Screen, t: *tree_mod.Tree, focused: bool, h: usize, theme: config_mod.Theme) void {
+    if (h < 4) return;
+    const side_w = @min(TREE_WIDTH, s.cols);
+    const rows = h - 2;
+    t.ensureVisible(rows);
+
+    const bg = if (focused) theme.tab_active_bg else theme.tab_bg;
+    var y: usize = 1;
+    while (y < h - 1) : (y += 1) {
+        var x: usize = 0;
+        while (x < side_w) : (x += 1) s.put(@intCast(x), @intCast(y), .{ .ch = ' ', .bg = bg });
+    }
+
+    var row: usize = 0;
+    var idx = t.scroll;
+    while (row < rows and idx < t.entries.items.len) : ({
+        row += 1;
+        idx += 1;
+    }) {
+        const e = t.entries.items[idx];
+        const selected = idx == t.selected;
+        const indent = @min(e.depth * 2, side_w - 4);
+        var line_buf: [256]u8 = undefined;
+        const line = std.fmt.bufPrint(&line_buf, "{s}{s} {s}", .{
+            " " ** 1,
+            if (e.is_dir) tree_mod.iconFor(e.name, true, t.isExpanded(e.path)) else tree_mod.iconFor(e.name, false, false),
+            e.name,
+        }) catch e.name;
+        var x: usize = 0;
+        const start = 1 + indent;
+        while (x < line.len and start + x < side_w) : (x += 1) {
+            s.put(@intCast(start + x), @intCast(1 + row), .{
+                .ch = line[x],
+                .bg = if (selected) theme.selection else bg,
+                .fg = if (e.is_dir) theme.keyword2 else theme.text,
+                .attr = .{ .bold = selected },
+            });
+        }
+    }
+}
+
+/// Keys while the file tree has focus. Returns the bytes consumed, or null
+/// when the chunk is not a complete tree key (so the caller waits for more).
+fn handleTreeInput(session: *Session, buf: []const u8, msg_buf: []u8, msg: *[]const u8) ?usize {
+    const t = &session.tree.?;
+    var i: usize = 0;
+    while (i < buf.len) {
+        const b = buf[i];
+        if (b == 0x1b) {
+            if (i + 1 >= buf.len) return if (i == 0) null else i;
+            const k = buf[i + 1];
+            if (k == '[' or k == 'O') {
+                var end: usize = undefined;
+                if (k == '[') {
+                    var j = i + 2;
+                    while (j < buf.len) : (j += 1) {
+                        if (buf[j] >= 0x40 and buf[j] <= 0x7E) break;
+                    }
+                    if (j >= buf.len) return if (i == 0) null else i;
+                    end = j + 1;
+                } else {
+                    if (i + 2 >= buf.len) return if (i == 0) null else i;
+                    end = i + 3;
+                }
+                const seq = buf[i..end];
+                if (std.mem.eql(u8, seq, "\x1b[A") or std.mem.eql(u8, seq, "\x1bOA")) {
+                    t.move(-1);
+                } else if (std.mem.eql(u8, seq, "\x1b[B") or std.mem.eql(u8, seq, "\x1bOB")) {
+                    t.move(1);
+                } else if (std.mem.eql(u8, seq, "\x1b[C") or std.mem.eql(u8, seq, "\x1bOC")) {
+                    if (t.selectedEntry()) |e| {
+                        if (e.is_dir and !t.isExpanded(e.path)) t.toggleDir(e.path) catch {};
+                    }
+                } else if (std.mem.eql(u8, seq, "\x1b[D") or std.mem.eql(u8, seq, "\x1bOD")) {
+                    if (t.selectedEntry()) |e| {
+                        if (e.is_dir and t.isExpanded(e.path)) t.toggleDir(e.path) catch {};
+                    }
+                }
+                i = end;
+                continue;
+            }
+            // Esc leaves the tree.
+            session.tree_focus = false;
+            return i + 1;
+        }
+        if (b == 0x0d or b == 0x0a) {
+            openTreeSelection(session, msg_buf, msg);
+            return i + 1;
+        }
+        if (b == 0x02) { // Ctrl+B closes it
+            session.tree_focus = false;
+            session.tree.?.deinit();
+            session.tree = null;
+            return i + 1;
+        }
+        if (b == 0x09 or b == 0x1b) { // Tab: back to the editor
+            session.tree_focus = false;
+            return i + 1;
+        }
+        if (b == 'k') {
+            t.move(-1);
+            i += 1;
+            continue;
+        }
+        if (b == 'j') {
+            t.move(1);
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+    return i;
+}
+
+/// Enter in the tree: expand a directory or open a file in a new tab.
+fn openTreeSelection(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
+    const t = &session.tree.?;
+    const entry = t.selectedEntry() orelse return;
+    if (entry.is_dir) {
+        t.toggleDir(entry.path) catch {};
+        return;
+    }
+    var path_buf: [1024]u8 = undefined;
+    const path = t.selectedPath(&path_buf) orelse return;
+    // Already open? Switch to it.
+    for (session.docs.items, 0..) |doc, i| {
+        if (doc.path) |p| {
+            if (std.mem.eql(u8, p, path)) {
+                session.active = i;
+                session.tree_focus = false;
+                return;
+            }
+        }
+    }
+    const data = os.readFileAlloc(session.allocator, path, MAX_FILE) catch |e| {
+        setErrMsg(msg_buf, msg, "Cannot open", e);
+        return;
+    };
+    defer session.allocator.free(data);
+    session.add(path, data, null) catch |e| {
+        setErrMsg(msg_buf, msg, "Cannot open", e);
+        return;
+    };
+    session.tree_focus = false;
+}
+
 fn drawTabBar(s: *render.Screen, session: *Session, w: usize, text_fg: render.Color, dim_fg: render.Color) void {
     const bar_bg = session.config.theme.tab_bg;
     const active_bg = session.config.theme.tab_active_bg;
@@ -2192,17 +2380,19 @@ test "a mouse click places the cursor and the wheel moves one line" {
     var d = try Drive.start("one\ntwo\nthree\nfour\nfive");
     defer d.stop();
     var help = false;
+    var mb: [96]u8 = undefined;
+    var msg: []const u8 = "";
 
     // Screen row 3 is the second text line; column 4 is after the "1 " gutter.
-    handleMouse(&d.session, "<0;4;3", &help);
+    handleMouse(&d.session, "<0;4;3", &help, &mb, &msg);
     const rc = d.ed().rowCol();
     try std.testing.expectEqual(@as(usize, 1), rc.row);
     try std.testing.expectEqual(@as(usize, 1), rc.col);
 
     // One wheel notch is one line.
-    handleMouse(&d.session, "<65;1;1", &help);
+    handleMouse(&d.session, "<65;1;1", &help, &mb, &msg);
     try std.testing.expectEqual(@as(usize, 2), d.ed().rowCol().row);
-    handleMouse(&d.session, "<64;1;1", &help);
+    handleMouse(&d.session, "<64;1;1", &help, &mb, &msg);
     try std.testing.expectEqual(@as(usize, 1), d.ed().rowCol().row);
 }
 

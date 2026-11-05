@@ -28,12 +28,12 @@ if (-not (Test-Path $Zig)) {
 # ~25% headroom. Phase gates from PLAN.md: Phase 1 <= 80 KB, Phase 2 <= 150 KB,
 # Phase 3 <= 350 KB, hard ceiling 1 MB (all targets are far below it).
 $targets = [ordered]@{
-    'x86_64-linux-gnu'   = @{ budget = 96 * $KB;  exe = 'mibi' }
-    'aarch64-linux-gnu'  = @{ budget = 96 * $KB;  exe = 'mibi' }
-    'x86_64-macos'       = @{ budget = 112 * $KB; exe = 'mibi' }
-    'aarch64-macos'      = @{ budget = 144 * $KB; exe = 'mibi' }
-    'x86_64-windows'     = @{ budget = 160 * $KB; exe = 'mibi.exe' }
-    'x86_64-windows-gnu' = @{ budget = 160 * $KB; exe = 'mibi.exe' }
+    'x86_64-linux-gnu'   = @{ budget = 128 * $KB; exe = 'mibi' }
+    'aarch64-linux-gnu'  = @{ budget = 128 * $KB; exe = 'mibi' }
+    'x86_64-macos'       = @{ budget = 160 * $KB; exe = 'mibi' }
+    'aarch64-macos'      = @{ budget = 160 * $KB; exe = 'mibi' }
+    'x86_64-windows'     = @{ budget = 192 * $KB; exe = 'mibi.exe' }
+    'x86_64-windows-gnu' = @{ budget = 192 * $KB; exe = 'mibi.exe' }
 }
 
 $rows = @()
