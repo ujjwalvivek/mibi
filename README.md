@@ -32,9 +32,10 @@ toolchain (0.16.0) is fetched into `tools/zig` on first use.
 
 ## Configuration
 
-Copy `mibi.ini.example` to `mibi.ini` next to the binary (or into the directory
-you run mibi from); it is optional and every key falls back to a default.
-Unknown keys are ignored.
+`.uild.ps1` seeds `zig-out\bin\mibi.ini` from `mibi.ini.example` the first
+time it builds (later builds leave your edits alone). Copy it next to the binary
+or into the directory you run mibi from; it is optional and every key falls back
+to a default. Unknown keys are ignored.
 
 ```ini
 [editor]

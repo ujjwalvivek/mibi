@@ -25,6 +25,17 @@ if ($args.Count -gt 0 -and $args[0] -eq 'size') {
 }
 
 $env:ZIG_GLOBAL_CACHE_DIR = Join-Path $Root '.zig-cache-global'
+
+# Seed a config next to the binary the first time we build into zig-out. The
+# editor reads `mibi.ini` from its own directory (or the working directory);
+# once created it is yours to edit and later builds leave it alone.
+$ini = Join-Path $Root 'zig-out\bin\mibi.ini'
+$ini_example = Join-Path $Root 'mibi.ini.example'
+if ((Test-Path $ini_example) -and -not (Test-Path $ini)) {
+    New-Item -ItemType Directory -Force (Split-Path $ini) | Out-Null
+    Copy-Item $ini_example $ini
+}
+
 Push-Location $Root
 try {
     & $Zig build @args
