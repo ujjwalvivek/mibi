@@ -201,16 +201,23 @@ fn run(init: std.process.Init.Minimal) !void {
     // A console app cannot choose its host window. When Windows started us in a
     // bare console (double-click, or the default terminal is conhost), hand the
     // session to Windows Terminal with the user's default profile and exit.
+    //
+    // Only the file is passed: wt.exe parses any `--option` itself and rejects
+    // unknown ones. The child cannot loop because Windows Terminal sets
+    // WT_SESSION for everything it hosts, and that check runs first.
     if (os.is_windows and !in_terminal and config.terminal != .console and !os.inWindowsTerminal()) {
         if (os.exePathAlloc(allocator)) |exe| {
             defer allocator.free(exe);
             var args_buf = std.ArrayList(u8).empty;
             defer args_buf.deinit(allocator);
-            args_buf.appendSlice(allocator, "--in-terminal") catch {};
             if (path) |p| {
-                args_buf.append(allocator, ' ') catch {};
+                // Windows Terminal starts in its profile's directory, so a
+                // relative path would resolve somewhere else.
+                const abs = os.absPathAlloc(allocator, p) catch null;
+                defer if (abs) |a| allocator.free(a);
+                const target = abs orelse p;
                 args_buf.append(allocator, '"') catch {};
-                args_buf.appendSlice(allocator, p) catch {};
+                args_buf.appendSlice(allocator, target) catch {};
                 args_buf.append(allocator, '"') catch {};
             }
             if (os.spawnInWindowsTerminal(exe, args_buf.items)) |_| return else |_| {}

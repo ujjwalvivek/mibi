@@ -64,8 +64,14 @@ remove its chrome. It does make sure it runs *inside your* terminal:
   and profile, and sets the tab title (`mibi - notes.txt`).
 - If Windows starts the binary in a bare console (double-click, or conhost is
   the default terminal), mibi hands itself off to Windows Terminal with your
-  default profile and exits. `--in-terminal` marks the relaunched process;
-  `terminal = console` in `mibi.ini` turns the hand-off off.
+  default profile and exits. The hand-off is skipped when `WT_SESSION` is
+  already set (so it cannot loop) or when `--in-terminal` is passed;
+  `terminal = console` in `mibi.ini` turns it off entirely.
+- Double-clicking an unsigned local build makes Windows SmartScreen prompt
+  ("Windows protected your PC"). That is Windows, not mibi: click *Run anyway*,
+  or launch from a terminal, or double-click
+  `assets/windows-terminal/mibi.cmd`, which goes through `wt.exe` and avoids
+  the check.
 - `assets/windows-terminal/install.ps1` adds a proper Windows Terminal profile
   (icon, colour scheme, font). See
   [assets/windows-terminal/README.md](assets/windows-terminal/README.md) for

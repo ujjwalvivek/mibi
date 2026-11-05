@@ -25,11 +25,22 @@ full path of the executable.
 - **From a terminal you already have open**: just run `mibi <file>` — it runs in
   that window, with that profile.
 - **From Explorer / a shortcut**: the binary hands itself off to Windows
-  Terminal (`wt.exe`) with your default profile and exits, so no bare console
-  window is left behind. Set `terminal = console` in `mibi.ini` to keep it in
-  the console instead, or `terminal = wt` to always hand off.
+  Terminal (`wt.exe <mibi.exe> <file>`) with your default profile and exits, so
+  no bare console window is left behind. Set `terminal = console` in `mibi.ini`
+  to keep it in the console instead, or `terminal = wt` to always hand off.
 - **Without changing the default**: `mibi.cmd` does the same hand-off
   explicitly and falls back to a plain console if Windows Terminal is missing.
+
+## SmartScreen
+
+A local build is unsigned, so double-clicking `mibi.exe` from Explorer makes
+Windows SmartScreen ask "Windows protected your PC" (publisher: Unknown).
+Click **Run anyway** once, or avoid the check entirely:
+
+- run `mibi` from a terminal (SmartScreen only inspects shell launches), or
+- double-click `mibi.cmd` (it launches `wt.exe`, which starts mibi as a child
+  process), or
+- sign the binary with a code-signing certificate for distribution.
 
 ## A chrome-less look
 

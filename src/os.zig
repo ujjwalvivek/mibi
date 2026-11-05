@@ -57,6 +57,7 @@ const win = struct {
     extern "kernel32" fn GetModuleFileNameW(hModule: ?HANDLE, lpFilename: [*]u16, nSize: DWORD) callconv(.winapi) DWORD;
     extern "kernel32" fn GetEnvironmentVariableW(lpName: [*:0]const u16, lpBuffer: [*]u16, nSize: DWORD) callconv(.winapi) DWORD;
     extern "kernel32" fn GetFileAttributesW(lpFileName: [*:0]const u16) callconv(.winapi) DWORD;
+    extern "kernel32" fn GetFullPathNameW(lpFileName: [*:0]const u16, nBufferLength: DWORD, lpBuffer: [*]u16, lpFilePart: ?*?[*]u16) callconv(.winapi) DWORD;
 
     const shell32 = struct {
         extern "shell32" fn ShellExecuteW(
@@ -352,6 +353,21 @@ pub fn spawnInWindowsTerminal(exe_path: []const u8, extra_args: []const u8) !voi
     } else {
         return error.Unsupported;
     }
+}
+
+/// Absolute form of `path` (Windows: GetFullPathNameW). Windows Terminal
+/// starts in its profile's directory, so a relative path must be resolved
+/// before the hand-off.
+pub fn absPathAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (is_windows) {
+        const wpath = try std.unicode.utf8ToUtf16LeAllocZ(allocator, path);
+        defer allocator.free(wpath);
+        var buf: [4096]u16 = undefined;
+        const n = win.GetFullPathNameW(wpath.ptr, @intCast(buf.len), &buf, null);
+        if (n == 0 or n > buf.len) return error.PathFailed;
+        return std.unicode.utf16LeToUtf8Alloc(allocator, buf[0..n]);
+    }
+    return allocator.dupe(u8, path);
 }
 
 /// Delete `path`. A file that is already gone is not an error.
