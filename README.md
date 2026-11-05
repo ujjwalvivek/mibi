@@ -5,7 +5,8 @@ built in Zig with no third-party dependencies.
 
 Status: **Phase 3 in progress** - Phase 2 (open, edit, select, copy, undo,
 save) is complete and hardened, plus the Unicode width table,
-find/replace/go-to-line, a help panel and multiple documents in tabs.
+find/replace/go-to-line, a help panel, multiple documents in tabs and data-driven
+syntax highlighting.
 Cross-platform (Linux, macOS, Windows).
 
 ```
@@ -67,6 +68,9 @@ toolchain (0.16.0) is fetched into `tools/zig` on first use.
 - Clipboard register plus **OSC 52** so copy reaches the system clipboard.
 - Undo/redo with typing grouped into single steps.
 - Find (incremental), replace all, and go-to-line.
+- Syntax highlighting from `syntax.d/*.ini` definitions (kibi's format): 52
+  languages ship in the repo, and adding one is dropping in a file - no
+  rebuild. Multi-line comments and strings carry state across lines.
 - Line numbers, status bar (name, dirty `[+]`, cursor, line count, size).
 - Multiple documents as tabs: a tab bar with per-document dirty markers,
   Ctrl+T / Ctrl+W, Ctrl+PgUp / Ctrl+PgDn, and a quit that checks every tab.
@@ -83,6 +87,8 @@ toolchain (0.16.0) is fetched into `tools/zig` on first use.
 src/main.zig     entry, input decoding, prompts, tabs, drawing
 src/editor.zig   cursor, selection, editing, undo/redo, clipboard, search, files
 src/buffer.zig   piece table + cached line index
+src/syntax.zig   data-driven highlighter (reads syntax.d/*.ini)
+src/ini.zig      small INI reader
 src/render.zig   cell grid + ANSI diff
 src/term.zig     raw mode, alt screen, size, input
 src/os.zig       raw OS layer (no std.Io)
@@ -98,13 +104,13 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 
 | Target | Bytes |
 | --- | ---: |
-| aarch64-linux-gnu | 54,040 |
-| x86_64-linux-gnu | 60,784 |
-| x86_64-macos | 66,862 |
-| aarch64-macos | 90,072 |
-| x86_64-windows | 109,056 |
+| aarch64-linux-gnu | 58,080 |
+| x86_64-linux-gnu | 63,576 |
+| x86_64-macos | 71,020 |
+| aarch64-macos | 107,304 |
+| x86_64-windows | 115,200 |
 
 ## Not yet
 
-Syntax highlighting, config file, keybindings, themes, mouse, splits, file
-tree, command palette, multi-cursor, macros, regex, embedded terminal.
+Config file, configurable keybindings, themes, mouse, splits, file tree,
+command palette, multi-cursor, macros, regex, embedded terminal.

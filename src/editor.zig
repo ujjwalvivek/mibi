@@ -9,6 +9,7 @@ const buffer = @import("buffer.zig");
 const Buffer = buffer.Buffer;
 const utf8 = @import("text.zig");
 const width = @import("width.zig");
+const syntax = @import("syntax.zig");
 
 const MAX_UNDO = 512;
 const TAB_STOP = 4;
@@ -32,6 +33,11 @@ pub const Editor = struct {
     grouping: bool = false,
     register: std.ArrayList(u8),
     search: ?[]u8 = null,
+    /// Language for the current file (from its extension), if any.
+    lang: ?*const syntax.Lang = null,
+    /// Cached syntax state at the start of each line, grown lazily. Entries
+    /// from an edited row down are dropped so block comments re-lex.
+    syntax_states: std.ArrayList(syntax.State),
     undo_stack: std.ArrayList(buffer.Snapshot),
     redo_stack: std.ArrayList(buffer.Snapshot),
 
@@ -41,6 +47,8 @@ pub const Editor = struct {
             .buf = try Buffer.init(allocator, data),
             .path = if (path) |p| try allocator.dupe(u8, p) else null,
             .register = std.ArrayList(u8).empty,
+            .lang = null,
+            .syntax_states = std.ArrayList(syntax.State).empty,
             .undo_stack = std.ArrayList(buffer.Snapshot).empty,
             .redo_stack = std.ArrayList(buffer.Snapshot).empty,
         };
@@ -50,11 +58,46 @@ pub const Editor = struct {
         if (self.path) |p| self.allocator.free(p);
         if (self.search) |s| self.allocator.free(s);
         self.register.deinit(self.allocator);
+        self.syntax_states.deinit(self.allocator);
         for (self.undo_stack.items) |s| self.buf.freeSnapshot(s);
         for (self.redo_stack.items) |s| self.buf.freeSnapshot(s);
         self.undo_stack.deinit(self.allocator);
         self.redo_stack.deinit(self.allocator);
         self.buf.deinit();
+    }
+
+    /// Forget cached syntax states from `row` down: an edit there can change
+    /// the block-comment state of every line that follows.
+    pub fn invalidateSyntax(self: *Editor, row: usize) void {
+        const keep = @min(self.syntax_states.items.len, row -| 1);
+        self.syntax_states.shrinkRetainingCapacity(keep);
+    }
+
+    fn clearSyntax(self: *Editor) void {
+        self.syntax_states.clearRetainingCapacity();
+    }
+
+    /// Syntax state at the start of `row`, lexing forward from the cache.
+    pub fn syntaxStateAt(self: *Editor, row: usize) syntax.State {
+        const starts = self.buf.lineStarts();
+        if (starts.len == 0) return .{};
+        const target = @min(row, starts.len - 1);
+        while (self.syntax_states.items.len <= target) {
+            const i = self.syntax_states.items.len;
+            const st: syntax.State = if (i == 0) .{} else self.syntax_states.items[i - 1];
+            self.syntax_states.append(self.allocator, st) catch return st;
+            if (i > 0) {
+                if (self.lang) |lang| syntax.advance(lang, self.line(i - 1), &self.syntax_states.items[i]);
+            }
+        }
+        return self.syntax_states.items[target];
+    }
+
+    /// Highlight one line, advancing `state` to the next line. Returns the span
+    /// count (0 when the document has no language).
+    pub fn highlightLine(self: *Editor, row: usize, state: *syntax.State, spans: []syntax.Span) usize {
+        const lang = self.lang orelse return 0;
+        return syntax.highlight(lang, self.line(row), state, spans);
     }
 
     pub fn text(self: *Editor) []const u8 {
@@ -285,6 +328,7 @@ pub const Editor = struct {
         self.cursor += bytes.len;
         self.dirty = true;
         self.pref_col = null;
+        self.invalidateSyntax(self.rowCol().row);
     }
 
     pub fn backspace(self: *Editor) !void {
@@ -296,6 +340,7 @@ pub const Editor = struct {
         self.cursor = start;
         self.dirty = true;
         self.pref_col = null;
+        self.invalidateSyntax(self.rowCol().row);
     }
 
     pub fn deleteForward(self: *Editor) !void {
@@ -306,6 +351,7 @@ pub const Editor = struct {
         try self.buf.delete(self.cursor, end - self.cursor);
         self.dirty = true;
         self.pref_col = null;
+        self.invalidateSyntax(self.rowCol().row);
     }
 
     pub fn deleteSelection(self: *Editor) !void {
@@ -315,6 +361,7 @@ pub const Editor = struct {
         self.cursor = r.start;
         self.sel_anchor = null;
         self.dirty = true;
+        self.invalidateSyntax(self.rowCol().row);
     }
 
     pub fn duplicateLine(self: *Editor) !void {
@@ -330,6 +377,7 @@ pub const Editor = struct {
         try self.buf.insert(insert_at + 1, dup);
         self.cursor = insert_at + 1;
         self.dirty = true;
+        self.invalidateSyntax(self.rowCol().row);
     }
 
     // --- clipboard -------------------------------------------------------
@@ -362,6 +410,7 @@ pub const Editor = struct {
             try self.buf.delete(start, end - start);
             self.cursor = start;
             self.dirty = true;
+            self.invalidateSyntax(self.rowCol().row);
         }
     }
 
@@ -383,6 +432,7 @@ pub const Editor = struct {
         self.sel_anchor = null;
         self.clampCursor();
         self.dirty = true;
+        self.clearSyntax();
     }
 
     pub fn redo(self: *Editor) !void {
@@ -396,6 +446,7 @@ pub const Editor = struct {
         self.sel_anchor = null;
         self.clampCursor();
         self.dirty = true;
+        self.clearSyntax();
     }
 
     // --- search / replace / goto ----------------------------------------
@@ -474,6 +525,7 @@ pub const Editor = struct {
             try self.buf.insert(p, repl);
         }
         self.dirty = true;
+        self.clearSyntax();
         self.cursor = positions.items[0];
         self.sel_anchor = null;
         return positions.items.len;
@@ -484,6 +536,13 @@ pub const Editor = struct {
     pub fn setPath(self: *Editor, path: []const u8) !void {
         if (self.path) |p| self.allocator.free(p);
         self.path = try self.allocator.dupe(u8, path);
+    }
+
+    /// Point the document at a language definition (or none) and drop the
+    /// cached states, since the lexer rules changed.
+    pub fn setLanguage(self: *Editor, lang: ?*const syntax.Lang) void {
+        self.lang = lang;
+        self.clearSyntax();
     }
 
     pub fn save(self: *Editor) !void {
@@ -516,6 +575,7 @@ pub const Editor = struct {
         self.pref_col = null;
         self.grouping = false;
         self.dirty = false;
+        self.clearSyntax();
     }
 
     pub fn scrollToCursor(self: *Editor, rows: usize, cols: usize) void {

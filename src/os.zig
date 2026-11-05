@@ -54,6 +54,7 @@ const win = struct {
     extern "kernel32" fn FindClose(hFindFile: HANDLE) callconv(.winapi) c_int;
     extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
     extern "kernel32" fn DeleteFileW(lpFileName: [*:0]const u16) callconv(.winapi) c_int;
+    extern "kernel32" fn GetModuleFileNameW(hModule: ?HANDLE, lpFilename: [*]u16, nSize: DWORD) callconv(.winapi) DWORD;
 
     const FILETIME = extern struct { dwLowDateTime: u32, dwHighDateTime: u32 };
     const WIN32_FIND_DATAW = extern struct {
@@ -254,6 +255,41 @@ pub fn writeFile(path: []const u8, bytes: []const u8) !void {
     }
 }
 
+const macos = struct {
+    extern "c" fn _NSGetExecutablePath(buf: [*]u8, size: *u32) c_int;
+};
+
+fn dirnameAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const i = std.mem.lastIndexOfAny(u8, path, "/\\") orelse return allocator.dupe(u8, ".");
+    return allocator.dupe(u8, path[0..i]);
+}
+
+/// Directory holding the running executable (no trailing separator). Used to
+/// find `syntax.d` next to the binary.
+pub fn exeDirAlloc(allocator: std.mem.Allocator) ![]u8 {
+    if (is_windows) {
+        var buf: [4096]u16 = undefined;
+        const n = win.GetModuleFileNameW(null, &buf, @intCast(buf.len));
+        if (n == 0 or n >= buf.len) return error.ExePathFailed;
+        const utf8 = try std.unicode.utf16LeToUtf8Alloc(allocator, buf[0..n]);
+        defer allocator.free(utf8);
+        return dirnameAlloc(allocator, utf8);
+    }
+    if (builtin.os.tag == .linux) {
+        var buf: [4096]u8 = undefined;
+        const n = std.c.readlink("/proc/self/exe", &buf, buf.len);
+        if (n <= 0) return error.ExePathFailed;
+        return dirnameAlloc(allocator, buf[0..@intCast(n)]);
+    }
+    if (builtin.os.tag == .macos) {
+        var buf: [4096]u8 = undefined;
+        var size: u32 = buf.len;
+        if (macos._NSGetExecutablePath(&buf, &size) != 0) return error.ExePathFailed;
+        return dirnameAlloc(allocator, std.mem.sliceTo(&buf, 0));
+    }
+    return error.ExePathFailed;
+}
+
 /// Delete `path`. A file that is already gone is not an error.
 pub fn deleteFile(path: []const u8) !void {
     if (is_windows) {
@@ -283,6 +319,19 @@ pub fn listDirNames(allocator: std.mem.Allocator, path: []const u8, out: *std.Ar
     return listDirUnix(allocator, path, out);
 }
 
+/// Sort a small list of strings in place. Insertion sort keeps the binary
+/// small: `std.mem.sort` costs several KB per element type instantiation and
+/// these lists (directory entries, syntax files) are tiny.
+pub fn sortStrings(items: [][]u8) void {
+    var i: usize = 1;
+    while (i < items.len) : (i += 1) {
+        var j = i;
+        while (j > 0 and std.mem.lessThan(u8, items[j], items[j - 1])) : (j -= 1) {
+            std.mem.swap([]u8, &items[j], &items[j - 1]);
+        }
+    }
+}
+
 /// One line of directory entries, sorted and space-separated (like `ls`).
 pub fn listDirLine(allocator: std.mem.Allocator, path: []const u8, out: *std.ArrayList(u8)) !void {
     var names = std.ArrayList([]u8).empty;
@@ -291,11 +340,7 @@ pub fn listDirLine(allocator: std.mem.Allocator, path: []const u8, out: *std.Arr
         names.deinit(allocator);
     }
     try listDirNames(allocator, path, &names);
-    std.mem.sort([]u8, names.items, {}, struct {
-        fn lt(_: void, a: []u8, b: []u8) bool {
-            return std.mem.lessThan(u8, a, b);
-        }
-    }.lt);
+    sortStrings(names.items);
     for (names.items, 0..) |n, i| {
         if (i > 0) try out.append(allocator, ' ');
         try out.appendSlice(allocator, n);

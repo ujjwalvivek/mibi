@@ -39,6 +39,14 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    // Language definitions travel with the binary: `syntax.d` is looked up next
+    // to the executable (or in the working directory when running from source).
+    b.installDirectory(.{
+        .source_dir = b.path("syntax.d"),
+        .install_dir = .bin,
+        .install_subdir = "syntax.d",
+    });
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);

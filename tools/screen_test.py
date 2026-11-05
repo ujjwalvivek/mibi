@@ -37,11 +37,14 @@ class Screen:
     def __init__(self, rows, cols):
         self.rows, self.cols = rows, cols
         self.grid = [[" "] * cols for _ in range(rows)]
+        self.fg_grid = [[None] * cols for _ in range(rows)]
         self.r = self.c = 0
+        self.fg = None
         self._pending = ""
 
     def clear(self):
         self.grid = [[" "] * self.cols for _ in range(self.rows)]
+        self.fg_grid = [[None] * self.cols for _ in range(self.rows)]
         self.r = self.c = 0
 
     def _put(self, ch):
@@ -50,6 +53,7 @@ class Screen:
             return
         if self.c < self.cols:
             self.grid[self.r][self.c] = ch
+            self.fg_grid[self.r][self.c] = self.fg
         if w == 2 and self.c + 1 < self.cols:
             self.grid[self.r][self.c + 1] = ""  # continuation of a wide glyph
         self.c += w
@@ -113,6 +117,8 @@ class Screen:
         elif final == "J":
             if p0 in (0, 2, 3):
                 self.clear()
+        elif final == "m":
+            self._sgr(nums)
         elif final == "K":
             for x in range(self.c, self.cols):
                 self.grid[self.r][x] = " "
@@ -125,6 +131,23 @@ class Screen:
         elif final == "D":
             self.c = max(0, self.c - (p0 or 1))
         # SGR (m), private modes (h/l), window ops (t), DA (c): ignored
+
+    def _sgr(self, nums):
+        """Track the foreground colour so tests can assert syntax colours."""
+        i = 0
+        while i < len(nums):
+            n = nums[i]
+            if n in (0, 39):
+                self.fg = None
+            elif n == 38 and i + 4 < len(nums) and nums[i + 1] == 2:
+                self.fg = (nums[i + 2], nums[i + 3], nums[i + 4])
+                i += 4
+            i += 1
+
+    def fg_at(self, row, col):
+        if 0 <= row < self.rows and 0 <= col < self.cols:
+            return self.fg_grid[row][col]
+        return None
 
     def lines(self):
         return ["".join(row).rstrip() for row in self.grid]
@@ -380,6 +403,25 @@ def open_adds_a_tab(m, path):
 
 
 @check
+def syntax_highlighting_emits_colours(m, path):
+    """A .zig file is highlighted: keywords differ from plain identifiers."""
+    m.send("\x0f")  # Ctrl+O
+    assert m.wait_for("Open:"), "open prompt missing"
+    m.send("sample.zig")
+    m.send("\r")
+    m.wait_quiet()
+    text = m.screen_text()
+    assert_in(text, "const", "zig file opened")
+    row = next(i for i, line in enumerate(text.splitlines()) if "const" in line)
+    col = text.splitlines()[row].index("const")
+    keyword = m.screen.fg_at(row, col + 1)  # 'o' of "const"; the cursor covers 'c'
+    plain = m.screen.fg_at(row, col + 7)  # 't' of "std"
+    assert keyword is not None, "keyword cell has no true-colour foreground"
+    assert keyword != plain, f"keyword colour {keyword} equals plain {plain}"
+    m.shot("11-syntax")
+
+
+@check
 def unicode_and_wide_cells(m, path):
     """A CJK character takes two cells and does not break the layout."""
     m.send("\x1b[F")  # End of the current line
@@ -452,6 +494,8 @@ def main():
             f.write("hello\nworld")
         with open(os.path.join(tmpdir, "other.txt"), "w", encoding="utf-8") as f:
             f.write("second file\n")
+        with open(os.path.join(tmpdir, "sample.zig"), "w", encoding="utf-8") as f:
+            f.write('const std = @import("std");\n\npub fn main() void {\n    const x = 1; // note\n}\n')
         m = Mibi(["notes.txt"], cwd=tmpdir)
         try:
             if not m.wait_for("hello"):

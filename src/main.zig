@@ -17,6 +17,7 @@ const editor_mod = @import("editor.zig");
 const Editor = editor_mod.Editor;
 const utf8 = @import("text.zig");
 const width = @import("width.zig");
+const syntax = @import("syntax.zig");
 
 pub const version = "0.0.1";
 
@@ -116,10 +117,11 @@ const Session = struct {
         return self.docs.items[self.active];
     }
 
-    fn add(self: *Session, path: ?[]const u8, data: []const u8) !void {
+    fn add(self: *Session, path: ?[]const u8, data: []const u8, lang: ?*const syntax.Lang) !void {
         const ed = try self.allocator.create(Editor);
         errdefer self.allocator.destroy(ed);
         ed.* = try Editor.init(self.allocator, path, data);
+        ed.lang = lang;
         errdefer ed.deinit();
         try self.docs.append(self.allocator, ed);
         self.active = self.docs.items.len - 1;
@@ -194,9 +196,22 @@ fn run(init: std.process.Init.Minimal) !void {
         };
         if (initial_owned) |d| initial = d;
     }
+    // Syntax definitions live in `syntax.d`, next to the binary or in the
+    // working directory (kibi's model: data files, not code).
+    var registry = syntax.Registry.init(allocator);
+    defer registry.deinit();
+    if (os.exeDirAlloc(allocator)) |exe_dir| {
+        defer allocator.free(exe_dir);
+        var dir_buf: [1024]u8 = undefined;
+        if (std.fmt.bufPrint(&dir_buf, "{s}/syntax.d", .{exe_dir})) |dir| {
+            _ = registry.loadDir(dir);
+        } else |_| {}
+    } else |_| {}
+    if (registry.langs.items.len == 0) _ = registry.loadDir("syntax.d");
+
     var session = Session.init(allocator);
     defer session.deinit();
-    try session.add(path, initial);
+    try session.add(path, initial, registry.find(path));
     if (initial_owned) |d| allocator.free(d);
 
     try term.enterRaw();
@@ -276,7 +291,7 @@ fn run(init: std.process.Init.Minimal) !void {
         while (off < pending_len and running) {
             const chunk = pending[off..pending_len];
             const used = if (prompt != null)
-                try handlePromptInput(&session, &prompt, chunk, &running, &msg_buf, &msg)
+                try handlePromptInput(&session, &registry, &prompt, chunk, &running, &msg_buf, &msg)
             else
                 try processInput(&session, chunk, view_rows, &running, &prompt, &help, &msg_buf, &msg);
             if (used == 0) break; // incomplete escape sequence: wait for more
@@ -378,7 +393,7 @@ fn applyByte(session: *Session, b: u8, running: *bool, prompt: *?Prompt, msg_buf
             setErrMsg(msg_buf, msg, "Save failed", e);
         };
     } else if (b == 0x14) { // Ctrl+T: new empty tab
-        try session.add(null, "");
+        try session.add(null, "", null);
         setMsg(msg_buf, msg, "New tab");
     } else if (b == 0x17) { // Ctrl+W: close the tab; closing the last one quits
         if (ed.dirty) {
@@ -446,6 +461,7 @@ fn skipEscape(buf: []const u8, i: usize) ?usize {
 
 fn handlePromptInput(
     session: *Session,
+    registry: *syntax.Registry,
     slot: *?Prompt,
     buf: []const u8,
     running: *bool,
@@ -475,7 +491,7 @@ fn handlePromptInput(
                 slot.* = null;
                 return i + 1;
             }
-            const close = try executePrompt(session, p, msg_buf, msg);
+            const close = try executePrompt(session, registry, p, msg_buf, msg);
             if (close) {
                 slot.* = null;
                 return i + 1;
@@ -526,7 +542,13 @@ fn liveSearch(ed: *Editor, p: *Prompt) !void {
 }
 
 /// Run the prompt's action. Returns whether the prompt should close.
-fn executePrompt(session: *Session, p: *Prompt, msg_buf: []u8, msg: *[]const u8) !bool {
+fn executePrompt(
+    session: *Session,
+    registry: *syntax.Registry,
+    p: *Prompt,
+    msg_buf: []u8,
+    msg: *[]const u8,
+) !bool {
     const text = p.buf[0..p.len];
     const ed = session.current();
     switch (p.kind) {
@@ -536,6 +558,7 @@ fn executePrompt(session: *Session, p: *Prompt, msg_buf: []u8, msg: *[]const u8)
                 setErrMsg(msg_buf, msg, "Save failed", e);
                 return true;
             };
+            ed.setLanguage(registry.find(text));
             setMsg(msg_buf, msg, "Saved");
             return true;
         },
@@ -557,10 +580,11 @@ fn executePrompt(session: *Session, p: *Prompt, msg_buf: []u8, msg: *[]const u8)
             if (session.count() == 1 and ed.path == null and !ed.dirty and session.current().text().len == 0) {
                 try ed.replaceContents(data);
                 try ed.setPath(text);
+                ed.setLanguage(registry.find(text));
                 setMsg(msg_buf, msg, "Opened");
                 return true;
             }
-            try session.add(text, data);
+            try session.add(text, data, registry.find(text));
             setMsg(msg_buf, msg, "Opened");
             return true;
         },
@@ -701,6 +725,18 @@ fn digits(n: usize) usize {
     return d;
 }
 
+/// Colour for a syntax class; plain text keeps the editor's normal colour.
+fn syntaxColor(class: syntax.Class, normal: render.Color) render.Color {
+    return switch (class) {
+        .normal => normal,
+        .comment, .ml_comment => render.Color{ .rgb = .{ .r = 0x6a, .g = 0x73, .b = 0x82 } },
+        .keyword1 => render.Color{ .rgb = .{ .r = 0xc6, .g = 0x78, .b = 0xdd } },
+        .keyword2 => render.Color{ .rgb = .{ .r = 0xe5, .g = 0xc0, .b = 0x7b } },
+        .string, .ml_string => render.Color{ .rgb = .{ .r = 0x98, .g = 0xc3, .b = 0x79 } },
+        .number => render.Color{ .rgb = .{ .r = 0xd1, .g = 0x9a, .b = 0x66 } },
+    };
+}
+
 fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, help: bool) void {
     s.clear();
     const w: usize = s.cols;
@@ -728,6 +764,10 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
     const rc = session.current().rowCol();
     const cur_dcol = session.current().cursorDisplayCol();
 
+    // Syntax state at the top of the viewport, carried down the visible rows.
+    var syn_state = ed.syntaxStateAt(ed.scroll_row);
+    var spans: [syntax.MAX_SPANS]syntax.Span = undefined;
+
     var row: usize = 0;
     while (row < view_rows) : (row += 1) {
         const y: u16 = @intCast(row + 1);
@@ -736,6 +776,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
         const line = ed.line(lr);
         const line_start = ed.rowStart(lr);
         const line_end = line_start + line.len;
+        const nspans = ed.highlightLine(lr, &syn_state, &spans);
 
         // Gutter.
         var num_buf: [24]u8 = undefined;
@@ -749,16 +790,23 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
         var dcol: usize = 0;
         var sx: usize = gutter;
         var bi: usize = 0;
+        var span_i: usize = 0;
         while (bi < line.len) {
             const cp_start = bi;
             const cp = utf8.nextCp(line, &bi);
             const selected = if (sel) |sr| (cp_start >= sr.start and cp_start < sr.end) else false;
+            while (span_i < nspans and spans[span_i].end <= cp_start) span_i += 1;
+            const cls: syntax.Class = if (span_i < nspans and cp_start >= spans[span_i].start)
+                spans[span_i].class
+            else
+                .normal;
+            const fg = syntaxColor(cls, text_fg);
             if (cp == '\r') continue; // CRLF: the CR is never drawn (or counted)
             if (cp == '\t') {
                 const next = (dcol / TAB_STOP + 1) * TAB_STOP;
                 while (dcol < next) : (dcol += 1) {
                     if (dcol >= ed.scroll_col) {
-                        var cell = render.Cell{ .ch = ' ' };
+                        var cell = render.Cell{ .ch = ' ', .fg = fg };
                         if (selected) cell.bg = sel_bg;
                         s.put(@intCast(sx), y, cell);
                         sx += 1;
@@ -771,11 +819,11 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
             if (cw == 0) continue; // combining mark: attaches to the previous cell
             if (dcol >= ed.scroll_col) {
                 if (sx + cw > w) break;
-                var cell = render.Cell{ .ch = cp, .fg = text_fg };
+                var cell = render.Cell{ .ch = cp, .fg = fg };
                 if (selected) cell.bg = sel_bg;
                 s.put(@intCast(sx), y, cell);
                 if (cw == 2) {
-                    var cont = render.Cell{ .ch = ' ', .fg = text_fg, .cont = true };
+                    var cont = render.Cell{ .ch = ' ', .fg = fg, .cont = true };
                     if (selected) cont.bg = sel_bg;
                     s.put(@intCast(sx + 1), y, cont);
                 }
@@ -983,7 +1031,7 @@ fn drawStatus(
 test "an escape sequence split across reads is not typed as text" {
     var session = Session.init(std.testing.allocator);
     defer session.deinit();
-    try session.add(null, "one two three");
+    try session.add(null, "one two three", null);
     var running = true;
     var prompt: ?Prompt = null;
     var help = false;
@@ -1009,7 +1057,7 @@ test "an escape sequence split across reads is not typed as text" {
 test "page down and page up move by a page" {
     var session = Session.init(std.testing.allocator);
     defer session.deinit();
-    try session.add(null, "0\n1\n2\n3\n4\n5\n6\n7\n8\n9");
+    try session.add(null, "0\n1\n2\n3\n4\n5\n6\n7\n8\n9", null);
     var running = true;
     var prompt: ?Prompt = null;
     var help = false;
@@ -1027,7 +1075,7 @@ test "page down and page up move by a page" {
 test "ctrl+a selects all and ctrl+x cuts the selection" {
     var session = Session.init(std.testing.allocator);
     defer session.deinit();
-    try session.add(null, "hello world");
+    try session.add(null, "hello world", null);
     var running = true;
     var prompt: ?Prompt = null;
     var help = false;
@@ -1049,6 +1097,7 @@ test "ctrl+a selects all and ctrl+x cuts the selection" {
 
 const Drive = struct {
     session: Session,
+    registry: syntax.Registry,
     running: bool = true,
     prompt: ?Prompt = null,
     help: bool = false,
@@ -1058,12 +1107,16 @@ const Drive = struct {
     pending_len: usize = 0,
 
     fn start(text: []const u8) !Drive {
-        var d = Drive{ .session = Session.init(std.testing.allocator) };
-        try d.session.add(null, text);
+        var d = Drive{
+            .session = Session.init(std.testing.allocator),
+            .registry = syntax.Registry.init(std.testing.allocator),
+        };
+        try d.session.add(null, text, null);
         return d;
     }
     fn stop(self: *Drive) void {
         self.session.deinit();
+        self.registry.deinit();
     }
     fn ed(self: *Drive) *Editor {
         return self.session.current();
@@ -1080,7 +1133,7 @@ const Drive = struct {
         while (off < self.pending_len and self.running) {
             const chunk = self.pending[off..self.pending_len];
             const used: usize = if (self.prompt != null)
-                try handlePromptInput(&self.session, &self.prompt, chunk, &self.running, &self.mb, &self.msg)
+                try handlePromptInput(&self.session, &self.registry, &self.prompt, chunk, &self.running, &self.mb, &self.msg)
             else
                 try processInput(&self.session, chunk, 10, &self.running, &self.prompt, &self.help, &self.mb, &self.msg);
             if (used == 0) break; // incomplete escape sequence
@@ -1245,7 +1298,7 @@ test "save-as and open prompts" {
 test "render shows text, gutter and selection" {
     var session = Session.init(std.testing.allocator);
     defer session.deinit();
-    try session.add(null, "hello\nworld");
+    try session.add(null, "hello\nworld", null);
     var s = try render.Screen.init(std.testing.allocator, 20, 5);
     defer s.deinit();
 
@@ -1304,7 +1357,7 @@ test "unicode cell widths" {
 test "wide characters occupy two cells" {
     var session = Session.init(std.testing.allocator);
     defer session.deinit();
-    try session.add(null, "\u{4E2D}x");
+    try session.add(null, "\u{4E2D}x", null);
     var s = try render.Screen.init(std.testing.allocator, 10, 3);
     defer s.deinit();
     draw(&s, &session, "", null, false);
@@ -1454,6 +1507,66 @@ test "quit asks when a background tab is dirty" {
     try std.testing.expect(d.running);
 }
 
+test "syntax highlighting colours keywords and comments" {
+    var d = try Drive.start("const x = 1; // note");
+    defer d.stop();
+    _ = d.registry.loadDir("syntax.d");
+    try std.testing.expect(d.registry.langs.items.len > 0);
+    const lang = d.registry.find("x.zig") orelse return error.TestUnexpectedResult;
+    d.session.current().setLanguage(lang);
+    try std.testing.expect(d.session.current().lang != null);
+    // Move the cursor off the first cell: the block cursor overpaints it.
+    d.session.current().cursor = d.session.current().buf.len();
+
+    var s = try render.Screen.init(std.testing.allocator, 40, 6);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+
+    const base = 1 * s.cols; // row 0 is the tab bar, row 1 the first line
+    const kw = s.back[base + 2].fg; // "const"
+    const plain = s.back[base + 8].fg; // "x"
+    const comment = s.back[base + 15].fg; // "// note"
+    try std.testing.expect(!std.meta.eql(kw, plain));
+    try std.testing.expect(!std.meta.eql(comment, plain));
+    try std.testing.expect(!std.meta.eql(kw, comment));
+}
+
+test "block comment state carries down the visible rows" {
+    var d = try Drive.start("/* one\ntwo */\nint x;");
+    defer d.stop();
+    _ = d.registry.loadDir("syntax.d");
+    d.session.current().setLanguage(d.registry.find("x.c"));
+
+    var s = try render.Screen.init(std.testing.allocator, 40, 6);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+
+    const in_comment = s.back[2 * s.cols + 2].fg; // "two */" on row 2
+    const keyword = s.back[3 * s.cols + 2].fg; // "int" on row 3
+    try std.testing.expect(!std.meta.eql(in_comment, keyword));
+}
+
+test "an edit that opens a block comment re-colours the lines below" {
+    var d = try Drive.start("int a;\nint b;");
+    defer d.stop();
+    _ = d.registry.loadDir("syntax.d");
+    const ed = d.session.current();
+    ed.setLanguage(d.registry.find("x.c"));
+
+    var s = try render.Screen.init(std.testing.allocator, 40, 6);
+    defer s.deinit();
+
+    draw(&s, &d.session, "", null, false);
+    const row = 2 * s.cols; // row 2 is the second line
+    const before = s.back[row + 2].fg;
+
+    ed.cursor = 0;
+    try ed.insertText("/*"); // everything after this is now a comment
+    draw(&s, &d.session, "", null, false);
+    const after = s.back[row + 2].fg;
+    try std.testing.expect(!std.meta.eql(before, after));
+}
+
 test "the tab bar shows every open document" {
     var d = try Drive.start("one");
     defer d.stop();
@@ -1568,7 +1681,7 @@ test "putStr decodes utf-8 and honours display width" {
 test "an open prompt is not hidden by the help panel" {
     var session = Session.init(std.testing.allocator);
     defer session.deinit();
-    try session.add(null, "x");
+    try session.add(null, "x", null);
     var s = try render.Screen.init(std.testing.allocator, 40, 8);
     defer s.deinit();
     const p: Prompt = .{ .kind = .find };
@@ -1581,7 +1694,7 @@ test "an open prompt is not hidden by the help panel" {
 test "a non-ascii file name renders as text in the status bar" {
     var session = Session.init(std.testing.allocator);
     defer session.deinit();
-    try session.add("caf\u{00e9}.txt", "x");
+    try session.add("caf\u{00e9}.txt", "x", null);
     var s = try render.Screen.init(std.testing.allocator, 40, 3);
     defer s.deinit();
     draw(&s, &session, "", null, false);
