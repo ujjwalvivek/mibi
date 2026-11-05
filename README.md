@@ -137,9 +137,9 @@ packaging.
   `\d \w \s \b`, `* + ?` with lazy variants). Backtracking is step-capped,
   and there are no backreferences or capture groups yet.
 - File tree sidebar (`Ctrl+B`): directories expand with Enter/`j`/`k` or a
-  click, files open in a tab. Icons are Nerd Font glyphs: install a patched
-  font (for example [Maple Mono NF](https://github.com/subframe7536/maple-font))
-  and pick it in your terminal. `icons = ascii` in `[editor]` falls back to
+  click, files open in a tab. Icons are Nerd Font glyphs: see
+  [assets/fonts/README.md](assets/fonts/README.md) for installing Maple Mono NF
+  and `tools/install-font.ps1`; `icons = ascii` in `[editor]` falls back to
   letter markers.
 - Mouse: click text to place the cursor, click a tab to switch to it, click
   picker rows (click again to accept), click the status-bar hint for help;

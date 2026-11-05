@@ -8,7 +8,7 @@
       "icon": "%LOCALAPPDATA%\\Microsoft\\Windows Terminal\\Fragments\\mibi\\mibi-128.png",
       "colorScheme": "mibi",
       "font": {
-        "face": "Cascadia Mono"
+        "face": "Maple Mono NF"
       },
       "startingDirectory": "%USERPROFILE%",
       "hidden": false
