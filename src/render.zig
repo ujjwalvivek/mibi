@@ -4,6 +4,8 @@
 
 const std = @import("std");
 const term = @import("term.zig");
+const utf8 = @import("text.zig");
+const width = @import("width.zig");
 
 pub const Color = union(enum) {
     default,
@@ -22,6 +24,8 @@ pub const Cell = struct {
     fg: Color = .default,
     bg: Color = .default,
     attr: Attr = .{},
+    /// Second cell of a wide character: never written, the wide glyph covers it.
+    cont: bool = false,
 };
 
 fn colorEql(a: Color, b: Color) bool {
@@ -36,7 +40,7 @@ fn colorEql(a: Color, b: Color) bool {
 }
 
 fn cellEql(a: Cell, b: Cell) bool {
-    return a.ch == b.ch and
+    return a.ch == b.ch and a.cont == b.cont and
         @as(u3, @bitCast(a.attr)) == @as(u3, @bitCast(b.attr)) and
         colorEql(a.fg, b.fg) and colorEql(a.bg, b.bg);
 }
@@ -97,16 +101,28 @@ pub const Screen = struct {
         self.back[@as(usize, y) * self.cols + x] = cell;
     }
 
+    /// Write a UTF-8 string into cells, advancing by display width. Control
+    /// bytes are dropped, wide characters take two cells (the second is marked
+    /// `cont`), and combining marks share the previous cell.
     pub fn putStr(self: *Screen, x: u16, y: u16, s: []const u8, cell: Cell) void {
-        var cx = x;
-        for (s) |byte| {
-            // Phase 1: treat input as bytes for ASCII; proper UTF-8 decode and
-            // width handling arrive with the width table.
+        var cx: usize = x;
+        var i: usize = 0;
+        while (i < s.len) {
+            const cp = utf8.nextCp(s, &i);
+            if (cp < 0x20) continue;
+            const w = width.cellWidth(cp);
+            if (w == 0) continue;
             if (cx >= self.cols) break;
             var c = cell;
-            c.ch = byte;
-            self.put(cx, y, c);
-            cx += 1;
+            c.ch = cp;
+            self.put(@intCast(cx), y, c);
+            if (w == 2 and cx + 1 < self.cols) {
+                var cont = cell;
+                cont.ch = ' ';
+                cont.cont = true;
+                self.put(@intCast(cx + 1), y, cont);
+            }
+            cx += w;
         }
     }
 
@@ -202,6 +218,12 @@ pub const Screen = struct {
             while (x < self.cols) : (x += 1) {
                 const i = row_start + x;
                 const b = self.back[i];
+
+                // Second half of a wide glyph: the wide cell already covers it.
+                if (b.cont) {
+                    self.front[i] = b;
+                    continue;
+                }
 
                 // Never touch the bottom-right cell: writing it can scroll the
                 // whole screen on some terminals.
