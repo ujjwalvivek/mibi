@@ -120,6 +120,8 @@ const Session = struct {
     /// the same regions the user sees.
     tab_spans: [MAX_TABS][2]u16 = undefined,
     tab_count: usize = 0,
+    /// Syntax registry, so UI paths (the tree) can pick a language.
+    registry: ?*syntax.Registry = null,
     /// File tree sidebar; null when closed.
     tree: ?tree_mod.Tree = null,
     tree_focus: bool = false,
@@ -267,6 +269,7 @@ fn run(init: std.process.Init.Minimal) !void {
 
     var session = Session.init(allocator);
     defer session.deinit();
+    session.registry = &registry;
     session.config = config;
     // No file named? Bring back the previous session (tabs, cursors, and the
     // text of anything that was not saved).
@@ -1590,7 +1593,8 @@ fn openTreeSelection(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
         return;
     };
     defer session.allocator.free(data);
-    session.add(path, data, null) catch |e| {
+    const lang = if (session.registry) |r| r.find(path) else null;
+    session.add(path, data, lang) catch |e| {
         setErrMsg(msg_buf, msg, "Cannot open", e);
         return;
     };
