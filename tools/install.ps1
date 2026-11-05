@@ -13,7 +13,12 @@ $exe = Join-Path $src 'mibi.exe'
 if (-not (Test-Path $exe)) { throw "No build found at $exe - run .\build.ps1 first" }
 
 New-Item -ItemType Directory -Force $Target | Out-Null
-Copy-Item $exe (Join-Path $Target 'mibi.exe') -Force
+try {
+    Copy-Item $exe (Join-Path $Target 'mibi.exe') -Force
+} catch {
+    # The installed copy is running: update everything else and tell the user.
+    if (-not $Quiet) { Write-Host "note: mibi is running, so the binary was not replaced. Close it and run this again." -ForegroundColor Yellow }
+}
 
 foreach ($dir in 'syntax.d', 'themes') {
     $from = Join-Path $src $dir
@@ -40,6 +45,13 @@ if errorlevel 1 (
 wt.exe -p mibi "%~dp0mibi.exe" %*
 "@
 Set-Content -Path (Join-Path $Target 'mibi.cmd') -Value $launcher -Encoding ASCII
+
+# The vector icon is handy for shortcuts and docs; nothing else is copied.
+$svg = @(
+    (Join-Path $src '..\share\mibi\icons\mibi.svg'),
+    (Join-Path $Root 'assets\mibi.svg')
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($svg) { Copy-Item $svg (Join-Path $Target 'mibi.svg') -Force }
 
 # Windows Terminal profile: fill in this machine's paths from the packaged
 # template (zig-out\share\mibi\windows-terminal) or the repo's assets.
