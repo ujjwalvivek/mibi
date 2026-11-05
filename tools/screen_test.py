@@ -191,7 +191,16 @@ class Screen:
 # --- driver ----------------------------------------------------------------
 
 class Mibi:
-    def __init__(self, args, cwd=ROOT, rows=ROWS, cols=COLS):
+    def __init__(self, args, cwd=ROOT, rows=ROWS, cols=COLS, keep_session=False):
+        # Each check starts from a clean slate: a leftover session file would
+        # restore tabs and dirty buffers from an earlier run.
+        if cwd and not keep_session:
+            for name in os.listdir(cwd) if os.path.isdir(cwd) else []:
+                if name.startswith("mibi-session"):
+                    try:
+                        os.remove(os.path.join(cwd, name))
+                    except OSError:
+                        pass
         from winpty import PtyProcess
         self.screen = Screen(rows, cols)
         self._lock = threading.Lock()
@@ -816,7 +825,7 @@ def session_restores_tabs_and_unsaved_edits(m, path):
     finally:
         proc.close()
 
-    again = Mibi([], cwd=work)
+    again = Mibi([], cwd=work, keep_session=True)
     try:
         assert again.wait_for("Xhello", timeout=5), "unsaved edit was not restored"
         again.wait_quiet()
