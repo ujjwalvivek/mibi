@@ -32,14 +32,21 @@ boundary; never print via `std.debug` or `std.Io.Threaded`.
 
 ## mibi binary size by phase, cross-compiled
 
-| Target | Phase 1 (skeleton) | Phase 2 (editing) |
-| --- | ---: | ---: |
-| `x86_64-linux-gnu` | 8,960 | 26,168 |
-| `aarch64-linux-gnu` | 8,816 | 24,752 |
-| `x86_64-macos` | 16,994 | 33,922 |
-| `aarch64-macos` | 50,304 | 69,392 |
-| `x86_64-windows-gnu` | 50,176 | 71,680 |
-| `x86_64-windows` (native) | 55,808 | 69,632 |
+| Target | Phase 1 (skeleton) | Phase 2 (editing) | Current (Phase 2 hardened + Phase 3 features) |
+| --- | ---: | ---: | ---: |
+| `x86_64-linux-gnu` | 8,960 | 26,168 | 59,552 |
+| `aarch64-linux-gnu` | 8,816 | 24,752 | 53,384 |
+| `x86_64-macos` | 16,994 | 33,922 | 66,854 |
+| `aarch64-macos` | 50,304 | 69,392 | 90,216 |
+| `x86_64-windows-gnu` | 50,176 | 71,680 | 107,520 |
+| `x86_64-windows` | 55,808 | 69,632 | 107,520 |
+
+The hardening pass (cached line index, UTF-8 `putStr`, file-safety guards,
+richer error reporting) cost ~1.5-2 KB per target. Current numbers are explicit
+`-Dtarget=` builds (baseline CPU); a native build with host CPU features is
+105,984 bytes on Windows. `tools/check-size.ps1` (`.\build.ps1 size`) rebuilds
+all six targets and fails if one exceeds its budget, so a size trap cannot
+return unnoticed.
 
 For comparison, kibi's Rust binary is ~437-446 KB uncompressed and ox's is
 ~5.3 MB. Zig's floor is roughly **1/40th** of Rust's, so the 1 MB ceiling is
