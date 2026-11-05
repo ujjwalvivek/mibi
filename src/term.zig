@@ -276,6 +276,14 @@ pub fn leaveAltScreen() !void {
     try os.writeAll(os.STDOUT, "\x1b[?7h\x1b[0m\x1b[?25h\x1b[?1049l");
 }
 
+/// Set the terminal/tab title (OSC 2). Terminals show this in their chrome,
+/// which is the closest a TUI gets to customising the window it lives in.
+pub fn setTitle(title: []const u8) !void {
+    var buf: [256]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "\x1b]2;{s}\x07", .{title}) catch return;
+    try os.writeAll(os.STDOUT, s);
+}
+
 /// Current terminal size in cells.
 pub fn size() Size {
     if (is_windows) {

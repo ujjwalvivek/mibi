@@ -7,6 +7,7 @@
 const std = @import("std");
 const os = @import("os.zig");
 const ini = @import("ini.zig");
+const keys = @import("keys.zig");
 const render = @import("render.zig");
 
 pub const Color = render.Color;
@@ -36,11 +37,17 @@ fn rgb(r: u8, g: u8, b: u8) Color {
     return .{ .rgb = .{ .r = r, .g = g, .b = b } };
 }
 
+/// Where the editor wants its window: hand off to Windows Terminal when
+/// started in a bare console, or stay put.
+pub const Terminal = enum { auto, wt, console };
+
 pub const Config = struct {
     theme: Theme = .{},
+    keys: keys.KeyMap = .{},
     tab_width: usize = 4,
     line_numbers: bool = true,
     syntax: bool = true,
+    terminal: Terminal = .auto,
 };
 
 fn hexVal(c: u8) ?u8 {
@@ -101,6 +108,10 @@ pub fn apply(config: *Config, text: []const u8) void {
             setThemeColor(&config.theme, entry.key, entry.value);
             continue;
         }
+        if (std.mem.eql(u8, entry.section, "keys")) {
+            if (keys.actionFromName(entry.value)) |action| config.keys.add(entry.key, action);
+            continue;
+        }
         if (std.mem.eql(u8, entry.key, "tab_width")) {
             const n = std.fmt.parseInt(usize, std.mem.trim(u8, entry.value, " \t"), 10) catch continue;
             config.tab_width = @min(@max(n, 1), 16);
@@ -108,6 +119,15 @@ pub fn apply(config: *Config, text: []const u8) void {
             if (parseBool(entry.value)) |b| config.line_numbers = b;
         } else if (std.mem.eql(u8, entry.key, "syntax")) {
             if (parseBool(entry.value)) |b| config.syntax = b;
+        } else if (std.mem.eql(u8, entry.key, "terminal")) {
+            const v = std.mem.trim(u8, entry.value, " \t");
+            if (std.mem.eql(u8, v, "wt")) {
+                config.terminal = .wt;
+            } else if (std.mem.eql(u8, v, "console")) {
+                config.terminal = .console;
+            } else if (std.mem.eql(u8, v, "auto")) {
+                config.terminal = .auto;
+            }
         }
     }
 }
@@ -184,6 +204,32 @@ test "tab width is clamped" {
     try std.testing.expectEqual(@as(usize, 1), config.tab_width);
     apply(&config, "tab_width = 99\n");
     try std.testing.expectEqual(@as(usize, 16), config.tab_width);
+}
+
+test "parses [keys] bindings and ignores unknown actions" {
+    var config = Config{};
+    apply(&config,
+        \\[keys]
+        \\ctrl+n = new_tab
+        \\F2 = save
+        \\ctrl+shift+left = move_word_left
+        \\ctrl+j = not_an_action
+    );
+    try std.testing.expectEqual(keys.Action.new_tab, config.keys.lookup("ctrl+n").?);
+    try std.testing.expectEqual(keys.Action.save, config.keys.lookup("f2").?);
+    try std.testing.expectEqual(keys.Action.move_word_left, config.keys.lookup("ctrl+shift+left").?);
+    try std.testing.expectEqual(@as(usize, 3), config.keys.count); // the bad one was skipped
+}
+
+test "parses the terminal hand-off setting" {
+    var config = Config{};
+    try std.testing.expectEqual(Terminal.auto, config.terminal);
+    apply(&config, "terminal = console\n");
+    try std.testing.expectEqual(Terminal.console, config.terminal);
+    apply(&config, "terminal = wt\n");
+    try std.testing.expectEqual(Terminal.wt, config.terminal);
+    apply(&config, "terminal = nonsense\n");
+    try std.testing.expectEqual(Terminal.wt, config.terminal); // unchanged
 }
 
 test "a missing config file keeps the defaults" {

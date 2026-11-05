@@ -55,6 +55,22 @@ status line, help panel and the syntax classes. Colours are `#rrggbb` or `#rgb`.
 Language definitions are separate: drop a `.ini` into `syntax.d/` (kibi's
 format, 52 languages ship with mibi) and it is picked up at startup.
 
+## Running in your terminal
+
+mibi is a TUI: the window belongs to the terminal emulator, so mibi cannot
+remove its chrome. It does make sure it runs *inside your* terminal:
+
+- Run `mibi <file>` from a terminal you already have open: it uses that window
+  and profile, and sets the tab title (`mibi - notes.txt`).
+- If Windows starts the binary in a bare console (double-click, or conhost is
+  the default terminal), mibi hands itself off to Windows Terminal with your
+  default profile and exits. `--in-terminal` marks the relaunched process;
+  `terminal = console` in `mibi.ini` turns the hand-off off.
+- `assets/windows-terminal/install.ps1` adds a proper Windows Terminal profile
+  (icon, colour scheme, font). See
+  [assets/windows-terminal/README.md](assets/windows-terminal/README.md) for
+  chrome-less settings (F11 focus mode, hiding tabs from the title bar).
+
 ## Icons
 
 `assets/` holds the app icon (`mibi.svg`, `mibi.ico` and PNGs from 16 to
@@ -102,6 +118,8 @@ packaging.
 - Clipboard register plus **OSC 52** so copy reaches the system clipboard.
 - Undo/redo with typing grouped into single steps.
 - Find (incremental), replace all, and go-to-line.
+- Configurable keybindings and a colour theme via `mibi.ini` (`[keys]` and
+  `[theme]`), with the whole palette and every action bindable.
 - Syntax highlighting from `syntax.d/*.ini` definitions (kibi's format): 52
   languages ship in the repo, and adding one is dropping in a file - no
   rebuild. Multi-line comments and strings carry state across lines.
@@ -123,6 +141,8 @@ src/editor.zig   cursor, selection, editing, undo/redo, clipboard, search, files
 src/buffer.zig   piece table + cached line index
 src/syntax.zig   data-driven highlighter (reads syntax.d/*.ini)
 src/ini.zig      small INI reader
+src/config.zig   mibi.ini: settings, theme, key bindings
+src/keys.zig     key names, actions and the key map
 src/render.zig   cell grid + ANSI diff
 src/term.zig     raw mode, alt screen, size, input
 src/os.zig       raw OS layer (no std.Io)
@@ -138,13 +158,13 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 
 | Target | Bytes |
 | --- | ---: |
-| aarch64-linux-gnu | 61,440 |
-| x86_64-linux-gnu | 67,608 |
-| x86_64-macos | 75,116 |
-| aarch64-macos | 107,720 |
-| x86_64-windows | 122,880 |
+| aarch64-linux-gnu | 71,120 |
+| x86_64-linux-gnu | 77,016 |
+| x86_64-macos | 83,332 |
+| aarch64-macos | 108,280 |
+| x86_64-windows | 134,144 |
 
 ## Not yet
 
-Config file, configurable keybindings, themes, mouse, splits, file tree,
-command palette, multi-cursor, macros, regex, embedded terminal.
+Mouse, splits, file tree, command palette, multi-cursor, macros, regex,
+embedded terminal.

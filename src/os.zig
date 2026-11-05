@@ -55,6 +55,19 @@ const win = struct {
     extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
     extern "kernel32" fn DeleteFileW(lpFileName: [*:0]const u16) callconv(.winapi) c_int;
     extern "kernel32" fn GetModuleFileNameW(hModule: ?HANDLE, lpFilename: [*]u16, nSize: DWORD) callconv(.winapi) DWORD;
+    extern "kernel32" fn GetEnvironmentVariableW(lpName: [*:0]const u16, lpBuffer: [*]u16, nSize: DWORD) callconv(.winapi) DWORD;
+    extern "kernel32" fn GetFileAttributesW(lpFileName: [*:0]const u16) callconv(.winapi) DWORD;
+
+    const shell32 = struct {
+        extern "shell32" fn ShellExecuteW(
+            hwnd: ?*anyopaque,
+            lpOperation: ?[*:0]const u16,
+            lpFile: ?[*:0]const u16,
+            lpParameters: ?[*:0]const u16,
+            lpDirectory: ?[*:0]const u16,
+            nShowCmd: c_int,
+        ) callconv(.winapi) ?*anyopaque;
+    };
 
     const FILETIME = extern struct { dwLowDateTime: u32, dwHighDateTime: u32 };
     const WIN32_FIND_DATAW = extern struct {
@@ -264,30 +277,81 @@ fn dirnameAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return allocator.dupe(u8, path[0..i]);
 }
 
-/// Directory holding the running executable (no trailing separator). Used to
-/// find `syntax.d` next to the binary.
-pub fn exeDirAlloc(allocator: std.mem.Allocator) ![]u8 {
+/// Full path of the running executable.
+pub fn exePathAlloc(allocator: std.mem.Allocator) ![]u8 {
     if (is_windows) {
         var buf: [4096]u16 = undefined;
         const n = win.GetModuleFileNameW(null, &buf, @intCast(buf.len));
         if (n == 0 or n >= buf.len) return error.ExePathFailed;
-        const utf8 = try std.unicode.utf16LeToUtf8Alloc(allocator, buf[0..n]);
-        defer allocator.free(utf8);
-        return dirnameAlloc(allocator, utf8);
+        return std.unicode.utf16LeToUtf8Alloc(allocator, buf[0..n]);
     }
     if (builtin.os.tag == .linux) {
         var buf: [4096]u8 = undefined;
         const n = std.c.readlink("/proc/self/exe", &buf, buf.len);
         if (n <= 0) return error.ExePathFailed;
-        return dirnameAlloc(allocator, buf[0..@intCast(n)]);
+        return allocator.dupe(u8, buf[0..@intCast(n)]);
     }
     if (builtin.os.tag == .macos) {
         var buf: [4096]u8 = undefined;
         var size: u32 = buf.len;
         if (macos._NSGetExecutablePath(&buf, &size) != 0) return error.ExePathFailed;
-        return dirnameAlloc(allocator, std.mem.sliceTo(&buf, 0));
+        return allocator.dupe(u8, std.mem.sliceTo(&buf, 0));
     }
     return error.ExePathFailed;
+}
+
+/// Directory holding the running executable (no trailing separator).
+pub fn exeDirAlloc(allocator: std.mem.Allocator) ![]u8 {
+    const path = try exePathAlloc(allocator);
+    defer allocator.free(path);
+    return dirnameAlloc(allocator, path);
+}
+
+/// Whether an environment variable exists. Used to detect Windows Terminal
+/// (it sets WT_SESSION in everything it hosts).
+pub fn hasEnv(name: []const u8) bool {
+    if (is_windows) {
+        const wname = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, name) catch return false;
+        defer std.heap.page_allocator.free(wname);
+        var buf: [4]u16 = undefined;
+        return win.GetEnvironmentVariableW(wname.ptr, &buf, buf.len) != 0;
+    }
+    return false;
+}
+
+/// True when the process was started by Windows Terminal (or on a platform
+/// where the launcher owns the window, so there is nothing to hand off).
+pub fn inWindowsTerminal() bool {
+    if (is_windows) return hasEnv("WT_SESSION");
+    return true;
+}
+
+/// Start `exe_path` in a new Windows Terminal window with the user's default
+/// profile, passing `extra_args` (quoted where needed). This is how a process
+/// started in a bare console hands itself off to the user's terminal.
+pub fn spawnInWindowsTerminal(exe_path: []const u8, extra_args: []const u8) !void {
+    if (is_windows) {
+        const allocator = std.heap.page_allocator;
+        var params = std.ArrayList(u8).empty;
+        defer params.deinit(allocator);
+        try params.append(allocator, '"');
+        try params.appendSlice(allocator, exe_path);
+        try params.append(allocator, '"');
+        if (extra_args.len > 0) {
+            try params.append(allocator, ' ');
+            try params.appendSlice(allocator, extra_args);
+        }
+        const w_params = try std.unicode.utf8ToUtf16LeAllocZ(allocator, params.items);
+        defer allocator.free(w_params);
+        const w_verb = try std.unicode.utf8ToUtf16LeAllocZ(allocator, "open");
+        defer allocator.free(w_verb);
+        const w_file = try std.unicode.utf8ToUtf16LeAllocZ(allocator, "wt.exe");
+        defer allocator.free(w_file);
+        const rc = win.shell32.ShellExecuteW(null, w_verb.ptr, w_file.ptr, w_params.ptr, null, 1);
+        if (@intFromPtr(rc) <= 32) return error.SpawnFailed;
+    } else {
+        return error.Unsupported;
+    }
 }
 
 /// Delete `path`. A file that is already gone is not an error.

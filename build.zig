@@ -37,17 +37,27 @@ pub fn build(b: *std.Build) void {
         .name = "mibi",
         .root_module = exe_mod,
     });
-    // Windows builds carry the app icon (assets/mibi.ico) as a resource.
+    // Windows builds carry the app icon (assets/mibi.ico) as a resource, and
+    // use ShellExecuteW to hand off to Windows Terminal.
     if (target.result.os.tag == .windows) {
         exe_mod.addWin32ResourceFile(.{ .file = b.path("assets/mibi.rc") });
+        exe_mod.linkSystemLibrary("shell32", .{});
     }
     b.installArtifact(exe);
 
-    // Icons for packaging: zig-out/share/mibi/icons.
+    // Packaging assets: icons under share/mibi/icons, the Windows Terminal
+    // profile under share/mibi/windows-terminal.
     b.installDirectory(.{
-        .source_dir = b.path("assets"),
+        .source_dir = b.path("assets/png"),
         .install_dir = .prefix,
-        .install_subdir = "share/mibi/icons",
+        .install_subdir = "share/mibi/icons/png",
+    });
+    b.installFile("assets/mibi.ico", "share/mibi/icons/mibi.ico");
+    b.installFile("assets/mibi.svg", "share/mibi/icons/mibi.svg");
+    b.installDirectory(.{
+        .source_dir = b.path("assets/windows-terminal"),
+        .install_dir = .prefix,
+        .install_subdir = "share/mibi/windows-terminal",
     });
 
     // Language definitions travel with the binary: `syntax.d` is looked up next

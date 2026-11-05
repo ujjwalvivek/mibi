@@ -40,6 +40,7 @@ class Screen:
         self.fg_grid = [[None] * cols for _ in range(rows)]
         self.r = self.c = 0
         self.fg = None
+        self.title = ""
         self._pending = ""
 
     def clear(self):
@@ -99,8 +100,10 @@ class Screen:
             j = i + 2
             while j < len(data):
                 if data[j] == "\x07":
+                    self._osc(data[i + 2:j])
                     return j + 1 - i
                 if data[j] == "\x1b" and j + 1 < len(data) and data[j + 1] == "\\":
+                    self._osc(data[i + 2:j])
                     return j + 2 - i
                 j += 1
             return 0
@@ -131,6 +134,11 @@ class Screen:
         elif final == "D":
             self.c = max(0, self.c - (p0 or 1))
         # SGR (m), private modes (h/l), window ops (t), DA (c): ignored
+
+    def _osc(self, body):
+        """Remember the window title (OSC 2)."""
+        if body.startswith("2;"):
+            self.title = body[2:]
 
     def _sgr(self, nums):
         """Track the foreground colour so tests can assert syntax colours."""
@@ -170,7 +178,7 @@ class Mibi:
         self.screen = Screen(rows, cols)
         self._lock = threading.Lock()
         self._eof = False
-        self.proc = PtyProcess.spawn([MIBI] + args, dimensions=(rows, cols),
+        self.proc = PtyProcess.spawn([MIBI, "--in-terminal"] + args, dimensions=(rows, cols),
                                      cwd=cwd)
         self._thread = threading.Thread(target=self._reader, daemon=True)
         self._thread.start()
@@ -279,6 +287,7 @@ def startup_renders_file(m, path):
     """Opening a file shows the tab bar, the gutter, the text and the status."""
     assert m.wait_for("hello"), "no text after startup"
     screen = m.screen_text()
+    assert "notes.txt" in m.screen.title, f"window title not set: {m.screen.title!r}"
     assert_in(screen, "notes.txt", "tab bar")
     assert_in(screen, "1 hello", "gutter + first line")
     assert_in(screen, "2 world", "second line")

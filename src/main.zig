@@ -19,6 +19,7 @@ const utf8 = @import("text.zig");
 const width = @import("width.zig");
 const syntax = @import("syntax.zig");
 const config_mod = @import("config.zig");
+const keys = @import("keys.zig");
 
 pub const version = "0.0.1";
 
@@ -171,7 +172,15 @@ fn run(init: std.process.Init.Minimal) !void {
     var arg_it = try init.args.iterateAllocator(allocator);
     defer arg_it.deinit();
     _ = arg_it.next();
-    const path: ?[]const u8 = arg_it.next();
+    var in_terminal = false;
+    var path: ?[]const u8 = null;
+    while (arg_it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--in-terminal")) {
+            in_terminal = true; // set by the hand-off below; do not recurse
+        } else if (path == null) {
+            path = arg;
+        }
+    }
 
     // `mibi --version` must work without a terminal.
     if (path) |p| {
@@ -184,6 +193,29 @@ fn run(init: std.process.Init.Minimal) !void {
     }
 
     if (!term.isTty()) return error.NotATerminal;
+
+    const exe_dir = os.exeDirAlloc(allocator) catch null;
+    defer if (exe_dir) |d| allocator.free(d);
+    const config = config_mod.load(allocator, exe_dir);
+
+    // A console app cannot choose its host window. When Windows started us in a
+    // bare console (double-click, or the default terminal is conhost), hand the
+    // session to Windows Terminal with the user's default profile and exit.
+    if (os.is_windows and !in_terminal and config.terminal != .console and !os.inWindowsTerminal()) {
+        if (os.exePathAlloc(allocator)) |exe| {
+            defer allocator.free(exe);
+            var args_buf = std.ArrayList(u8).empty;
+            defer args_buf.deinit(allocator);
+            args_buf.appendSlice(allocator, "--in-terminal") catch {};
+            if (path) |p| {
+                args_buf.append(allocator, ' ') catch {};
+                args_buf.append(allocator, '"') catch {};
+                args_buf.appendSlice(allocator, p) catch {};
+                args_buf.append(allocator, '"') catch {};
+            }
+            if (os.spawnInWindowsTerminal(exe, args_buf.items)) |_| return else |_| {}
+        } else |_| {}
+    }
 
     var initial: []const u8 = "";
     var initial_owned: ?[]u8 = null;
@@ -202,8 +234,6 @@ fn run(init: std.process.Init.Minimal) !void {
     // working directory (kibi's model: data files, not code).
     var registry = syntax.Registry.init(allocator);
     defer registry.deinit();
-    const exe_dir = os.exeDirAlloc(allocator) catch null;
-    defer if (exe_dir) |d| allocator.free(d);
     if (exe_dir) |dir| {
         var dir_buf: [1024]u8 = undefined;
         if (std.fmt.bufPrint(&dir_buf, "{s}/syntax.d", .{dir})) |sub_dir| {
@@ -214,7 +244,7 @@ fn run(init: std.process.Init.Minimal) !void {
 
     var session = Session.init(allocator);
     defer session.deinit();
-    session.config = config_mod.load(allocator, exe_dir);
+    session.config = config;
     try session.add(path, initial, registry.find(path));
     if (initial_owned) |d| allocator.free(d);
 
@@ -226,6 +256,10 @@ fn run(init: std.process.Init.Minimal) !void {
     const first = term.size();
     var screen = try render.Screen.init(allocator, first.cols, first.rows);
     defer screen.deinit();
+    // Paint every cell on the first frame: the diff renderer assumes the
+    // terminal starts blank, but a host that keeps old content around (or an
+    // alternate screen that was not cleared) would otherwise leak it through.
+    @memset(screen.front, render.Cell{ .ch = 0, .attr = .{ .bold = true, .underline = true, .reverse = true } });
 
     var input: [256]u8 = undefined;
     var msg_buf: [96]u8 = undefined;
@@ -236,6 +270,8 @@ fn run(init: std.process.Init.Minimal) !void {
     var zero_reads: usize = 0;
     var last_scroll_row: usize = std.math.maxInt(usize);
     var last_scroll_col: usize = std.math.maxInt(usize);
+    var last_title: [192]u8 = undefined;
+    var last_title_len: usize = 0;
     // Bytes held back when an escape sequence is split across reads.
     var pending: [1024]u8 = undefined;
     var pending_len: usize = 0;
@@ -262,6 +298,24 @@ fn run(init: std.process.Init.Minimal) !void {
                 last_scroll_row = ed.scroll_row;
                 last_scroll_col = ed.scroll_col;
                 @memset(screen.front, render.Cell{ .ch = 0, .attr = .{ .bold = true, .underline = true, .reverse = true } });
+            }
+        }
+
+        // Keep the terminal/tab title in step with the active document, so the
+        // host's chrome shows "mibi - notes.txt" instead of the executable path.
+        {
+            const ed = session.current();
+            const name = ed.path orelse "[No Name]";
+            var title_buf: [160]u8 = undefined;
+            const title = std.fmt.bufPrint(&title_buf, "mibi - {s}{s}", .{
+                name,
+                if (ed.dirty) " [+]" else "",
+            }) catch "mibi";
+            if (!std.mem.eql(u8, title, last_title[0..last_title_len])) {
+                const n = @min(title.len, last_title.len);
+                @memcpy(last_title[0..n], title[0..n]);
+                last_title_len = n;
+                term.setTitle(title) catch {};
             }
         }
 
@@ -336,13 +390,8 @@ fn processInput(
     var i: usize = 0;
     while (i < buf.len) {
         if (!running.*) break;
-        // A key may open or close a tab, so re-fetch the active editor.
-        const ed = session.current();
         const b = buf[i];
-        if (b == 0x1f) { // Ctrl+? / Ctrl+/ : toggle help
-            help.* = !help.*;
-            i += 1;
-        } else if (b == 0x1b) {
+        if (b == 0x1b) {
             if (i + 1 >= buf.len) return i; // incomplete: wait for more
             const k = buf[i + 1];
             if (k == '[') {
@@ -351,32 +400,21 @@ fn processInput(
                     if (buf[j] >= 0x40 and buf[j] <= 0x7E) break;
                 }
                 if (j >= buf.len) return i; // incomplete
-                if (buf[j] == '~' and std.mem.eql(u8, buf[i + 2 .. j], "11")) {
-                    help.* = !help.*; // F1
-                } else {
-                    applyCsi(session, buf[i + 2 .. j], buf[j], view_rows) catch |e| setMsg(msg_buf, msg, @errorName(e));
-                }
+                applyCsi(session, buf[i + 2 .. j], buf[j], view_rows, running, prompt, msg_buf, msg, help, true) catch |e| setMsg(msg_buf, msg, @errorName(e));
                 i = j + 1;
             } else if (k == 'O') {
                 if (i + 2 >= buf.len) return i;
                 switch (buf[i + 2]) {
-                    'A' => ed.moveUp(false),
-                    'B' => ed.moveDown(false),
-                    'C' => ed.moveRight(false),
-                    'D' => ed.moveLeft(false),
-                    'H' => ed.moveHome(false),
-                    'F' => ed.moveEnd(false),
-                    'P' => help.* = !help.*, // F1
-                    'R' => ed.findNext(), // F3
+                    'A', 'B', 'C', 'D', 'H', 'F', 'R', 'P' => |f| applyCsi(session, "", f, view_rows, running, prompt, msg_buf, msg, help, true) catch |e| setMsg(msg_buf, msg, @errorName(e)),
                     else => {},
                 }
                 i += 3;
             } else {
-                ed.clearSelection(); // lone Esc
+                applyByte(session, 0x1b, running, prompt, msg_buf, msg, help, view_rows, true) catch |e| setMsg(msg_buf, msg, @errorName(e)); // lone Esc
                 i += 1;
             }
         } else {
-            applyByte(session, b, running, prompt, msg_buf, msg) catch |e| setMsg(msg_buf, msg, @errorName(e));
+            applyByte(session, b, running, prompt, msg_buf, msg, help, view_rows, true) catch |e| setMsg(msg_buf, msg, @errorName(e));
             i += 1;
         }
     }
@@ -388,7 +426,156 @@ fn viewRows(rows: u16) usize {
     return if (rows > 2) @as(usize, rows) - 2 else 0;
 }
 
-fn applyByte(session: *Session, b: u8, running: *bool, prompt: *?Prompt, msg_buf: []u8, msg: *[]const u8) !void {
+/// The default key for an action: byte for editing commands, CSI for
+/// movements. The key map translates user bindings into these.
+const DefaultKey = union(enum) {
+    byte: u8,
+    csi: struct { params: []const u8, final: u8 },
+};
+
+fn moveCsi(final: u8, shift: bool) DefaultKey {
+    return .{ .csi = .{ .params = if (shift) "1;2" else "", .final = final } };
+}
+
+fn defaultKeyFor(action: keys.Action, shift: bool) DefaultKey {
+    return switch (action) {
+        .save => .{ .byte = 0x13 },
+        .open => .{ .byte = 0x0f },
+        .quit => .{ .byte = 0x11 },
+        .new_tab => .{ .byte = 0x14 },
+        .close_tab => .{ .byte = 0x17 },
+        .select_all => .{ .byte = 0x01 },
+        .copy => .{ .byte = 0x03 },
+        .cut => .{ .byte = 0x18 },
+        .paste => .{ .byte = 0x16 },
+        .find => .{ .byte = 0x06 },
+        .replace => .{ .byte = 0x12 },
+        .goto => .{ .byte = 0x07 },
+        .duplicate_line => .{ .byte = 0x04 },
+        .undo => .{ .byte = 0x1a },
+        .redo => .{ .byte = 0x19 },
+        .insert_newline => .{ .byte = 0x0d },
+        .insert_tab => .{ .byte = 0x09 },
+        .backspace => .{ .byte = 0x7f },
+        .help => .{ .byte = 0x1f },
+        .clear_selection => .{ .byte = 0x1b },
+        .move_up => moveCsi('A', shift),
+        .move_down => moveCsi('B', shift),
+        .move_left => moveCsi('D', shift),
+        .move_right => moveCsi('C', shift),
+        .move_word_left => .{ .csi = .{ .params = if (shift) "1;6" else "1;5", .final = 'D' } },
+        .move_word_right => .{ .csi = .{ .params = if (shift) "1;6" else "1;5", .final = 'C' } },
+        .move_home => moveCsi('H', shift),
+        .move_end => moveCsi('F', shift),
+        .page_up => .{ .csi = .{ .params = if (shift) "5;2" else "5", .final = '~' } },
+        .page_down => .{ .csi = .{ .params = if (shift) "6;2" else "6", .final = '~' } },
+        .delete_forward => .{ .csi = .{ .params = "3", .final = '~' } },
+        .find_next => moveCsi('R', false),
+        .find_prev => moveCsi('R', true),
+        .next_tab => .{ .csi = .{ .params = "6;5", .final = '~' } },
+        .prev_tab => .{ .csi = .{ .params = "5;5", .final = '~' } },
+    };
+}
+
+const ctrl_names = [_][]const u8{
+    "ctrl+a", "ctrl+b", "ctrl+c", "ctrl+d", "ctrl+e", "ctrl+f", "ctrl+g",
+    "ctrl+h", "ctrl+i", "ctrl+j", "ctrl+k", "ctrl+l", "ctrl+m", "ctrl+n",
+    "ctrl+o", "ctrl+p", "ctrl+q", "ctrl+r", "ctrl+s", "ctrl+t", "ctrl+u",
+    "ctrl+v", "ctrl+w", "ctrl+x", "ctrl+y", "ctrl+z",
+};
+
+/// Canonical name of a single-byte key, or null for text input.
+fn keyNameByte(b: u8) ?[]const u8 {
+    return switch (b) {
+        0x01...0x07 => ctrl_names[b - 1],
+        0x08 => "backspace",
+        0x09 => "tab",
+        0x0a, 0x0d => "enter",
+        0x0b, 0x0c => ctrl_names[b - 1],
+        0x0e...0x1a => ctrl_names[b - 1],
+        0x1b => "esc",
+        0x1f => "ctrl+?",
+        0x7f => "backspace",
+        else => null,
+    };
+}
+
+/// Canonical name of a CSI sequence (e.g. "shift+up"), or null.
+fn csiKeyName(buf: []u8, params_bytes: []const u8, final: u8) ?[]const u8 {
+    var params: [4]u16 = .{ 0, 0, 0, 0 };
+    var np: usize = 0;
+    for (params_bytes) |c| {
+        if (c >= '0' and c <= '9') {
+            params[np] = params[np] * 10 + (c - '0');
+        } else if (c == ';') {
+            if (np < params.len - 1) np += 1;
+        }
+    }
+    const p0 = params[0];
+    const m: u16 = if (np >= 1 and params[1] != 0) params[1] else 1;
+    const bits = m - 1;
+    const shift = (bits & 1) != 0;
+    const ctrl = (bits & 4) != 0;
+    const base: []const u8 = switch (final) {
+        'A' => "up",
+        'B' => "down",
+        'C' => "right",
+        'D' => "left",
+        'H' => "home",
+        'F' => "end",
+        'R' => "f3",
+        'P' => "f1",
+        '~' => switch (p0) {
+            1, 7 => "home",
+            4, 8 => "end",
+            3 => "delete",
+            2 => "insert",
+            5 => "pgup",
+            6 => "pgdn",
+            11 => "f1",
+            else => return null,
+        },
+        else => return null,
+    };
+    var n: usize = 0;
+    if (ctrl) {
+        @memcpy(buf[n..][0..5], "ctrl+");
+        n += 5;
+    }
+    if (shift) {
+        @memcpy(buf[n..][0..6], "shift+");
+        n += 6;
+    }
+    for (base) |c| {
+        buf[n] = c;
+        n += 1;
+    }
+    return buf[0..n];
+}
+
+fn applyByte(
+    session: *Session,
+    b: u8,
+    running: *bool,
+    prompt: *?Prompt,
+    msg_buf: []u8,
+    msg: *[]const u8,
+    help: *bool,
+    view_rows: usize,
+    remap: bool,
+) anyerror!void {
+    if (remap) {
+        if (keyNameByte(b)) |name| {
+            if (session.config.keys.lookup(name)) |action| {
+                const shift = std.mem.indexOf(u8, name, "shift+") != null;
+                switch (defaultKeyFor(action, shift)) {
+                    .byte => |target| if (target != b) return applyByte(session, target, running, prompt, msg_buf, msg, help, view_rows, false),
+                    .csi => |c| return applyCsi(session, c.params, c.final, view_rows, running, prompt, msg_buf, msg, help, false),
+                }
+                return;
+            }
+        }
+    }
     const ed = session.current();
     if (b == 0x13) { // Ctrl+S: save, or ask for a name
         if (ed.path == null) {
@@ -442,6 +629,10 @@ fn applyByte(session: *Session, b: u8, running: *bool, prompt: *?Prompt, msg_buf
         try ed.insertText("    ");
     } else if (b == 0x7f or b == 0x08) {
         try ed.backspace();
+    } else if (b == 0x1f) {
+        help.* = !help.*;
+    } else if (b == 0x1b) {
+        ed.clearSelection();
     } else if (b >= 0x20) {
         const one = [1]u8{b};
         try ed.insertText(&one);
@@ -633,7 +824,30 @@ fn executePrompt(
 }
 
 /// Apply a CSI sequence given its parameter bytes and final byte.
-fn applyCsi(session: *Session, params_bytes: []const u8, final: u8, view_rows: usize) !void {
+fn applyCsi(
+    session: *Session,
+    params_bytes: []const u8,
+    final: u8,
+    view_rows: usize,
+    running: *bool,
+    prompt: *?Prompt,
+    msg_buf: []u8,
+    msg: *[]const u8,
+    help: *bool,
+    remap: bool,
+) anyerror!void {
+    if (remap) {
+        var name_buf: [32]u8 = undefined;
+        if (csiKeyName(&name_buf, params_bytes, final)) |name| {
+            if (session.config.keys.lookup(name)) |action| {
+                const shift = std.mem.indexOf(u8, name, "shift+") != null;
+                switch (defaultKeyFor(action, shift)) {
+                    .byte => |target| return applyByte(session, target, running, prompt, msg_buf, msg, help, view_rows, false),
+                    .csi => |c| return applyCsi(session, c.params, c.final, view_rows, running, prompt, msg_buf, msg, help, false),
+                }
+            }
+        }
+    }
     const ed = session.current();
     var params: [4]u16 = .{ 0, 0, 0, 0 };
     var np: usize = 0;
@@ -657,10 +871,12 @@ fn applyCsi(session: *Session, params_bytes: []const u8, final: u8, view_rows: u
         'H' => ed.moveHome(shift),
         'F' => ed.moveEnd(shift),
         'R' => if (shift) ed.findPrev() else ed.findNext(),
+        'P' => help.* = !help.*, // F1
         '~' => switch (p0) {
             1, 7 => ed.moveHome(shift),
             4, 8 => ed.moveEnd(shift),
             3 => try ed.deleteForward(),
+            11 => help.* = !help.*, // F1
             5 => if (ctrl) session.cycle(-1) else ed.movePage(-1, view_rows, shift),
             6 => if (ctrl) session.cycle(1) else ed.movePage(1, view_rows, shift),
             else => {},
@@ -1618,6 +1834,44 @@ test "the config tab width drives the cursor column" {
     try std.testing.expectEqual(@as(usize, 2), d.session.current().cursorDisplayCol());
     d.session.current().tab_width = 8;
     try std.testing.expectEqual(@as(usize, 8), d.session.current().cursorDisplayCol());
+}
+
+test "a config binding reaches the editor" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    config_mod.apply(&d.session.config,
+        \\[keys]
+        \\ctrl+n = new_tab
+    );
+    try d.send("\x0e"); // Ctrl+N is now new_tab
+    try std.testing.expectEqual(@as(usize, 2), d.session.count());
+}
+
+test "a byte key can trigger a movement action" {
+    var d = try Drive.start("a\nb\nc");
+    defer d.stop();
+    d.session.config.keys.add("ctrl+u", .move_down);
+    try d.send("\x15"); // Ctrl+U -> move_down
+    try std.testing.expectEqual(@as(usize, 1), d.session.current().rowCol().row);
+}
+
+test "a function key can trigger a byte action" {
+    var d = try Drive.start("x");
+    defer d.stop();
+    d.session.config.keys.add("f1", .save);
+    try d.send("\x1bOP"); // F1 -> save (unnamed buffer asks for a name)
+    try std.testing.expect(d.prompt != null);
+    try std.testing.expectEqual(PromptKind.save_as, d.prompt.?.kind);
+}
+
+test "a binding overrides the default action" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    d.session.config.keys.add("ctrl+t", .save); // was new_tab
+    try d.send("\x14");
+    try std.testing.expectEqual(@as(usize, 1), d.session.count());
+    try std.testing.expect(d.prompt != null);
+    try std.testing.expectEqual(PromptKind.save_as, d.prompt.?.kind);
 }
 
 test "the tab bar shows every open document" {
