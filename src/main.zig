@@ -271,14 +271,24 @@ fn run(init: std.process.Init.Minimal) !void {
     defer session.deinit();
     session.registry = &registry;
     session.config = config;
-    // No file named? Bring back the previous session (tabs, cursors, and the
-    // text of anything that was not saved).
-    if (path == null) {
-        if (!loadSession(allocator, exe_dir, &registry, &session)) {
-            try session.add(null, "", null);
+    // Always bring back the previous session (tabs, cursors and the text of
+    // anything that was not saved); a file named on the command line is added
+    // to it as a tab instead of replacing it.
+    const restored = loadSession(allocator, exe_dir, &registry, &session);
+    if (path) |p| {
+        var already = false;
+        for (session.docs.items, 0..) |doc, i| {
+            if (doc.path) |doc_path| {
+                if (std.mem.eql(u8, doc_path, p)) {
+                    session.active = i;
+                    already = true;
+                    break;
+                }
+            }
         }
-    } else {
-        try session.add(path, initial, registry.find(path));
+        if (!already) try session.add(p, initial, registry.find(p));
+    } else if (!restored) {
+        try session.add(null, "", null);
     }
     if (initial_owned) |d| allocator.free(d);
 
