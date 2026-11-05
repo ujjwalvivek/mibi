@@ -46,9 +46,22 @@ pub const Config = struct {
     /// Name of a theme from `themes/<name>.ini` (empty = built-in default).
     theme_name: [32]u8 = [_]u8{0} ** 32,
     theme_name_len: usize = 0,
+    /// The `mibi.ini` that was loaded (empty when the defaults were used).
+    source: [1024]u8 = [_]u8{0} ** 1024,
+    source_len: usize = 0,
 
     pub fn themeName(self: *const Config) []const u8 {
         return self.theme_name[0..self.theme_name_len];
+    }
+
+    pub fn sourcePath(self: *const Config) []const u8 {
+        return self.source[0..self.source_len];
+    }
+
+    pub fn setSource(self: *Config, path: []const u8) void {
+        const n = @min(path.len, self.source.len);
+        @memcpy(self.source[0..n], path[0..n]);
+        self.source_len = n;
     }
 };
 
@@ -139,10 +152,16 @@ pub fn load(allocator: std.mem.Allocator, exe_dir: ?[]const u8) Config {
     // The working directory wins: a project's mibi.ini overrides the one that
     // ships next to the binary.
     const text: ?[]u8 = blk: {
-        if (readFile(allocator, "mibi.ini")) |t| break :blk t;
+        if (readFile(allocator, "mibi.ini")) |t| {
+            config.setSource("mibi.ini");
+            break :blk t;
+        }
         if (exe_dir) |dir| {
             if (std.fmt.bufPrint(&path_buf, "{s}/mibi.ini", .{dir})) |path| {
-                if (readFile(allocator, path)) |t| break :blk t;
+                if (readFile(allocator, path)) |t| {
+                    config.setSource(path);
+                    break :blk t;
+                }
             } else |_| {}
         }
         break :blk null;
@@ -197,6 +216,82 @@ pub fn loadTheme(allocator: std.mem.Allocator, exe_dir: ?[]const u8, name: []con
         } else |_| {}
     }
     return null;
+}
+
+/// Persist a theme choice in the config file: replace `theme = ...` inside
+/// `[editor]`, add it to that section, or append a new section. Everything else
+/// in the file is preserved verbatim.
+pub fn saveTheme(allocator: std.mem.Allocator, config: *Config, name: []const u8) !void {
+    const path = if (config.source_len > 0) config.sourcePath() else "mibi.ini";
+    saveThemeTo(allocator, path, name) catch {
+        // The loaded file may be read-only (an install directory): fall back to
+        // a config in the working directory, which takes precedence anyway.
+        if (std.mem.eql(u8, path, "mibi.ini")) return error.SaveFailed;
+        try saveThemeTo(allocator, "mibi.ini", name);
+        config.setSource("mibi.ini");
+        return;
+    };
+    config.setSource(path);
+}
+
+fn saveThemeTo(allocator: std.mem.Allocator, path: []const u8, name: []const u8) !void {
+    const existing: ?[]u8 = os.readFileAlloc(allocator, path, 1024 * 1024) catch null;
+    defer if (existing) |e| allocator.free(e);
+    const text = existing orelse "";
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+
+    if (text.len == 0) {
+        try out.appendSlice(allocator, "[editor]\ntheme = ");
+        try out.appendSlice(allocator, name);
+        try out.append(allocator, '\n');
+    } else {
+        var in_editor = false;
+        var wrote = false;
+        var saw_editor = false;
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (trimmed.len > 0 and trimmed[0] == '[') {
+                if (in_editor and !wrote) {
+                    try appendThemeLine(allocator, &out, name);
+                    wrote = true;
+                }
+                in_editor = std.mem.eql(u8, trimmed, "[editor]");
+                if (in_editor) saw_editor = true;
+                try out.appendSlice(allocator, line);
+                try out.append(allocator, '\n');
+                continue;
+            }
+            if (in_editor and isThemeKey(trimmed)) {
+                try appendThemeLine(allocator, &out, name);
+                wrote = true;
+                continue;
+            }
+            try out.appendSlice(allocator, line);
+            try out.append(allocator, '\n');
+        }
+        if (in_editor and !wrote) try appendThemeLine(allocator, &out, name);
+        if (!saw_editor) {
+            try out.appendSlice(allocator, "\n[editor]\ntheme = ");
+            try out.appendSlice(allocator, name);
+            try out.append(allocator, '\n');
+        }
+    }
+    try os.writeFile(path, out.items);
+}
+
+fn appendThemeLine(allocator: std.mem.Allocator, out: *std.ArrayList(u8), name: []const u8) !void {
+    try out.appendSlice(allocator, "theme = ");
+    try out.appendSlice(allocator, name);
+    try out.append(allocator, '\n');
+}
+
+fn isThemeKey(line: []const u8) bool {
+    if (!std.mem.startsWith(u8, line, "theme")) return false;
+    const rest = std.mem.trimStart(u8, line["theme".len..], " \t");
+    return rest.len > 0 and rest[0] == '=';
 }
 
 fn loadThemeFile(allocator: std.mem.Allocator, path: []const u8, theme: *Theme) bool {
@@ -273,6 +368,46 @@ test "parses [keys] bindings and ignores unknown actions" {
     try std.testing.expectEqual(keys.Action.save, config.keys.lookup("f2").?);
     try std.testing.expectEqual(keys.Action.move_word_left, config.keys.lookup("ctrl+shift+left").?);
     try std.testing.expectEqual(@as(usize, 3), config.keys.count); // the bad one was skipped
+}
+
+test "saveTheme replaces, adds and preserves" {
+    var path_buf: [256]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "experiments/out/screens/mibi-save-test.ini", .{}) catch unreachable;
+
+    // Existing theme line is replaced, other settings stay.
+    try os.writeFile(path, "[editor]\ntab_width = 2\ntheme = nord\nsyntax = false\n");
+    var config = Config{};
+    config.setSource(path);
+    try saveTheme(std.testing.allocator, &config, "dracula");
+    const after = try os.readFileAlloc(std.testing.allocator, path, 4096);
+    defer std.testing.allocator.free(after);
+    try std.testing.expect(std.mem.indexOf(u8, after, "theme = dracula") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after, "tab_width = 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after, "syntax = false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after, "nord") == null);
+
+    // No theme line: it is added inside [editor].
+    try os.writeFile(path, "[editor]\ntab_width = 8\n");
+    try saveTheme(std.testing.allocator, &config, "tokyonight");
+    const added = try os.readFileAlloc(std.testing.allocator, path, 4096);
+    defer std.testing.allocator.free(added);
+    try std.testing.expect(std.mem.indexOf(u8, added, "theme = tokyonight") != null);
+    try std.testing.expect(std.mem.indexOf(u8, added, "tab_width = 8") != null);
+
+    // No [editor] section at all: one is appended.
+    try os.writeFile(path, "[theme]\ntext = #ffffff\n");
+    try saveTheme(std.testing.allocator, &config, "nord");
+    const appended = try os.readFileAlloc(std.testing.allocator, path, 4096);
+    defer std.testing.allocator.free(appended);
+    try std.testing.expect(std.mem.indexOf(u8, appended, "theme = nord") != null);
+    try std.testing.expect(std.mem.indexOf(u8, appended, "text = #ffffff") != null);
+
+    // A missing file is created.
+    os.deleteFile(path) catch {};
+    try saveTheme(std.testing.allocator, &config, "kanagawa");
+    const created = try os.readFileAlloc(std.testing.allocator, path, 4096);
+    defer std.testing.allocator.free(created);
+    try std.testing.expect(std.mem.indexOf(u8, created, "theme = kanagawa") != null);
 }
 
 test "parses the theme name" {

@@ -44,6 +44,7 @@ pub const Action = enum {
     move_end,
     page_up,
     page_down,
+    theme_picker,
 };
 
 pub fn actionFromName(name: []const u8) ?Action {
@@ -78,6 +79,16 @@ pub const KeyMap = struct {
         var i: usize = 0;
         while (i < self.count) : (i += 1) {
             if (std.mem.eql(u8, self.keys[i][0..self.lens[i]], name)) return self.actions[i];
+        }
+        return null;
+    }
+
+    /// The key bound to `action`, if the user rebound it (the help panel shows
+    /// this instead of the built-in key).
+    pub fn keyFor(self: *const KeyMap, action: Action) ?[]const u8 {
+        var i: usize = 0;
+        while (i < self.count) : (i += 1) {
+            if (self.actions[i] == action) return self.keys[i][0..self.lens[i]];
         }
         return null;
     }

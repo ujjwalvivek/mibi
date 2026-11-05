@@ -38,6 +38,7 @@ class Screen:
         self.rows, self.cols = rows, cols
         self.grid = [[" "] * cols for _ in range(rows)]
         self.fg_grid = [[None] * cols for _ in range(rows)]
+        self.bg_grid = [[None] * cols for _ in range(rows)]
         self.r = self.c = 0
         self.fg = None
         self.title = ""
@@ -46,6 +47,7 @@ class Screen:
     def clear(self):
         self.grid = [[" "] * self.cols for _ in range(self.rows)]
         self.fg_grid = [[None] * self.cols for _ in range(self.rows)]
+        self.bg_grid = [[None] * self.cols for _ in range(self.rows)]
         self.r = self.c = 0
 
     def _put(self, ch):
@@ -55,6 +57,7 @@ class Screen:
         if self.c < self.cols:
             self.grid[self.r][self.c] = ch
             self.fg_grid[self.r][self.c] = self.fg
+        self.bg_grid[self.r][self.c] = self.bg
         if w == 2 and self.c + 1 < self.cols:
             self.grid[self.r][self.c + 1] = ""  # continuation of a wide glyph
         self.c += w
@@ -141,16 +144,30 @@ class Screen:
             self.title = body[2:]
 
     def _sgr(self, nums):
-        """Track the foreground colour so tests can assert syntax colours."""
+        """Track foreground and background true colours for the tests."""
         i = 0
         while i < len(nums):
             n = nums[i]
-            if n in (0, 39):
+            if n == 0:
                 self.fg = None
-            elif n == 38 and i + 4 < len(nums) and nums[i + 1] == 2:
-                self.fg = (nums[i + 2], nums[i + 3], nums[i + 4])
+                self.bg = None
+            elif n == 39:
+                self.fg = None
+            elif n == 49:
+                self.bg = None
+            elif n in (38, 48) and i + 4 < len(nums) and nums[i + 1] == 2:
+                colour = (nums[i + 2], nums[i + 3], nums[i + 4])
+                if n == 38:
+                    self.fg = colour
+                else:
+                    self.bg = colour
                 i += 4
             i += 1
+
+    def bg_at(self, row, col):
+        if 0 <= row < self.rows and 0 <= col < self.cols:
+            return self.bg_grid[row][col]
+        return None
 
     def fg_at(self, row, col):
         if 0 <= row < self.rows and 0 <= col < self.cols:
@@ -315,8 +332,9 @@ def help_panel_toggles(m, path):
     m.send("\x1f")
     assert m.wait_for("mibi controls"), "help panel did not open"
     screen = m.screen_text()
-    assert_in(screen, "Ctrl+Q                 quit (asks if unsaved)")
-    assert_in(screen, "Ctrl+F                 find")
+    assert_in(screen, "quit (asks if unsaved)"), "quit line missing"
+    assert_in(screen, "ctrl+q"), "quit key missing"
+    assert_in(screen, "find / next / previous"), "find line missing"
     m.shot("03-help")
     m.send("\x1f")
     m.wait_quiet()
@@ -517,6 +535,90 @@ def f2_theme_picker_applies_a_theme(m, path):
         after = proc.screen.fg_at(1, 2)
         assert after != before, f"theme preview did not change colours ({before} -> {after})"
         proc.shot("15-theme-picker")
+    finally:
+        proc.close()
+
+
+@check
+def help_reflects_rebound_keys(m, path):
+    """The help panel shows the user's binding instead of the built-in key."""
+    work = os.path.join(SHOT_DIR, "work-help-keys")
+    os.makedirs(work, exist_ok=True)
+    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
+        f.write("[keys]\nctrl+n = save\n")
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello")
+
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.send("\x1f")  # help
+        assert proc.wait_for("mibi controls"), "help panel did not open"
+        lines = proc.screen_text().splitlines()
+        save_line = next(l for l in lines if "save" in l and "asks" not in l)
+        assert "ctrl+n" in save_line, f"rebinding not shown: {save_line!r}"
+        proc.shot("16-help-rebound")
+    finally:
+        proc.close()
+
+
+@check
+def theme_choice_persists(m, path):
+    """A theme picked with F2 is written to mibi.ini and used on restart."""
+    work = os.path.join(SHOT_DIR, "work-theme-save")
+    os.makedirs(work, exist_ok=True)
+    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
+        f.write("[editor]\ntab_width = 2\n")
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello")
+
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        proc.send("\x1bOQ")  # F2
+        assert proc.wait_for("Theme"), "theme picker did not open"
+        proc.send("\x1b[B")  # one down -> catppuccin-frappe
+        proc.send("\r")
+        proc.wait_quiet()
+    finally:
+        proc.close()
+
+    with open(os.path.join(work, "mibi.ini"), encoding="utf-8") as f:
+        saved = f.read()
+    assert "theme = " in saved, f"theme not persisted: {saved!r}"
+    assert "tab_width = 2" in saved, f"other settings lost: {saved!r}"
+
+    again = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert again.wait_for("hello"), "restart failed"
+        again.wait_quiet()
+        fg = again.screen.fg_at(1, 2)
+        assert fg == (198, 208, 245), f"saved theme not applied on restart: {fg}"
+    finally:
+        again.close()
+
+
+@check
+def theme_background_covers_the_text_area(m, path):
+    """Every text-area cell carries the theme background, not the terminal's."""
+    work = os.path.join(SHOT_DIR, "work-bg")
+    os.makedirs(work, exist_ok=True)
+    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
+        f.write("[editor]\ntheme = flexoki-dark\n")
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("one\ntwo\n")
+
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("one"), "editor did not start"
+        proc.wait_quiet()
+        theme_bg = (16, 15, 15)  # flexoki-dark #100f0f
+        for row in range(1, proc.screen.rows - 1):
+            for col in range(proc.screen.cols):
+                bg = proc.screen.bg_at(row, col)
+                assert bg in (None, theme_bg), f"row {row} col {col} has bg {bg}"
+        proc.shot("17-background")
     finally:
         proc.close()
 

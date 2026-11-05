@@ -113,8 +113,8 @@ packaging.
 | `Ctrl+O`                  | fuzzy file picker: type to filter, Enter opens in a new tab |
 | `Ctrl+T` / `Ctrl+W`       | new tab / close tab (closing the last one quits)      |
 | `Ctrl+PgUp` / `Ctrl+PgDn` | previous / next tab                                   |
-| `F2`                      | theme picker (arrows preview live, Enter keeps, Esc restores) |
-| `Ctrl+?` / `F1`           | help panel (hinted at the right edge of the status bar) |
+| `F2`                      | theme picker (arrows preview live, Enter keeps and saves, Esc restores) |
+| `Ctrl+?` / `F1`           | help panel; shows your bindings, hinted at the status bar's right edge |
 | `Ctrl+Q`                  | quit (asks first if any tab has unsaved edits)        |
 
 ## Features
@@ -129,7 +129,10 @@ packaging.
 - Undo/redo with typing grouped into single steps.
 - Find (incremental), replace all, and go-to-line.
 - Configurable keybindings and a colour theme via `mibi.ini` (`[keys]` and
-  `[theme]`), with the whole palette and every action bindable.
+  `[theme]`), with the whole palette and every action bindable. The help
+  panel renders the keys you actually bound.
+- Picking a theme with `F2` writes `theme = <name>` into the `mibi.ini` that
+  was loaded, so the next start comes up in it.
 - Fuzzy pickers for opening files (`Ctrl+O`) and switching themes (`F2`), with a
   live preview while the theme selection moves.
 - Syntax highlighting from `syntax.d/*.ini` definitions (kibi's format): 52
@@ -170,11 +173,11 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu |  77,552 |
-| x86_64-linux-gnu  |  84,616 |
-| x86_64-macos      |  91,524 |
-| aarch64-macos     | 126,008 |
-| x86_64-windows    | 141,312 |
+| aarch64-linux-gnu |  80,736 |
+| x86_64-linux-gnu  |  88,344 |
+| x86_64-macos      |  95,636 |
+| aarch64-macos     | 126,216 |
+| x86_64-windows    | 144,896 |
 
 ## Not yet
 

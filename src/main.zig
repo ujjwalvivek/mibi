@@ -26,29 +26,33 @@ pub const version = "0.0.1";
 
 const MAX_FILE = 64 * 1024 * 1024;
 
-const help_lines = [_][]const u8{
-    "mibi controls",
-    "  arrows / Ctrl+arrows   move / by word",
-    "  Home / End             line start / end",
-    "  PgUp / PgDn            move a page",
-    "  Shift + movement       select",
-    "  Ctrl+A / Esc           select all / clear",
-    "  Ctrl+C / Ctrl+X        copy / cut",
-    "  Ctrl+V                 paste",
-    "  Ctrl+D                 duplicate line",
-    "  Ctrl+Z / Ctrl+Y        undo / redo",
-    "  Ctrl+F                 find (F3 / Shift+F3 next / prev)",
-    "  Ctrl+R                 replace",
-    "  Ctrl+G                 go to line[:col]",
-    "  Enter / Tab            new line / indent",
-    "  Backspace / Delete     delete",
-    "  Ctrl+S                 save (Save as if unnamed)",
-    "  Ctrl+O                 open file picker (type to filter)",
-    "  F2                     theme picker (live preview)",
-    "  Ctrl+T / Ctrl+W        new tab / close tab",
-    "  Ctrl+PgUp / Ctrl+PgDn  previous / next tab",
-    "  Ctrl+?  / F1           toggle this help",
-    "  Ctrl+Q                 quit (asks if unsaved)",
+const HelpRow = struct {
+    actions: []const keys.Action,
+    desc: []const u8,
+};
+
+/// The help panel is built from actions, so rebound keys show up here too.
+const help_rows = [_]HelpRow{
+    .{ .actions = &.{ .move_word_left, .move_word_right }, .desc = "move by word (arrows move)" },
+    .{ .actions = &.{ .move_home, .move_end }, .desc = "line start / end" },
+    .{ .actions = &.{ .page_up, .page_down }, .desc = "move a page" },
+    .{ .actions = &.{ .select_all, .clear_selection }, .desc = "select all / clear" },
+    .{ .actions = &.{ .copy, .cut }, .desc = "copy / cut" },
+    .{ .actions = &.{.paste}, .desc = "paste" },
+    .{ .actions = &.{.duplicate_line}, .desc = "duplicate line" },
+    .{ .actions = &.{ .undo, .redo }, .desc = "undo / redo" },
+    .{ .actions = &.{ .find, .find_next, .find_prev }, .desc = "find / next / previous" },
+    .{ .actions = &.{.replace}, .desc = "replace" },
+    .{ .actions = &.{.goto}, .desc = "go to line[:col]" },
+    .{ .actions = &.{ .insert_newline, .insert_tab }, .desc = "new line / indent" },
+    .{ .actions = &.{ .backspace, .delete_forward }, .desc = "delete" },
+    .{ .actions = &.{.save}, .desc = "save" },
+    .{ .actions = &.{.open}, .desc = "open file picker" },
+    .{ .actions = &.{.theme_picker}, .desc = "theme picker (live preview)" },
+    .{ .actions = &.{ .new_tab, .close_tab }, .desc = "new / close tab" },
+    .{ .actions = &.{ .next_tab, .prev_tab }, .desc = "next / previous tab" },
+    .{ .actions = &.{.help}, .desc = "toggle this help" },
+    .{ .actions = &.{.quit}, .desc = "quit (asks if unsaved)" },
 };
 
 pub const std_options: std.Options = .{
@@ -93,11 +97,15 @@ const Prompt = struct {
 
 /// All open documents in tab order, with one active. Editors are heap
 /// allocated so the list can grow without invalidating live pointers.
+const UiRequest = enum { open_picker, theme_picker };
+
 const Session = struct {
     allocator: std.mem.Allocator,
     docs: std.ArrayList(*Editor),
     active: usize,
     config: config_mod.Config = .{},
+    /// Set by an action that needs the UI layer to open a picker.
+    ui_request: ?UiRequest = null,
 
     fn init(allocator: std.mem.Allocator) Session {
         return .{ .allocator = allocator, .docs = std.ArrayList(*Editor).empty, .active = 0 };
@@ -351,14 +359,6 @@ fn run(init: std.process.Init.Minimal) !void {
         var off: usize = 0;
         while (off < pending_len and running) {
             const chunk = pending[off..pending_len];
-            if (picker_state == null and prompt == null) {
-                if (pickerTrigger(&session, chunk)) |trig| {
-                    openPicker(&session, &picker_state, trig.mode, &theme_before, exe_dir);
-                    picker_mode = trig.mode;
-                    off += trig.len;
-                    continue;
-                }
-            }
             const used = if (picker_state != null)
                 try handlePickerInput(&session, &picker_state, picker_mode, &theme_before, exe_dir, &registry, chunk, &running, &msg_buf, &msg)
             else if (prompt != null)
@@ -367,6 +367,14 @@ fn run(init: std.process.Init.Minimal) !void {
                 try processInput(&session, chunk, view_rows, &running, &prompt, &help, &msg_buf, &msg);
             if (used == 0) break; // incomplete escape sequence: wait for more
             off += used;
+            // An action can ask for a picker (Ctrl+O, F2): open it right away so
+            // the first press is enough.
+            if (session.ui_request) |req| {
+                session.ui_request = null;
+                const mode: picker.Mode = if (req == .theme_picker) .theme else .open_file;
+                openPicker(&session, &picker_state, mode, &theme_before, exe_dir);
+                picker_mode = mode;
+            }
         }
         const rem = pending_len - off;
         if (rem > 0) std.mem.copyForwards(u8, pending[0..rem], pending[off..pending_len]);
@@ -418,7 +426,7 @@ fn processInput(
             } else if (k == 'O') {
                 if (i + 2 >= buf.len) return i;
                 switch (buf[i + 2]) {
-                    'A', 'B', 'C', 'D', 'H', 'F', 'R', 'P' => |f| applyCsi(session, "", f, view_rows, running, prompt, msg_buf, msg, help, true) catch |e| setMsg(msg_buf, msg, @errorName(e)),
+                    'A', 'B', 'C', 'D', 'H', 'F', 'R', 'P', 'Q' => |f| applyCsi(session, "", f, view_rows, running, prompt, msg_buf, msg, help, true) catch |e| setMsg(msg_buf, msg, @errorName(e)),
                     else => {},
                 }
                 i += 3;
@@ -471,6 +479,7 @@ fn defaultKeyFor(action: keys.Action, shift: bool) DefaultKey {
         .insert_tab => .{ .byte = 0x09 },
         .backspace => .{ .byte = 0x7f },
         .help => .{ .byte = 0x1f },
+        .theme_picker => .{ .csi = .{ .params = "", .final = 'Q' } },
         .clear_selection => .{ .byte = 0x1b },
         .move_up => moveCsi('A', shift),
         .move_down => moveCsi('B', shift),
@@ -538,6 +547,7 @@ fn csiKeyName(buf: []u8, params_bytes: []const u8, final: u8) ?[]const u8 {
         'F' => "end",
         'R' => "f3",
         'P' => "f1",
+        'Q' => "f2",
         '~' => switch (p0) {
             1, 7 => "home",
             4, 8 => "end",
@@ -546,6 +556,7 @@ fn csiKeyName(buf: []u8, params_bytes: []const u8, final: u8) ?[]const u8 {
             5 => "pgup",
             6 => "pgdn",
             11 => "f1",
+            12 => "f2",
             else => return null,
         },
         else => return null,
@@ -606,8 +617,8 @@ fn applyByte(
             session.closeActive();
             if (session.count() == 0) running.* = false;
         }
-    } else if (b == 0x0f) { // Ctrl+O: open into a new tab
-        prompt.* = .{ .kind = .open };
+    } else if (b == 0x0f) { // Ctrl+O: open the file picker
+        session.ui_request = .open_picker;
     } else if (b == 0x11) { // Ctrl+Q: confirm first if any tab is dirty
         if (session.anyDirty()) {
             prompt.* = .{ .kind = .confirm_quit };
@@ -877,6 +888,7 @@ fn applyCsi(
     const shift = (bits & 1) != 0;
     const ctrl = (bits & 4) != 0;
     switch (final) {
+        'Q' => session.ui_request = .theme_picker,
         'A' => ed.moveUp(shift),
         'B' => ed.moveDown(shift),
         'C' => if (ctrl) ed.moveWordRight(shift) else ed.moveRight(shift),
@@ -1026,8 +1038,8 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
             const num = std.fmt.bufPrint(&num_buf, "{d}", .{lr + 1}) catch "";
             const gx = gutter - 1;
             var k: usize = 0;
-            while (k + num.len < gx) : (k += 1) s.put(@intCast(k), y, .{ .ch = ' ' });
-            s.putStr(@intCast(gx - num.len), y, num, .{ .fg = gutter_fg });
+            while (k + num.len < gx) : (k += 1) s.put(@intCast(k), y, .{ .ch = ' ', .bg = theme.background });
+            s.putStr(@intCast(gx - num.len), y, num, .{ .fg = gutter_fg, .bg = theme.background });
         }
 
         // Text (wide characters take two cells; the second is marked cont).
@@ -1051,7 +1063,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
                 const next = (dcol / tab + 1) * tab;
                 while (dcol < next) : (dcol += 1) {
                     if (dcol >= ed.scroll_col) {
-                        var cell = render.Cell{ .ch = ' ', .fg = fg };
+                        var cell = render.Cell{ .ch = ' ', .fg = fg, .bg = theme.background };
                         if (selected) cell.bg = sel_bg;
                         s.put(@intCast(sx), y, cell);
                         sx += 1;
@@ -1064,11 +1076,11 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
             if (cw == 0) continue; // combining mark: attaches to the previous cell
             if (dcol >= ed.scroll_col) {
                 if (sx + cw > w) break;
-                var cell = render.Cell{ .ch = cp, .fg = fg };
+                var cell = render.Cell{ .ch = cp, .fg = fg, .bg = theme.background };
                 if (selected) cell.bg = sel_bg;
                 s.put(@intCast(sx), y, cell);
                 if (cw == 2) {
-                    var cont = render.Cell{ .ch = ' ', .fg = fg, .cont = true };
+                    var cont = render.Cell{ .ch = ' ', .fg = fg, .bg = theme.background, .cont = true };
                     if (selected) cont.bg = sel_bg;
                     s.put(@intCast(sx + 1), y, cont);
                 }
@@ -1127,7 +1139,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
 
     // The help panel covers the bottom rows, so a prompt (which lives on the
     // last row) takes precedence over it while it is open.
-    if (help and prompt == null) drawHelp(s, w, h, theme);
+    if (help and prompt == null) drawHelp(s, session, w, h, theme);
 }
 
 /// One row of tabs: ` name [+] ` per document, the active one highlighted.
@@ -1158,21 +1170,6 @@ fn drawTabBar(s: *render.Screen, session: *Session, w: usize, text_fg: render.Co
 // Fuzzy picker: Ctrl+O lists the working directory, F2 lists themes (with a
 // live preview while the selection moves).
 // ---------------------------------------------------------------------------
-const Trigger = struct { len: usize, mode: picker.Mode };
-
-/// Bound keys win over the built-in picker triggers.
-fn pickerTrigger(session: *Session, chunk: []const u8) ?Trigger {
-    if (chunk.len == 0) return null;
-    if (chunk[0] == 0x0f and session.config.keys.lookup("ctrl+o") == null) {
-        return .{ .len = 1, .mode = .open_file };
-    }
-    if (chunk[0] == 0x1b and session.config.keys.lookup("f2") == null) {
-        if (chunk.len >= 3 and chunk[1] == 'O' and chunk[2] == 'Q') return .{ .len = 3, .mode = .theme };
-        if (chunk.len >= 5 and std.mem.eql(u8, chunk[1..5], "[12~")) return .{ .len = 5, .mode = .theme };
-    }
-    return null;
-}
-
 fn closePicker(slot: *?picker.Picker) void {
     if (slot.*) |*p| p.deinit();
     slot.* = null;
@@ -1195,6 +1192,7 @@ fn openPicker(
         .theme => {
             theme_before.* = session.config.theme;
             loadThemesInto(&p, exe_dir);
+            p.selectByName(session.config.themeName());
         },
     }
     slot.* = p;
@@ -1280,13 +1278,35 @@ fn acceptPicker(
         return;
     };
     switch (mode) {
-        .theme => closePicker(slot), // keep the previewed theme
-        .open_file => {
-            var path_buf: [1024]u8 = undefined;
-            const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ p.dirName(), item.text }) catch {
+        .theme => {
+            // Persist the choice: the next start should come up in this theme.
+            const name = item.text;
+            config_mod.saveTheme(std.heap.page_allocator, &session.config, name) catch |e| {
+                setErrMsg(msg_buf, msg, "Theme not saved", e);
                 closePicker(slot);
                 return;
             };
+            var note_buf: [96]u8 = undefined;
+            setMsg(msg_buf, msg, std.fmt.bufPrint(&note_buf, "theme: {s} (saved)", .{name}) catch "theme saved");
+            closePicker(slot);
+        },
+        .open_file => {
+            var path_buf: [1024]u8 = undefined;
+            const dir = p.dirName();
+            const path = if (std.mem.eql(u8, dir, "."))
+                item.text
+            else
+                std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, item.text }) catch item.text;
+            // Already open? Switch to its tab instead of adding a duplicate.
+            for (session.docs.items, 0..) |doc, i| {
+                if (doc.path) |doc_path| {
+                    if (std.mem.eql(u8, doc_path, path)) {
+                        session.active = i;
+                        closePicker(slot);
+                        return;
+                    }
+                }
+            }
             if (item.is_dir) {
                 p.clear();
                 p.setDir(path);
@@ -1325,7 +1345,13 @@ fn handlePickerInput(
     while (i < buf.len) {
         const b = buf[i];
         if (b == 0x1b) {
-            if (i + 1 >= buf.len) return i; // incomplete: wait for the rest
+            if (i + 1 >= buf.len) {
+                // A lone Esc closes the picker right away; arrows arrive as
+                // whole sequences, so waiting would just feel stuck.
+                if (mode == .theme) session.config.theme = theme_before.*;
+                closePicker(slot);
+                return i + 1;
+            }
             const k = buf[i + 1];
             if (k == '[' or k == 'O') {
                 var end: usize = undefined;
@@ -1438,9 +1464,36 @@ fn drawPicker(s: *render.Screen, p: *picker.Picker, mode: picker.Mode, theme: co
     }
 }
 
-fn drawHelp(s: *render.Screen, w: usize, h: usize, theme: config_mod.Theme) void {
+/// The key bound to `action` (the user's choice) or its built-in key.
+fn actionKeyName(session: *Session, action: keys.Action, buf: []u8) []const u8 {
+    if (session.config.keys.keyFor(action)) |bound| return bound;
+    const dk = defaultKeyFor(action, false);
+    return switch (dk) {
+        .byte => |b| keyNameByte(b) orelse "?",
+        .csi => |c| csiKeyName(buf, c.params, c.final) orelse "?",
+    };
+}
+
+fn joinActionKeys(session: *Session, actions: []const keys.Action, buf: []u8) []const u8 {
+    var n: usize = 0;
+    for (actions, 0..) |action, idx| {
+        if (idx > 0) {
+            if (n + 3 > buf.len) break;
+            @memcpy(buf[n..][0..3], " / ");
+            n += 3;
+        }
+        var tmp: [64]u8 = undefined;
+        const name = actionKeyName(session, action, &tmp);
+        if (n + name.len > buf.len) break;
+        @memcpy(buf[n..][0..name.len], name);
+        n += name.len;
+    }
+    return buf[0..n];
+}
+
+fn drawHelp(s: *render.Screen, session: *Session, w: usize, h: usize, theme: config_mod.Theme) void {
     if (h < 2) return;
-    const panel_h = @min(h - 1, help_lines.len + 1);
+    const panel_h = @min(h - 1, help_rows.len + 1);
     const top = h - panel_h;
     const bg = theme.help_bg;
     const fg = theme.text;
@@ -1451,10 +1504,16 @@ fn drawHelp(s: *render.Screen, w: usize, h: usize, theme: config_mod.Theme) void
         var x: usize = 0;
         while (x < w) : (x += 1) s.put(@intCast(x), @intCast(y), .{ .bg = bg });
     }
+    s.putStr(0, @intCast(top), " mibi controls", .{ .bg = bg, .fg = title_fg });
+    const pad_text = "                        "; // 24 spaces
     var i: usize = 0;
-    while (i < help_lines.len and top + i < h) : (i += 1) {
-        const col = if (i == 0) title_fg else fg;
-        s.putStr(0, @intCast(top + i), help_lines[i], .{ .bg = bg, .fg = col });
+    while (i < help_rows.len and top + 1 + i < h) : (i += 1) {
+        var keys_buf: [96]u8 = undefined;
+        const keys_text = joinActionKeys(session, help_rows[i].actions, &keys_buf);
+        const pad = if (keys_text.len < pad_text.len) pad_text[0 .. pad_text.len - keys_text.len] else " ";
+        var line_buf: [192]u8 = undefined;
+        const line = std.fmt.bufPrint(&line_buf, "  {s}{s}{s}", .{ keys_text, pad, help_rows[i].desc }) catch help_rows[i].desc;
+        s.putStr(0, @intCast(top + 1 + i), line, .{ .bg = bg, .fg = fg });
     }
 }
 
@@ -1810,25 +1869,39 @@ test "stress: many edits, undos and redos stay consistent" {
     draw(&s, &d.session, "", null, false);
 }
 
-test "save-as and open prompts" {
+/// Open `name` from `dir` through the picker, as the UI layer would.
+fn openViaPicker(session: *Session, allocator: std.mem.Allocator, dir: []const u8, name: []const u8) !void {
+    var slot: ?picker.Picker = picker.Picker.init(allocator);
+    defer closePicker(&slot);
+    const p = &slot.?;
+    p.setDir(dir);
+    try p.add(name, false);
+    p.refilter();
+    var mb: [96]u8 = undefined;
+    var msg: []const u8 = "";
+    var registry = syntax.Registry.init(allocator);
+    defer registry.deinit();
+    try acceptPicker(session, &slot, .open_file, &registry, &mb, &msg);
+}
+
+test "save-as prompt, and Ctrl+O asks for the file picker" {
     var d = try Drive.start("");
     defer d.stop();
 
     try d.send("\x13"); // Ctrl+S on an unnamed buffer -> Save as prompt
     try std.testing.expect(d.prompt != null);
     try std.testing.expectEqual(PromptKind.save_as, d.prompt.?.kind);
-    try d.send("\x1b"); // Esc cancels
-    try std.testing.expect(d.prompt == null);
-
-    try d.send("\x0f"); // Ctrl+O -> Open prompt
-    try std.testing.expect(d.prompt != null);
-    try std.testing.expectEqual(PromptKind.open, d.prompt.?.kind);
     try d.send("ab");
     try std.testing.expectEqualStrings("ab", d.prompt.?.buf[0..d.prompt.?.len]);
     try d.send("\x7f"); // Backspace edits the path
     try std.testing.expectEqualStrings("a", d.prompt.?.buf[0..d.prompt.?.len]);
-    try d.send("\x1b");
+    try d.send("\x1b"); // Esc cancels
     try std.testing.expect(d.prompt == null);
+
+    // Ctrl+O is the open action: it raises a request for the UI picker.
+    try d.send("\x0f");
+    try std.testing.expect(d.prompt == null);
+    try std.testing.expectEqual(UiRequest.open_picker, d.session.ui_request.?);
 }
 
 test "render shows text, gutter and selection" {
@@ -1938,7 +2011,7 @@ test "find, replace and goto" {
 test "arrow keys in a prompt are ignored, not treated as cancel" {
     var d = try Drive.start("");
     defer d.stop();
-    try d.send("\x0f"); // Ctrl+O -> Open prompt
+    try d.send("\x06"); // Ctrl+F -> find prompt
     try std.testing.expect(d.prompt != null);
     try d.send("src");
     try d.send("\x1b[C"); // Right
@@ -1979,16 +2052,20 @@ test "quit on a clean buffer does not ask" {
     try std.testing.expect(d.prompt == null);
 }
 
-test "ctrl+o opens a new tab without discarding the current one" {
+test "the file picker opens into a new tab without discarding the current one" {
     var d = try Drive.start("dirty");
     defer d.stop();
     try d.send("x"); // dirty
-    try d.send("\x0f"); // Ctrl+O: no confirm needed, nothing is replaced
-    try std.testing.expect(d.prompt != null);
-    try std.testing.expectEqual(PromptKind.open, d.prompt.?.kind);
-    try d.send("\x1b");
     try std.testing.expectEqualStrings("xdirty", d.ed().text());
-    try std.testing.expectEqual(@as(usize, 1), d.session.count());
+
+    const path = "mibi-picker-open.tmp";
+    defer os.deleteFile(path) catch {};
+    try os.writeFile(path, "picked\n");
+    try openViaPicker(&d.session, std.testing.allocator, ".", path);
+
+    try std.testing.expectEqual(@as(usize, 2), d.session.count());
+    try std.testing.expectEqualStrings("picked\n", d.session.current().text());
+    try std.testing.expectEqualStrings(path, d.session.current().path.?);
 }
 
 test "ctrl+t adds a tab and ctrl+w closes it" {
@@ -2233,17 +2310,13 @@ test "save writes the file, then open reads it back in a new tab" {
 
     // Change the buffer, then open another file: it gets its own tab.
     try d.send("!!!");
-    try d.send("\x0f"); // Ctrl+O
-    try d.send(other);
-    try d.send("\r");
+    try openViaPicker(&d.session, std.testing.allocator, ".", other);
     try std.testing.expectEqual(@as(usize, 2), d.session.count());
     try std.testing.expectEqualStrings("other file\n", d.ed().text());
     try std.testing.expectEqualStrings(other, d.ed().path.?);
 
     // Opening a file that is already open switches to its tab instead.
-    try d.send("\x0f");
-    try d.send(path);
-    try d.send("\r");
+    try openViaPicker(&d.session, std.testing.allocator, ".", path);
     try std.testing.expectEqual(@as(usize, 2), d.session.count());
     try std.testing.expectEqualStrings("hello\nworld!!!", d.ed().text());
 }
@@ -2251,7 +2324,7 @@ test "save writes the file, then open reads it back in a new tab" {
 test "a split arrow key in a prompt is held, not typed" {
     var d = try Drive.start("");
     defer d.stop();
-    try d.send("\x0f"); // Open prompt
+    try d.send("\x06"); // Ctrl+F -> find prompt
     try d.send("ab");
     try d.send("\x1b[1;5"); // incomplete Ctrl+Left
     try std.testing.expect(d.prompt != null);

@@ -110,6 +110,18 @@ pub const Picker = struct {
         return &self.items.items[self.filtered.items[self.selected]];
     }
 
+    /// Select the first item whose text matches `name` (used to preselect the
+    /// current theme when the picker opens).
+    pub fn selectByName(self: *Picker, name: []const u8) void {
+        if (name.len == 0) return;
+        for (self.filtered.items, 0..) |item_index, pos| {
+            if (std.mem.eql(u8, self.items.items[item_index].text, name)) {
+                self.selected = pos;
+                return;
+            }
+        }
+    }
+
     /// Keep the selected row inside a viewport of `rows` lines.
     pub fn ensureVisible(self: *Picker, rows: usize) void {
         if (rows == 0) return;
@@ -182,6 +194,18 @@ test "selection wraps and the viewport follows it" {
     p.move(2);
     p.ensureVisible(2);
     try std.testing.expectEqual(@as(usize, 1), p.scroll);
+}
+
+test "selectByName picks the current entry" {
+    var p = Picker.init(std.testing.allocator);
+    defer p.deinit();
+    try p.add("nord", false);
+    try p.add("dracula", false);
+    p.refilter();
+    p.selectByName("dracula");
+    try std.testing.expectEqualStrings("dracula", p.selectedItem().?.text);
+    p.selectByName("missing"); // unchanged
+    try std.testing.expectEqualStrings("dracula", p.selectedItem().?.text);
 }
 
 test "directories are marked" {
