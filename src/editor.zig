@@ -6,6 +6,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const os = @import("os.zig");
 const buffer = @import("buffer.zig");
+const regex = @import("regex.zig");
 const Buffer = buffer.Buffer;
 const utf8 = @import("text.zig");
 const width = @import("width.zig");
@@ -34,6 +35,9 @@ pub const Editor = struct {
     grouping: bool = false,
     register: std.ArrayList(u8),
     search: ?[]u8 = null,
+    /// Treat the search term as a regular expression.
+    search_regex: bool = false,
+    regex_prog: ?regex.Program = null,
     /// Language for the current file (from its extension), if any.
     lang: ?*const syntax.Lang = null,
     /// Cached syntax state at the start of each line, grown lazily. Entries
@@ -455,26 +459,41 @@ pub const Editor = struct {
     pub fn setSearch(self: *Editor, needle: []const u8) !void {
         if (self.search) |s| self.allocator.free(s);
         self.search = if (needle.len == 0) null else try self.allocator.dupe(u8, needle);
+        if (self.regex_prog) |*p| p.deinit();
+        self.regex_prog = null;
+        if (self.search_regex and needle.len > 0) {
+            self.regex_prog = regex.compile(self.allocator, needle) catch |e| {
+                if (e == error.OutOfMemory) return error.OutOfMemory;
+                return error.InvalidRegex;
+            };
+        }
+    }
+
+    /// The next match at or after `from`, as a byte range.
+    pub fn findRangeFrom(self: *Editor, from: usize) ?regex.Match {
+        const f = self.buf.flat();
+        if (from > f.len) return null;
+        if (self.regex_prog) |*prog| return regex.find(prog, f, from);
+        const needle = self.search orelse return null;
+        if (needle.len == 0) return null;
+        const p = std.mem.indexOfPos(u8, f, from, needle) orelse return null;
+        return .{ .start = p, .end = p + needle.len };
     }
 
     pub fn findFrom(self: *Editor, from: usize) ?usize {
-        const needle = self.search orelse return null;
-        if (needle.len == 0) return null;
-        const f = self.buf.flat();
-        if (from > f.len) return null;
-        return std.mem.indexOfPos(u8, f, from, needle);
+        const m = self.findRangeFrom(from) orelse return null;
+        return m.start;
     }
 
     /// Move to the next match (wrapping). No-op without a search term.
     pub fn findNext(self: *Editor) void {
-        const needle = self.search orelse return;
-        if (needle.len == 0) return;
+        if (self.search == null and self.regex_prog == null) return;
         const f = self.buf.flat();
         const start = @min(self.cursor + 1, f.len);
-        if (std.mem.indexOfPos(u8, f, start, needle)) |p| {
-            self.cursor = p;
-        } else if (std.mem.indexOfPos(u8, f, 0, needle)) |p| {
-            self.cursor = p;
+        if (self.findRangeFrom(start)) |m| {
+            self.cursor = m.start;
+        } else if (self.findRangeFrom(0)) |m| {
+            self.cursor = m.start;
         }
         self.sel_anchor = null;
         self.pref_col = null;
@@ -482,15 +501,32 @@ pub const Editor = struct {
 
     /// Move to the previous match (wrapping). No-op without a search term.
     pub fn findPrev(self: *Editor) void {
-        const needle = self.search orelse return;
-        if (needle.len == 0) return;
-        const f = self.buf.flat();
-        // A match must end at or before the cursor; when there is none, wrap to
-        // the last match in the document (the old scan stopped at the first
-        // match and so never wrapped).
-        const p = std.mem.lastIndexOf(u8, f[0..self.cursor], needle) orelse
-            std.mem.lastIndexOf(u8, f, needle) orelse return;
-        self.cursor = p;
+        if (self.search == null and self.regex_prog == null) return;
+        // Scan forward for the last match that starts before the cursor.
+        var best: ?regex.Match = null;
+        var from: usize = 0;
+        while (self.findRangeFrom(from)) |m| {
+            if (m.start >= self.cursor) break;
+            best = m;
+            from = m.end;
+            if (m.end == m.start) from += 1; // zero-width match: advance
+        }
+        const m = best orelse {
+            // Wrap: the last match in the document.
+            var last: ?regex.Match = null;
+            var f: usize = 0;
+            while (self.findRangeFrom(f)) |mm| {
+                last = mm;
+                f = mm.end;
+                if (mm.end == mm.start) f += 1;
+            }
+            const lm = last orelse return;
+            self.cursor = lm.start;
+            self.sel_anchor = null;
+            self.pref_col = null;
+            return;
+        };
+        self.cursor = m.start;
         self.sel_anchor = null;
         self.pref_col = null;
     }
@@ -507,13 +543,23 @@ pub const Editor = struct {
     /// Replace every occurrence of `needle` with `repl`; returns the count.
     pub fn replaceAll(self: *Editor, needle: []const u8, repl: []const u8) !usize {
         if (needle.len == 0) return 0;
-        var positions = std.ArrayList(usize).empty;
+        var positions = std.ArrayList(regex.Match).empty;
         defer positions.deinit(self.allocator);
-        const f = self.buf.flat();
-        var i: usize = 0;
-        while (std.mem.indexOfPos(u8, f, i, needle)) |p| {
-            try positions.append(self.allocator, p);
-            i = p + needle.len;
+        if (self.regex_prog) |*prog| {
+            const f = self.buf.flat();
+            var i: usize = 0;
+            while (regex.find(prog, f, i)) |m| {
+                try positions.append(self.allocator, m);
+                i = if (m.end > m.start) m.end else m.end + 1;
+                if (i > f.len) break;
+            }
+        } else {
+            const f = self.buf.flat();
+            var i: usize = 0;
+            while (std.mem.indexOfPos(u8, f, i, needle)) |p| {
+                try positions.append(self.allocator, .{ .start = p, .end = p + needle.len });
+                i = p + needle.len;
+            }
         }
         if (positions.items.len == 0) return 0;
         try self.beginEdit(false);
@@ -521,13 +567,14 @@ pub const Editor = struct {
         var k = positions.items.len;
         while (k > 0) {
             k -= 1;
-            const p = positions.items[k];
-            try self.buf.delete(p, needle.len);
+            const p = positions.items[k].start;
+            const len = positions.items[k].end - positions.items[k].start;
+            try self.buf.delete(p, len);
             try self.buf.insert(p, repl);
         }
         self.dirty = true;
         self.clearSyntax();
-        self.cursor = positions.items[0];
+        self.cursor = positions.items[0].start;
         self.sel_anchor = null;
         return positions.items.len;
     }

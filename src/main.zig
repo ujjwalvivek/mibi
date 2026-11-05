@@ -20,6 +20,7 @@ const width = @import("width.zig");
 const syntax = @import("syntax.zig");
 const picker = @import("picker.zig");
 const tree_mod = @import("tree.zig");
+const regex = @import("regex.zig");
 const config_mod = @import("config.zig");
 const keys = @import("keys.zig");
 
@@ -846,6 +847,15 @@ fn handlePromptInput(
             }
             i += 1;
             continue; // replace: now asking for the replacement
+        }
+        if (b == 0x12 and (p.kind == .find or p.kind == .replace_find or p.kind == .replace_with)) {
+            // Ctrl+R inside a search prompt toggles regular expressions.
+            const ed = session.current();
+            ed.search_regex = !ed.search_regex;
+            if (p.len > 0) ed.setSearch(p.buf[0..p.len]) catch {};
+            setMsg(msg_buf, msg, if (ed.search_regex) "regex on" else "regex off");
+            i += 1;
+            continue;
         }
         if (b == 0x7f or b == 0x08) {
             if (p.len > 0) p.len -= 1;

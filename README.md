@@ -109,7 +109,7 @@ packaging.
 | `Ctrl+V`                  | paste from the register                               |
 | `Ctrl+D`                  | duplicate the current line                            |
 | `Ctrl+Z` / `Ctrl+Y`       | undo / redo                                           |
-| `Ctrl+F`                  | find (incremental); `F3` / `Shift+F3` next / previous |
+| `Ctrl+F`                  | find (incremental); `F3` / `Shift+F3` next / previous; `Ctrl+R` in the prompt toggles regex |
 | `Ctrl+R`                  | replace all                                           |
 | `Ctrl+G`                  | go to `line[:column]`                                 |
 | `Ctrl+S`                  | save; asks for a name if the buffer is unnamed        |
@@ -132,6 +132,9 @@ packaging.
 - Clipboard register plus **OSC 52** so copy reaches the system clipboard.
 - Undo/redo with typing grouped into single steps.
 - Find (incremental), replace all, and go-to-line.
+- Regular expressions: `Ctrl+R` inside find/replace switches the search to a
+  full pattern engine (classes, groups, alternation, anchors, `* + ? {n,m}`,
+  `\d \w \s \b`, lazy quantifiers).
 - File tree sidebar (`Ctrl+B`): directories expand with Enter/`j`/`k` or a
   click, files open in a tab, and every entry has a one-cell type icon.
 - Mouse: click text to place the cursor, click a tab to switch to it, click
@@ -183,11 +186,11 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu |  89,840 |
-| x86_64-linux-gnu  |  99,000 |
-| x86_64-macos      |  108,012 |
-| aarch64-macos     | 127,384 |
-| x86_64-windows    | 157,184 |
+| aarch64-linux-gnu |  95,376 |
+| x86_64-linux-gnu  |  105,336 |
+| x86_64-macos      |  116,220 |
+| aarch64-macos     | 144,424 |
+| x86_64-windows    | 163,328 |
 
 ## Not yet
 

@@ -763,6 +763,31 @@ def file_tree_lists_and_opens(m, path):
 
 
 @check
+def regex_search_finds_patterns(m, path):
+    """Ctrl+R in the find prompt turns on regex and \\d+ finds the digits."""
+    work = os.path.join(SHOT_DIR, "work-regex")
+    os.makedirs(work, exist_ok=True)
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("abc 123\ndef 456")
+
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("abc"), "editor did not start"
+        proc.wait_quiet()
+        proc.send("\x06")  # Ctrl+F
+        proc.send("\x12")  # Ctrl+R: regex on
+        proc.send("\\d+")
+        proc.wait_quiet()
+        proc.send("\r")
+        proc.wait_quiet()
+        status = proc.screen_text().splitlines()[-1]
+        assert "1:5" in status, f"regex find did not land on the digits: {status!r}"
+        proc.shot("25-regex")
+    finally:
+        proc.close()
+
+
+@check
 def unicode_and_wide_cells(m, path):
     """A CJK character takes two cells and does not break the layout."""
     m.send("\x1b[F")  # End of the current line
