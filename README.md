@@ -133,8 +133,9 @@ packaging.
 - Undo/redo with typing grouped into single steps.
 - Find (incremental), replace all, and go-to-line.
 - Regular expressions: `Ctrl+R` inside find/replace switches the search to a
-  full pattern engine (classes, groups, alternation, anchors, `* + ? {n,m}`,
-  `\d \w \s \b`, lazy quantifiers).
+  pattern engine (classes and ranges, groups, alternation, anchors,
+  `\d \w \s \b`, `* + ?` with lazy variants). Backtracking is step-capped,
+  and there are no backreferences or capture groups yet.
 - File tree sidebar (`Ctrl+B`): directories expand with Enter/`j`/`k` or a
   click, files open in a tab, and every entry has a one-cell type icon.
 - Mouse: click text to place the cursor, click a tab to switch to it, click
