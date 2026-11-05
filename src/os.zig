@@ -56,6 +56,7 @@ const win = struct {
     extern "kernel32" fn DeleteFileW(lpFileName: [*:0]const u16) callconv(.winapi) c_int;
     extern "kernel32" fn GetModuleFileNameW(hModule: ?HANDLE, lpFilename: [*]u16, nSize: DWORD) callconv(.winapi) DWORD;
     extern "kernel32" fn GetEnvironmentVariableW(lpName: [*:0]const u16, lpBuffer: [*]u16, nSize: DWORD) callconv(.winapi) DWORD;
+    extern "kernel32" fn GetFileAttributesW(lpFileName: [*:0]const u16) callconv(.winapi) DWORD;
     extern "kernel32" fn GetConsoleProcessList(lProcessList: [*]DWORD, dwProcessCount: DWORD) callconv(.winapi) DWORD;
     extern "kernel32" fn GetConsoleWindow() callconv(.winapi) ?*anyopaque;
     extern "user32" fn MessageBoxW(hWnd: ?*anyopaque, lpText: [*:0]const u16, lpCaption: [*:0]const u16, uType: c_uint) callconv(.winapi) c_int;
@@ -316,6 +317,22 @@ pub fn hasEnv(name: []const u8) bool {
 /// where the launcher owns the window, so there is nothing to hand off).
 pub fn inWindowsTerminal() bool {
     if (is_windows) return hasEnv("WT_SESSION");
+    return true;
+}
+
+/// True when `path` names a directory.
+pub fn isDirectory(path: []const u8) bool {
+    if (is_windows) {
+        const wpath = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path) catch return false;
+        defer std.heap.page_allocator.free(wpath);
+        const attrs = win.GetFileAttributesW(wpath.ptr);
+        if (attrs == 0xFFFFFFFF) return false; // INVALID_FILE_ATTRIBUTES
+        return (attrs & 0x10) != 0; // FILE_ATTRIBUTE_DIRECTORY
+    }
+    const z = std.heap.page_allocator.dupeZ(u8, path) catch return false;
+    defer std.heap.page_allocator.free(z);
+    const dir = std.c.opendir(z.ptr) orelse return false;
+    defer _ = std.c.closedir(dir);
     return true;
 }
 

@@ -131,7 +131,13 @@ const win = if (is_windows) struct {
             out[0] = 0x1f;
             return 1;
         }
-        if (k.wVirtualKeyCode == 0x70) { // F1
+        if (k.wVirtualKeyCode == 0x71) { // F2
+        out[0] = 0x1b;
+        out[1] = 'O';
+        out[2] = 'Q';
+        return 3;
+    }
+    if (k.wVirtualKeyCode == 0x70) { // F1
             const seq = "\x1bOP";
             @memcpy(out[0..seq.len], seq);
             return seq.len;

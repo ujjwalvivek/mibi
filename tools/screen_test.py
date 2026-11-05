@@ -287,6 +287,7 @@ def startup_renders_file(m, path):
     """Opening a file shows the tab bar, the gutter, the text and the status."""
     assert m.wait_for("hello"), "no text after startup"
     screen = m.screen_text()
+    assert "F1 help" in screen.splitlines()[-1], "status bar hint missing"
     assert "notes.txt" in m.screen.title, f"window title not set: {m.screen.title!r}"
     assert_in(screen, "notes.txt", "tab bar")
     assert_in(screen, "1 hello", "gutter + first line")
@@ -400,7 +401,7 @@ def tabs_open_switch_and_close(m, path):
 def open_adds_a_tab(m, path):
     """Ctrl+O opens a file into a new tab instead of replacing the buffer."""
     m.send("\x0f")  # Ctrl+O
-    assert m.wait_for("Open:"), "open prompt missing"
+    assert m.wait_for("Open file"), "file picker missing"
     m.send("other.txt")
     m.send("\r")
     m.wait_quiet()
@@ -415,7 +416,7 @@ def open_adds_a_tab(m, path):
 def syntax_highlighting_emits_colours(m, path):
     """A .zig file is highlighted: keywords differ from plain identifiers."""
     m.send("\x0f")  # Ctrl+O
-    assert m.wait_for("Open:"), "open prompt missing"
+    assert m.wait_for("Open file"), "file picker missing"
     m.send("sample.zig")
     m.send("\r")
     m.wait_quiet()
@@ -449,6 +450,73 @@ def config_file_sets_theme_and_gutter(m, path):
         fg = proc.screen.fg_at(1, 0)
         assert fg == (255, 0, 0), f"theme text colour not applied: {fg}"
         proc.shot("12-config")
+    finally:
+        proc.close()
+
+
+@check
+def named_theme_is_applied(m, path):
+    """`theme = dracula` loads themes/dracula.ini from next to the binary."""
+    cfg_dir = os.path.join(SHOT_DIR, "work-theme")
+    os.makedirs(cfg_dir, exist_ok=True)
+    with open(os.path.join(cfg_dir, "mibi.ini"), "w", encoding="utf-8") as f:
+        f.write("[editor]\ntheme = dracula\n")
+    with open(os.path.join(cfg_dir, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello")
+
+    proc = Mibi(["notes.txt"], cwd=cfg_dir)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        fg = proc.screen.fg_at(1, 2)  # first text cell: Dracula's #f8f8f2
+        assert fg == (248, 248, 242), f"theme text colour not applied: {fg}"
+        proc.shot("13-theme")
+    finally:
+        proc.close()
+
+
+@check
+def ctrl_o_picker_opens_a_file(m, path):
+    """Ctrl+O lists the directory; typing filters it and Enter opens the file."""
+    work = os.path.join(SHOT_DIR, "work-picker")
+    os.makedirs(work, exist_ok=True)
+    for name, text in (("alpha.txt", "alpha body"), ("beta.txt", "beta body")):
+        with open(os.path.join(work, name), "w", encoding="utf-8") as f:
+            f.write(text)
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello")
+
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.send("\x0f")  # Ctrl+O
+        assert proc.wait_for("Open file"), "picker did not open"
+        proc.send("beta")
+        assert proc.wait_for("beta.txt"), "filter did not narrow the list"
+        proc.send("\r")
+        assert proc.wait_for("beta body"), "file did not open"
+        proc.shot("14-picker")
+    finally:
+        proc.close()
+
+
+@check
+def f2_theme_picker_applies_a_theme(m, path):
+    """F2 lists themes; Enter keeps the previewed one."""
+    proc = Mibi([path])
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        before = proc.screen.fg_at(1, 2)
+        proc.send("\x1bOQ")  # F2
+        assert proc.wait_for("Theme"), "theme picker did not open"
+        proc.send("\x1b[B")  # down
+        proc.send("\x1b[B")
+        proc.send("\r")  # accept
+        proc.wait_quiet()
+        after = proc.screen.fg_at(1, 2)
+        assert after != before, f"theme preview did not change colours ({before} -> {after})"
+        proc.shot("15-theme-picker")
     finally:
         proc.close()
 

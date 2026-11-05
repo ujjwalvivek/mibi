@@ -32,7 +32,7 @@ toolchain (0.16.0) is fetched into `tools/zig` on first use.
 
 ## Configuration
 
-`.uild.ps1` seeds `zig-out\bin\mibi.ini` from `mibi.ini.example` the first
+`.build.ps1` seeds `zig-out\bin\mibi.ini` from `mibi.ini.example` the first
 time it builds (later builds leave your edits alone). Copy it next to the binary
 or into the directory you run mibi from; it is optional and every key falls back
 to a default. Unknown keys are ignored.
@@ -53,6 +53,13 @@ comment = #6a7382
 The theme controls the whole palette: editor text, gutter, selection, tab bar,
 status line, help panel and the syntax classes. Colours are `#rrggbb` or `#rgb`.
 
+27 themes ship in `themes/` (VS Code Dark+/Light+, Catppuccin Mocha/Macchiato/
+Frappé/Latte, Rosé Pine/Moon/Dawn, Tokyo Night/Storm, Kanagawa, Everforest,
+GitHub Dark/Light, Ayu Dark, Horizon, Dracula, Nord, Gruvbox, One Dark,
+Monokai, Solarized, Material Palenight, Nightfox, Oxocarbon, Flexoki). Pick one
+with `theme = catppuccin-mocha` in `[editor]`; keys in `[theme]` then override
+it. Themes are data files, so adding one costs no binary size.
+
 Language definitions are separate: drop a `.ini` into `syntax.d/` (kibi's
 format, 52 languages ship with mibi) and it is picked up at startup.
 
@@ -71,7 +78,7 @@ then exits.
   [assets/windows-terminal/README.md](assets/windows-terminal/README.md) for
   chrome-less settings (F11 focus mode, hiding tabs from the title bar).
 - Double-clicking an unsigned local build also makes Windows SmartScreen ask
-  "Windows protected your PC"; click *Run anyway*, or launch from a terminal.
+  "Windows protected your PC"; click _Run anyway_, or launch from a terminal.
 
 ## Icons
 
@@ -82,32 +89,33 @@ packaging.
 
 ## Controls
 
-| Key | Action |
-| --- | --- |
-| *type* | insert text |
-| `Enter` | new line |
-| `Tab` | insert 4 spaces |
-| `Backspace` / `Delete` | delete before / after the cursor |
-| arrows | move |
-| `Ctrl+arrows` | move by word |
-| `Home` / `End` | start / end of line |
-| `PgUp` / `PgDn` | move a page |
-| `Shift` + movement | extend the selection |
-| `Ctrl+A` | select all |
-| `Esc` | clear the selection (or cancel a prompt) |
-| `Ctrl+C` / `Ctrl+X` | copy / cut selection (or line) |
-| `Ctrl+V` | paste from the register |
-| `Ctrl+D` | duplicate the current line |
-| `Ctrl+Z` / `Ctrl+Y` | undo / redo |
-| `Ctrl+F` | find (incremental); `F3` / `Shift+F3` next / previous |
-| `Ctrl+R` | replace all |
-| `Ctrl+G` | go to `line[:column]` |
-| `Ctrl+S` | save; asks for a name if the buffer is unnamed |
-| `Ctrl+O` | open a file in a new tab (Tab completes the path) |
-| `Ctrl+T` / `Ctrl+W` | new tab / close tab (closing the last one quits) |
-| `Ctrl+PgUp` / `Ctrl+PgDn` | previous / next tab |
-| `Ctrl+?` / `F1` | help panel |
-| `Ctrl+Q` | quit (asks first if any tab has unsaved edits) |
+| Key                       | Action                                                |
+| ------------------------- | ----------------------------------------------------- |
+| _type_                    | insert text                                           |
+| `Enter`                   | new line                                              |
+| `Tab`                     | insert 4 spaces                                       |
+| `Backspace` / `Delete`    | delete before / after the cursor                      |
+| arrows                    | move                                                  |
+| `Ctrl+arrows`             | move by word                                          |
+| `Home` / `End`            | start / end of line                                   |
+| `PgUp` / `PgDn`           | move a page                                           |
+| `Shift` + movement        | extend the selection                                  |
+| `Ctrl+A`                  | select all                                            |
+| `Esc`                     | clear the selection (or cancel a prompt)              |
+| `Ctrl+C` / `Ctrl+X`       | copy / cut selection (or line)                        |
+| `Ctrl+V`                  | paste from the register                               |
+| `Ctrl+D`                  | duplicate the current line                            |
+| `Ctrl+Z` / `Ctrl+Y`       | undo / redo                                           |
+| `Ctrl+F`                  | find (incremental); `F3` / `Shift+F3` next / previous |
+| `Ctrl+R`                  | replace all                                           |
+| `Ctrl+G`                  | go to `line[:column]`                                 |
+| `Ctrl+S`                  | save; asks for a name if the buffer is unnamed        |
+| `Ctrl+O`                  | fuzzy file picker: type to filter, Enter opens in a new tab |
+| `Ctrl+T` / `Ctrl+W`       | new tab / close tab (closing the last one quits)      |
+| `Ctrl+PgUp` / `Ctrl+PgDn` | previous / next tab                                   |
+| `F2`                      | theme picker (arrows preview live, Enter keeps, Esc restores) |
+| `Ctrl+?` / `F1`           | help panel (hinted at the right edge of the status bar) |
+| `Ctrl+Q`                  | quit (asks first if any tab has unsaved edits)        |
 
 ## Features
 
@@ -122,6 +130,8 @@ packaging.
 - Find (incremental), replace all, and go-to-line.
 - Configurable keybindings and a colour theme via `mibi.ini` (`[keys]` and
   `[theme]`), with the whole palette and every action bindable.
+- Fuzzy pickers for opening files (`Ctrl+O`) and switching themes (`F2`), with a
+  live preview while the theme selection moves.
 - Syntax highlighting from `syntax.d/*.ini` definitions (kibi's format): 52
   languages ship in the repo, and adding one is dropping in a file - no
   rebuild. Multi-line comments and strings carry state across lines.
@@ -158,13 +168,13 @@ ReleaseSmall, stripped, cross-compiled. `.\build.ps1 size` rebuilds every
 target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 150 KB, hard ceiling 1 MB); see `experiments/README.md` for the probe data.
 
-| Target | Bytes |
-| --- | ---: |
-| aarch64-linux-gnu | 70,960 |
-| x86_64-linux-gnu | 76,808 |
-| x86_64-macos | 83,332 |
-| aarch64-macos | 108,280 |
-| x86_64-windows | 133,632 |
+| Target            |   Bytes |
+| ----------------- | ------: |
+| aarch64-linux-gnu |  77,552 |
+| x86_64-linux-gnu  |  84,616 |
+| x86_64-macos      |  91,524 |
+| aarch64-macos     | 126,008 |
+| x86_64-windows    | 141,312 |
 
 ## Not yet
 

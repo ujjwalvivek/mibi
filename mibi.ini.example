@@ -11,6 +11,8 @@ tab_width = 4
 line_numbers = true
 ; Syntax highlighting from syntax.d/*.ini.
 syntax = true
+; Colour theme from themes/<name>.ini (see themes/README.md).
+; theme = catppuccin-mocha
 
 [theme]
 ; Colours are #rrggbb or #rgb. Uncomment to override the default palette.

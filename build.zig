@@ -68,6 +68,13 @@ pub fn build(b: *std.Build) void {
         .install_subdir = "syntax.d",
     });
 
+    // Colour themes are data files too (themes/<name>.ini).
+    b.installDirectory(.{
+        .source_dir = b.path("themes"),
+        .install_dir = .bin,
+        .install_subdir = "themes",
+    });
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);

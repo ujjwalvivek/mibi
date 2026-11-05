@@ -18,6 +18,7 @@ const Editor = editor_mod.Editor;
 const utf8 = @import("text.zig");
 const width = @import("width.zig");
 const syntax = @import("syntax.zig");
+const picker = @import("picker.zig");
 const config_mod = @import("config.zig");
 const keys = @import("keys.zig");
 
@@ -27,13 +28,11 @@ const MAX_FILE = 64 * 1024 * 1024;
 
 const help_lines = [_][]const u8{
     "mibi controls",
-    "",
     "  arrows / Ctrl+arrows   move / by word",
     "  Home / End             line start / end",
     "  PgUp / PgDn            move a page",
     "  Shift + movement       select",
-    "  Ctrl+A                 select all",
-    "  Esc                    clear selection",
+    "  Ctrl+A / Esc           select all / clear",
     "  Ctrl+C / Ctrl+X        copy / cut",
     "  Ctrl+V                 paste",
     "  Ctrl+D                 duplicate line",
@@ -44,7 +43,8 @@ const help_lines = [_][]const u8{
     "  Enter / Tab            new line / indent",
     "  Backspace / Delete     delete",
     "  Ctrl+S                 save (Save as if unnamed)",
-    "  Ctrl+O                 open in a new tab (Tab completes path)",
+    "  Ctrl+O                 open file picker (type to filter)",
+    "  F2                     theme picker (live preview)",
     "  Ctrl+T / Ctrl+W        new tab / close tab",
     "  Ctrl+PgUp / Ctrl+PgDn  previous / next tab",
     "  Ctrl+?  / F1           toggle this help",
@@ -264,6 +264,11 @@ fn run(init: std.process.Init.Minimal) !void {
     var prompt: ?Prompt = null;
     var running = true;
     var help = false;
+    // Fuzzy picker: file open (Ctrl+O) and theme switch (F2, live preview).
+    var picker_state: ?picker.Picker = null;
+    var picker_mode: picker.Mode = .open_file;
+    var theme_before: config_mod.Theme = .{};
+    defer closePicker(&picker_state);
     var zero_reads: usize = 0;
     var last_scroll_row: usize = std.math.maxInt(usize);
     var last_scroll_col: usize = std.math.maxInt(usize);
@@ -317,6 +322,7 @@ fn run(init: std.process.Init.Minimal) !void {
         }
 
         draw(&screen, &session, msg, prompt, help);
+        if (picker_state) |*pk| drawPicker(&screen, pk, picker_mode, session.config.theme);
         try screen.render();
 
         const n = try term.readInput(&input);
@@ -345,7 +351,17 @@ fn run(init: std.process.Init.Minimal) !void {
         var off: usize = 0;
         while (off < pending_len and running) {
             const chunk = pending[off..pending_len];
-            const used = if (prompt != null)
+            if (picker_state == null and prompt == null) {
+                if (pickerTrigger(&session, chunk)) |trig| {
+                    openPicker(&session, &picker_state, trig.mode, &theme_before, exe_dir);
+                    picker_mode = trig.mode;
+                    off += trig.len;
+                    continue;
+                }
+            }
+            const used = if (picker_state != null)
+                try handlePickerInput(&session, &picker_state, picker_mode, &theme_before, exe_dir, &registry, chunk, &running, &msg_buf, &msg)
+            else if (prompt != null)
                 try handlePromptInput(&session, &registry, &prompt, chunk, &running, &msg_buf, &msg)
             else
                 try processInput(&session, chunk, view_rows, &running, &prompt, &help, &msg_buf, &msg);
@@ -1106,7 +1122,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
         }
         drawPrompt(s, p, w, h, bar_bg, accent, text_fg);
     } else {
-        drawStatus(s, ed, msg, w, h, rc, total, bar_bg, accent);
+        drawStatus(s, ed, msg, w, h, rc, total, bar_bg, accent, hint_fg);
     }
 
     // The help panel covers the bottom rows, so a prompt (which lives on the
@@ -1138,6 +1154,290 @@ fn drawTabBar(s: *render.Screen, session: *Session, w: usize, text_fg: render.Co
 }
 
 /// Bottom panel listing the controls (temporary; will become a real panel).
+// ---------------------------------------------------------------------------
+// Fuzzy picker: Ctrl+O lists the working directory, F2 lists themes (with a
+// live preview while the selection moves).
+// ---------------------------------------------------------------------------
+const Trigger = struct { len: usize, mode: picker.Mode };
+
+/// Bound keys win over the built-in picker triggers.
+fn pickerTrigger(session: *Session, chunk: []const u8) ?Trigger {
+    if (chunk.len == 0) return null;
+    if (chunk[0] == 0x0f and session.config.keys.lookup("ctrl+o") == null) {
+        return .{ .len = 1, .mode = .open_file };
+    }
+    if (chunk[0] == 0x1b and session.config.keys.lookup("f2") == null) {
+        if (chunk.len >= 3 and chunk[1] == 'O' and chunk[2] == 'Q') return .{ .len = 3, .mode = .theme };
+        if (chunk.len >= 5 and std.mem.eql(u8, chunk[1..5], "[12~")) return .{ .len = 5, .mode = .theme };
+    }
+    return null;
+}
+
+fn closePicker(slot: *?picker.Picker) void {
+    if (slot.*) |*p| p.deinit();
+    slot.* = null;
+}
+
+fn openPicker(
+    session: *Session,
+    slot: *?picker.Picker,
+    mode: picker.Mode,
+    theme_before: *config_mod.Theme,
+    exe_dir: ?[]const u8,
+) void {
+    closePicker(slot);
+    var p = picker.Picker.init(std.heap.page_allocator);
+    switch (mode) {
+        .open_file => {
+            p.setDir(".");
+            loadDirInto(&p, ".");
+        },
+        .theme => {
+            theme_before.* = session.config.theme;
+            loadThemesInto(&p, exe_dir);
+        },
+    }
+    slot.* = p;
+}
+
+fn loadDirInto(p: *picker.Picker, dir: []const u8) void {
+    var names = std.ArrayList([]u8).empty;
+    defer {
+        for (names.items) |n| p.allocator.free(n);
+        names.deinit(p.allocator);
+    }
+    os.listDirNames(p.allocator, dir, &names) catch return;
+    os.sortStrings(names.items);
+    for (names.items) |name| {
+        var buf: [1024]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, name }) catch continue;
+        p.add(name, os.isDirectory(path)) catch {};
+    }
+    p.refilter();
+}
+
+fn loadThemesInto(p: *picker.Picker, exe_dir: ?[]const u8) void {
+    var exe_buf: [1024]u8 = undefined;
+    var dirs: [2][]const u8 = .{ "themes", "" };
+    var dir_count: usize = 1;
+    if (exe_dir) |d| {
+        if (std.fmt.bufPrint(&exe_buf, "{s}/themes", .{d})) |path| {
+            dirs[1] = path;
+            dir_count = 2;
+        } else |_| {}
+    }
+    var seen = std.ArrayList([]u8).empty;
+    defer {
+        for (seen.items) |s2| p.allocator.free(s2);
+        seen.deinit(p.allocator);
+    }
+    for (dirs[0..dir_count]) |dir| {
+        var names = std.ArrayList([]u8).empty;
+        defer {
+            for (names.items) |n| p.allocator.free(n);
+            names.deinit(p.allocator);
+        }
+        os.listDirNames(p.allocator, dir, &names) catch continue;
+        os.sortStrings(names.items);
+        for (names.items) |name| {
+            if (!std.mem.endsWith(u8, name, ".ini")) continue;
+            const stem = name[0 .. name.len - 4];
+            var dup = false;
+            for (seen.items) |s2| {
+                if (std.mem.eql(u8, s2, stem)) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup) continue;
+            seen.append(p.allocator, p.allocator.dupe(u8, stem) catch continue) catch continue;
+            p.add(stem, false) catch {};
+        }
+    }
+    p.refilter();
+}
+
+/// Apply the highlighted theme immediately (live preview).
+fn previewTheme(session: *Session, mode: picker.Mode, p: *picker.Picker, exe_dir: ?[]const u8) void {
+    if (mode != .theme) return;
+    const item = p.selectedItem() orelse return;
+    if (config_mod.loadTheme(std.heap.page_allocator, exe_dir, item.text)) |theme| {
+        session.config.theme = theme;
+    }
+}
+
+fn acceptPicker(
+    session: *Session,
+    slot: *?picker.Picker,
+    mode: picker.Mode,
+    registry: *syntax.Registry,
+    msg_buf: []u8,
+    msg: *[]const u8,
+) !void {
+    const p = &slot.*.?;
+    const item = p.selectedItem() orelse {
+        closePicker(slot);
+        return;
+    };
+    switch (mode) {
+        .theme => closePicker(slot), // keep the previewed theme
+        .open_file => {
+            var path_buf: [1024]u8 = undefined;
+            const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ p.dirName(), item.text }) catch {
+                closePicker(slot);
+                return;
+            };
+            if (item.is_dir) {
+                p.clear();
+                p.setDir(path);
+                loadDirInto(p, path);
+                return;
+            }
+            const data = os.readFileAlloc(std.heap.page_allocator, path, MAX_FILE) catch |e| {
+                setErrMsg(msg_buf, msg, "Cannot open", e);
+                return; // keep the picker open so another file can be chosen
+            };
+            defer std.heap.page_allocator.free(data);
+            session.add(path, data, registry.find(path)) catch |e| {
+                setErrMsg(msg_buf, msg, "Cannot open", e);
+                return;
+            };
+            closePicker(slot);
+        },
+    }
+}
+
+fn handlePickerInput(
+    session: *Session,
+    slot: *?picker.Picker,
+    mode: picker.Mode,
+    theme_before: *config_mod.Theme,
+    exe_dir: ?[]const u8,
+    registry: *syntax.Registry,
+    buf: []const u8,
+    running: *bool,
+    msg_buf: []u8,
+    msg: *[]const u8,
+) !usize {
+    _ = running;
+    const p = &slot.*.?;
+    var i: usize = 0;
+    while (i < buf.len) {
+        const b = buf[i];
+        if (b == 0x1b) {
+            if (i + 1 >= buf.len) return i; // incomplete: wait for the rest
+            const k = buf[i + 1];
+            if (k == '[' or k == 'O') {
+                var end: usize = undefined;
+                if (k == '[') {
+                    var j = i + 2;
+                    while (j < buf.len) : (j += 1) {
+                        if (buf[j] >= 0x40 and buf[j] <= 0x7E) break;
+                    }
+                    if (j >= buf.len) return i;
+                    end = j + 1;
+                } else {
+                    if (i + 2 >= buf.len) return i;
+                    end = i + 3;
+                }
+                const seq = buf[i..end];
+                if (std.mem.eql(u8, seq, "\x1b[A") or std.mem.eql(u8, seq, "\x1bOA")) {
+                    p.move(-1);
+                } else if (std.mem.eql(u8, seq, "\x1b[B") or std.mem.eql(u8, seq, "\x1bOB")) {
+                    p.move(1);
+                }
+                previewTheme(session, mode, p, exe_dir);
+                i = end;
+                continue;
+            }
+            // Escape alone (followed by an ordinary key): cancel.
+            if (mode == .theme) session.config.theme = theme_before.*;
+            closePicker(slot);
+            return i + 1;
+        }
+        if (b == 0x0d or b == 0x0a) {
+            try acceptPicker(session, slot, mode, registry, msg_buf, msg);
+            return i + 1;
+        }
+        if (b == 0x7f or b == 0x08) {
+            p.popFilter();
+            previewTheme(session, mode, p, exe_dir);
+            i += 1;
+            continue;
+        }
+        if (b == 0x10) { // Ctrl+P
+            p.move(-1);
+            previewTheme(session, mode, p, exe_dir);
+            i += 1;
+            continue;
+        }
+        if (b == 0x0e) { // Ctrl+N
+            p.move(1);
+            previewTheme(session, mode, p, exe_dir);
+            i += 1;
+            continue;
+        }
+        if (b >= 0x20) {
+            p.pushFilter(b);
+            previewTheme(session, mode, p, exe_dir);
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+    return i;
+}
+
+fn drawPicker(s: *render.Screen, p: *picker.Picker, mode: picker.Mode, theme: config_mod.Theme) void {
+    const w: usize = s.cols;
+    const h: usize = s.rows;
+    if (h < 5 or w < 24) return;
+    const list_rows = h - 3;
+    p.ensureVisible(list_rows);
+
+    const blank = render.Cell{ .ch = ' ', .bg = theme.background };
+    var r: usize = 1;
+    while (r < h) : (r += 1) {
+        var c: usize = 0;
+        while (c < w) : (c += 1) s.put(@intCast(c), @intCast(r), blank);
+    }
+
+    const title = switch (mode) {
+        .open_file => "Open file",
+        .theme => "Theme",
+    };
+    var head_buf: [256]u8 = undefined;
+    const head = std.fmt.bufPrint(&head_buf, " {s}: {s} ({d}/{d})", .{
+        title,
+        p.dirName(),
+        p.count(),
+        p.items.items.len,
+    }) catch title;
+    s.putStr(1, 1, head, .{ .fg = theme.accent, .bg = theme.background, .attr = .{ .bold = true } });
+
+    var row: usize = 2;
+    var idx = p.scroll;
+    while (row < h - 1 and idx < p.filtered.items.len) : ({
+        row += 1;
+        idx += 1;
+    }) {
+        const item = p.items.items[p.filtered.items[idx]];
+        const selected = idx == p.selected;
+        const bg = if (selected) theme.selection else theme.background;
+        const fg = if (selected) theme.text else if (item.is_dir) theme.keyword2 else theme.text;
+        var line_buf: [256]u8 = undefined;
+        const line = std.fmt.bufPrint(&line_buf, " {s}{s}", .{ item.text, if (item.is_dir) "/" else "" }) catch item.text;
+        s.putStr(1, @intCast(row), line, .{ .fg = fg, .bg = bg, .attr = .{ .bold = selected } });
+    }
+
+    var filter_buf: [160]u8 = undefined;
+    const filter = std.fmt.bufPrint(&filter_buf, " > {s}", .{p.filterText()}) catch " > ";
+    s.putStr(1, s.rows - 1, filter, .{ .fg = theme.text, .bg = theme.bar_bg });
+    if (w > filter.len + 20) {
+        s.putStr(@intCast(w - 20), s.rows - 1, "Enter select  Esc cancel", .{ .fg = theme.hint_fg, .bg = theme.bar_bg });
+    }
+}
+
 fn drawHelp(s: *render.Screen, w: usize, h: usize, theme: config_mod.Theme) void {
     if (h < 2) return;
     const panel_h = @min(h - 1, help_lines.len + 1);
@@ -1238,7 +1538,9 @@ fn drawStatus(
     total: usize,
     bar_bg: render.Color,
     accent: render.Color,
+    hint_fg: render.Color,
 ) void {
+    const hint = "F1 help";
     var st_buf: [192]u8 = undefined;
     const name = ed.path orelse "[No Name]";
     const status = std.fmt.bufPrint(&st_buf, " mibi {s}  {s}{s}  {d}:{d}  {d}L  {d}x{d}  {s}", .{
@@ -1254,7 +1556,12 @@ fn drawStatus(
     }) catch " mibi";
     var x: usize = 0;
     while (x < w) : (x += 1) s.put(@intCast(x), @intCast(h - 1), .{ .bg = bar_bg });
-    s.putStr(0, @intCast(h - 1), status, .{ .bg = bar_bg, .fg = accent });
+    // Keep the hint on the right edge and clip the status text before it.
+    const hint_x = if (w > hint.len + 2) w - hint.len - 1 else w;
+    const status_max = if (hint_x > 0) hint_x - 1 else w;
+    const shown = status[0..@min(status.len, status_max)];
+    s.putStr(0, @intCast(h - 1), shown, .{ .bg = bar_bg, .fg = accent });
+    if (hint_x < w) s.putStr(@intCast(hint_x), @intCast(h - 1), hint, .{ .bg = bar_bg, .fg = hint_fg });
 }
 
 test "an escape sequence split across reads is not typed as text" {

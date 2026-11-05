@@ -43,6 +43,13 @@ pub const Config = struct {
     tab_width: usize = 4,
     line_numbers: bool = true,
     syntax: bool = true,
+    /// Name of a theme from `themes/<name>.ini` (empty = built-in default).
+    theme_name: [32]u8 = [_]u8{0} ** 32,
+    theme_name_len: usize = 0,
+
+    pub fn themeName(self: *const Config) []const u8 {
+        return self.theme_name[0..self.theme_name_len];
+    }
 };
 
 fn hexVal(c: u8) ?u8 {
@@ -114,6 +121,11 @@ pub fn apply(config: *Config, text: []const u8) void {
             if (parseBool(entry.value)) |b| config.line_numbers = b;
         } else if (std.mem.eql(u8, entry.key, "syntax")) {
             if (parseBool(entry.value)) |b| config.syntax = b;
+        } else if (std.mem.eql(u8, entry.key, "theme")) {
+            const v = std.mem.trim(u8, entry.value, " \t");
+            const n = @min(v.len, config.theme_name.len);
+            @memcpy(config.theme_name[0..n], v[0..n]);
+            config.theme_name_len = n;
         }
     }
 }
@@ -123,19 +135,75 @@ pub fn apply(config: *Config, text: []const u8) void {
 pub fn load(allocator: std.mem.Allocator, exe_dir: ?[]const u8) Config {
     var config = Config{};
     var path_buf: [1024]u8 = undefined;
-    if (exe_dir) |dir| {
-        if (std.fmt.bufPrint(&path_buf, "{s}/mibi.ini", .{dir})) |path| {
-            if (loadFile(allocator, path, &config)) return config;
-        } else |_| {}
+
+    // The working directory wins: a project's mibi.ini overrides the one that
+    // ships next to the binary.
+    const text: ?[]u8 = blk: {
+        if (readFile(allocator, "mibi.ini")) |t| break :blk t;
+        if (exe_dir) |dir| {
+            if (std.fmt.bufPrint(&path_buf, "{s}/mibi.ini", .{dir})) |path| {
+                if (readFile(allocator, path)) |t| break :blk t;
+            } else |_| {}
+        }
+        break :blk null;
+    };
+    defer if (text) |t| allocator.free(t);
+    const data = text orelse return config;
+
+    // A named theme is the base; keys in this file's [theme] then override it.
+    var name_buf: [32]u8 = undefined;
+    if (themeNameFrom(data, &name_buf)) |name| {
+        if (loadTheme(allocator, exe_dir, name)) |theme| config.theme = theme;
     }
-    _ = loadFile(allocator, "mibi.ini", &config);
+    apply(&config, data);
     return config;
 }
 
-fn loadFile(allocator: std.mem.Allocator, path: []const u8, config: *Config) bool {
-    const data = os.readFileAlloc(allocator, path, 1024 * 1024) catch return false;
+fn readFile(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
+    return os.readFileAlloc(allocator, path, 1024 * 1024) catch null;
+}
+
+/// The `theme = <name>` value, if the config sets one.
+fn themeNameFrom(text: []const u8, buf: []u8) ?[]const u8 {
+    var reader = ini.Reader{ .text = text };
+    while (reader.next()) |entry| {
+        if (std.mem.eql(u8, entry.section, "theme")) continue; // colour keys
+        if (!std.mem.eql(u8, entry.key, "theme")) continue;
+        const value = std.mem.trim(u8, entry.value, " \t");
+        if (value.len == 0 or value.len > buf.len) return null;
+        @memcpy(buf[0..value.len], value);
+        return buf[0..value.len];
+    }
+    return null;
+}
+
+/// Load `themes/<name>.ini` from next to the executable, else from the working
+/// directory. The name is restricted to file-name characters.
+pub fn loadTheme(allocator: std.mem.Allocator, exe_dir: ?[]const u8, name: []const u8) ?Theme {
+    if (name.len == 0) return null;
+    for (name) |c| {
+        if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_')) return null;
+    }
+    var theme = Theme{};
+    // Working directory first, then next to the executable.
+    var cwd_buf: [1024]u8 = undefined;
+    if (std.fmt.bufPrint(&cwd_buf, "themes/{s}.ini", .{name})) |path| {
+        if (loadThemeFile(allocator, path, &theme)) return theme;
+    } else |_| {}
+    var path_buf: [1024]u8 = undefined;
+    if (exe_dir) |dir| {
+        if (std.fmt.bufPrint(&path_buf, "{s}/themes/{s}.ini", .{ dir, name })) |path| {
+            if (loadThemeFile(allocator, path, &theme)) return theme;
+        } else |_| {}
+    }
+    return null;
+}
+
+fn loadThemeFile(allocator: std.mem.Allocator, path: []const u8, theme: *Theme) bool {
+    const data = os.readFileAlloc(allocator, path, 64 * 1024) catch return false;
     defer allocator.free(data);
-    apply(config, data);
+    var reader = ini.Reader{ .text = data };
+    while (reader.next()) |entry| setThemeColor(theme, entry.key, entry.value);
     return true;
 }
 
@@ -205,6 +273,28 @@ test "parses [keys] bindings and ignores unknown actions" {
     try std.testing.expectEqual(keys.Action.save, config.keys.lookup("f2").?);
     try std.testing.expectEqual(keys.Action.move_word_left, config.keys.lookup("ctrl+shift+left").?);
     try std.testing.expectEqual(@as(usize, 3), config.keys.count); // the bad one was skipped
+}
+
+test "parses the theme name" {
+    var config = Config{};
+    apply(&config, "[editor]\ntheme = nord\n");
+    try std.testing.expectEqualStrings("nord", config.themeName());
+}
+
+test "loads a named theme from themes/" {
+    const dracula = loadTheme(std.testing.allocator, null, "dracula").?;
+    try std.testing.expectEqual(rgb(0x28, 0x2a, 0x36), dracula.background);
+    try std.testing.expectEqual(rgb(0xff, 0x79, 0xc6), dracula.keyword1);
+    try std.testing.expect(loadTheme(std.testing.allocator, null, "nope") == null);
+    try std.testing.expect(loadTheme(std.testing.allocator, null, "../etc/passwd") == null);
+}
+
+test "inline theme keys override a named theme" {
+    var config = Config{};
+    config.theme = loadTheme(std.testing.allocator, null, "dracula").?;
+    apply(&config, "[theme]\ntext = #ff0000\n");
+    try std.testing.expectEqual(rgb(0xff, 0x00, 0x00), config.theme.text);
+    try std.testing.expectEqual(rgb(0x28, 0x2a, 0x36), config.theme.background);
 }
 
 test "a missing config file keeps the defaults" {
