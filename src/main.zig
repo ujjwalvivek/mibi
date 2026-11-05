@@ -174,6 +174,12 @@ fn run(init: std.process.Init.Minimal) !void {
 
         const n = try term.readInput(&input);
         if (n == 0) {
+            // A console resize wakes the read with no bytes: repaint at the new
+            // size instead of counting it as end-of-input.
+            if (term.takeResize()) {
+                zero_reads = 0;
+                continue;
+            }
             zero_reads += 1;
             if (zero_reads >= 3) break;
             continue;

@@ -71,6 +71,7 @@ const win = if (is_windows) struct {
     const ENABLE_ECHO_INPUT: DWORD = 0x0004;
 
     const KEY_EVENT: u16 = 0x0001;
+    const WINDOW_BUFFER_SIZE_EVENT: u16 = 0x0004;
     const RIGHT_ALT_PRESSED: u32 = 0x0001;
     const LEFT_ALT_PRESSED: u32 = 0x0002;
     const RIGHT_CTRL_PRESSED: u32 = 0x0004;
@@ -175,6 +176,13 @@ const win = if (is_windows) struct {
                 if (n > 0) break;
                 return 0;
             }
+            // A resize is not input, but it must wake the run loop so the
+            // screen is repainted at the new size without waiting for a key.
+            if (rec.EventType == WINDOW_BUFFER_SIZE_EVENT) {
+                resized = true;
+                if (n > 0) break;
+                return 0;
+            }
             if (rec.EventType == KEY_EVENT and rec.KeyEvent.bKeyDown != 0) {
                 n += translateKey(rec.KeyEvent, buf[n..]);
             }
@@ -183,6 +191,16 @@ const win = if (is_windows) struct {
         return n;
     }
 } else struct {};
+
+/// Set when the console was resized since the last call (Windows only).
+var resized = false;
+
+/// True once after a resize event; the run loop uses it to repaint at once.
+pub fn takeResize() bool {
+    const r = resized;
+    resized = false;
+    return r;
+}
 
 /// True when stdin and stdout are both an interactive terminal.
 pub fn isTty() bool {
