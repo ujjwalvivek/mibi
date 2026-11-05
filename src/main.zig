@@ -268,7 +268,15 @@ fn run(init: std.process.Init.Minimal) !void {
     var session = Session.init(allocator);
     defer session.deinit();
     session.config = config;
-    try session.add(path, initial, registry.find(path));
+    // No file named? Bring back the previous session (tabs, cursors, and the
+    // text of anything that was not saved).
+    if (path == null) {
+        if (!loadSession(allocator, exe_dir, &registry, &session)) {
+            try session.add(null, "", null);
+        }
+    } else {
+        try session.add(path, initial, registry.find(path));
+    }
     if (initial_owned) |d| allocator.free(d);
 
     try term.enterRaw();
@@ -284,6 +292,7 @@ fn run(init: std.process.Init.Minimal) !void {
     // alternate screen that was not cleared) would otherwise leak it through.
     @memset(screen.front, render.Cell{ .ch = 0, .attr = .{ .bold = true, .underline = true, .reverse = true } });
 
+    defer saveSession(&session, exe_dir);
     var input: [256]u8 = undefined;
     var msg_buf: [96]u8 = undefined;
     var msg: []const u8 = "";
@@ -420,6 +429,114 @@ fn run(init: std.process.Init.Minimal) !void {
         if (rem > 0) std.mem.copyForwards(u8, pending[0..rem], pending[off..pending_len]);
         pending_len = rem;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Session persistence: the tabs, their cursors, and the text of unsaved
+// buffers, so a restart (or a crash) does not lose work.
+// ---------------------------------------------------------------------------
+const SESSION_FILE = "mibi-session";
+
+/// The session lives in the working directory (one per project), falling back
+/// to the directory of the binary.
+fn sessionPath(exe_dir: ?[]const u8, buf: []u8) []const u8 {
+    if (exe_dir) |d| {
+        if (std.fmt.bufPrint(buf, "{s}/" ++ SESSION_FILE, .{d})) |p| {
+            _ = p;
+        } else |_| {}
+    }
+    return SESSION_FILE;
+}
+
+fn bufferPath(exe_dir: ?[]const u8, index: usize, buf: []u8) []const u8 {
+    _ = exe_dir;
+    return std.fmt.bufPrint(buf, SESSION_FILE ++ "-buf-{d}.txt", .{index}) catch SESSION_FILE;
+}
+
+fn saveSession(session: *Session, exe_dir: ?[]const u8) void {
+    const allocator = std.heap.page_allocator;
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+    var path_buf: [1024]u8 = undefined;
+    var line_buf: [1024]u8 = undefined;
+
+    const header = std.fmt.bufPrint(&line_buf, "v1\nactive {d}\ncount {d}\n", .{ session.active, session.count() }) catch return;
+    out.appendSlice(allocator, header) catch return;
+    for (session.docs.items, 0..) |ed, i| {
+        var buf_path: [1024]u8 = undefined;
+        const bp = bufferPath(exe_dir, i, &buf_path);
+        const has_buffer = ed.dirty or ed.path == null;
+        if (has_buffer) os.writeFile(bp, ed.text()) catch {};
+        const row = ed.rowCol();
+        const line = std.fmt.bufPrint(&line_buf, "tab {s}\t{d}\t{d}\t{d}\t{d}\t{d}\n", .{
+            ed.path orelse "",
+            ed.cursor,
+            @intFromBool(ed.dirty),
+            @intFromBool(has_buffer),
+            row.row,
+            row.col,
+        }) catch continue;
+        out.appendSlice(allocator, line) catch return;
+    }
+    const path = sessionPath(exe_dir, &path_buf);
+    os.writeFile(path, out.items) catch {};
+}
+
+fn loadSession(allocator: std.mem.Allocator, exe_dir: ?[]const u8, registry: *syntax.Registry, session: *Session) bool {
+    var path_buf: [1024]u8 = undefined;
+    const path = sessionPath(exe_dir, &path_buf);
+    const data = os.readFileAlloc(allocator, path, 16 * 1024 * 1024) catch return false;
+    defer allocator.free(data);
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    const magic = lines.next() orelse return false;
+    if (!std.mem.eql(u8, std.mem.trim(u8, magic, " \r"), "v1")) return false;
+    var active: usize = 0;
+    var loaded: usize = 0;
+    while (lines.next()) |raw| {
+        const line = std.mem.trimEnd(u8, raw, " \r");
+        if (std.mem.startsWith(u8, line, "active ")) {
+            active = std.fmt.parseInt(usize, line["active ".len..], 10) catch 0;
+        } else if (std.mem.startsWith(u8, line, "count ")) {
+            // informational only
+        } else if (std.mem.startsWith(u8, line, "tab ")) {
+            var fields = std.mem.splitScalar(u8, line["tab ".len..], '\t');
+            const tab_path = fields.next() orelse continue;
+            const cursor = std.fmt.parseInt(usize, fields.next() orelse "0", 10) catch 0;
+            const dirty = std.fmt.parseInt(u8, fields.next() orelse "0", 10) catch 0;
+            const has_buffer = std.fmt.parseInt(u8, fields.next() orelse "0", 10) catch 0;
+            _ = std.fmt.parseInt(usize, fields.next() orelse "0", 10) catch 0;
+            _ = std.fmt.parseInt(usize, fields.next() orelse "0", 10) catch 0;
+
+            var buf_path: [1024]u8 = undefined;
+            const bp = bufferPath(exe_dir, loaded, &buf_path);
+            var text: []u8 = &[_]u8{};
+            var owned = false;
+            if (has_buffer != 0) {
+                if (os.readFileAlloc(allocator, bp, MAX_FILE)) |t| {
+                    text = t;
+                    owned = true;
+                } else |_| {}
+            }
+            if (!owned) {
+                if (tab_path.len > 0) {
+                    if (os.readFileAlloc(allocator, tab_path, MAX_FILE)) |t| {
+                        text = t;
+                        owned = true;
+                    } else |_| {}
+                }
+            }
+            defer if (owned) allocator.free(text);
+            const lang = if (tab_path.len > 0) registry.find(tab_path) else null;
+            session.add(if (tab_path.len > 0) tab_path else null, text, lang) catch continue;
+            const ed = session.current();
+            ed.cursor = @min(cursor, ed.text().len);
+            ed.dirty = dirty != 0;
+            loaded += 1;
+        }
+    }
+    if (loaded == 0) return false;
+    session.active = @min(active, session.count() - 1);
+    return true;
 }
 
 fn setMsg(buf: []u8, out: *[]const u8, text: []const u8) void {
