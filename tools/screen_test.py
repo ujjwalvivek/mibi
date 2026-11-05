@@ -747,7 +747,7 @@ def file_tree_lists_and_opens(m, path):
         proc.wait_quiet()
         text = proc.screen_text()
         assert "> sub" in text, f"tree missing the directory entry: {text[:160]!r}"
-        assert "t notes.txt" in text, "tree missing the file icon"
+        assert ". notes.txt" in text, "tree missing the file icon"
 
         proc.send("\r")  # the selected entry is the sub directory
         proc.wait_quiet()

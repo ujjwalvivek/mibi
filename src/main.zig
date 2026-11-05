@@ -1153,7 +1153,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
     }
 
     drawTabBar(s, session, w, text_fg, gutter_fg);
-    if (session.tree) |*t| drawTree(s, t, session.tree_focus, h, theme);
+    if (session.tree) |*t| drawTree(s, t, session.tree_focus, h, theme, session.config.icons_unicode);
 
     const sel = session.current().selectionRange();
     const rc = session.current().rowCol();
@@ -1293,13 +1293,14 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
 /// One row of tabs: ` name [+] ` per document, the active one highlighted.
 const TREE_WIDTH = 28;
 
-fn drawTree(s: *render.Screen, t: *tree_mod.Tree, focused: bool, h: usize, theme: config_mod.Theme) void {
+fn drawTree(s: *render.Screen, t: *tree_mod.Tree, focused: bool, h: usize, theme: config_mod.Theme, icons_unicode: bool) void {
     if (h < 4) return;
     const side_w = @min(TREE_WIDTH, s.cols);
     const rows = h - 2;
     t.ensureVisible(rows);
 
-    const bg = if (focused) theme.tab_active_bg else theme.tab_bg;
+    const bg = theme.background;
+    const sel_bg = theme.selection;
     var y: usize = 1;
     while (y < h - 1) : (y += 1) {
         var x: usize = 0;
@@ -1314,23 +1315,29 @@ fn drawTree(s: *render.Screen, t: *tree_mod.Tree, focused: bool, h: usize, theme
     }) {
         const e = t.entries.items[idx];
         const selected = idx == t.selected;
-        const indent = @min(e.depth * 2, side_w - 4);
-        var line_buf: [256]u8 = undefined;
+        const row_bg = if (selected) sel_bg else bg;
+        // Whole row, so the highlight is a bar rather than a word.
+        var x: usize = 0;
+        while (x < side_w) : (x += 1) s.put(@intCast(x), @intCast(1 + row), .{ .ch = ' ', .bg = row_bg });
+
+        const indent = @min(e.depth * 2, side_w - 6);
+        const icon = if (e.is_dir)
+            tree_mod.iconFor(e.name, true, t.isExpanded(e.path), icons_unicode)
+        else
+            tree_mod.iconFor(e.name, false, false, icons_unicode);
+        var line_buf: [300]u8 = undefined;
         const line = std.fmt.bufPrint(&line_buf, "{s}{s} {s}", .{
             " " ** 1,
-            if (e.is_dir) tree_mod.iconFor(e.name, true, t.isExpanded(e.path)) else tree_mod.iconFor(e.name, false, false),
+            icon,
             e.name,
         }) catch e.name;
-        var x: usize = 0;
-        const start = 1 + indent;
-        while (x < line.len and start + x < side_w) : (x += 1) {
-            s.put(@intCast(start + x), @intCast(1 + row), .{
-                .ch = line[x],
-                .bg = if (selected) theme.selection else bg,
-                .fg = if (e.is_dir) theme.keyword2 else theme.text,
-                .attr = .{ .bold = selected },
-            });
-        }
+        const text_x = 1 + indent;
+        s.putStr(@intCast(text_x), @intCast(1 + row), line, .{
+            .bg = row_bg,
+            .fg = if (selected) theme.text else if (e.is_dir) theme.keyword2 else theme.text,
+            .attr = .{ .bold = selected },
+        });
+        _ = focused;
     }
 }
 
@@ -1344,6 +1351,7 @@ fn handleTreeInput(session: *Session, buf: []const u8, msg_buf: []u8, msg: *[]co
         if (b == 0x1b) {
             if (i + 1 >= buf.len) return if (i == 0) null else i;
             const k = buf[i + 1];
+            if (k == '[' and i + 2 < buf.len and buf[i + 2] == '<') return null; // mouse
             if (k == '[' or k == 'O') {
                 var end: usize = undefined;
                 if (k == '[') {
@@ -1374,7 +1382,6 @@ fn handleTreeInput(session: *Session, buf: []const u8, msg_buf: []u8, msg: *[]co
                 i = end;
                 continue;
             }
-            // Esc leaves the tree.
             session.tree_focus = false;
             return i + 1;
         }
@@ -1388,7 +1395,7 @@ fn handleTreeInput(session: *Session, buf: []const u8, msg_buf: []u8, msg: *[]co
             session.tree = null;
             return i + 1;
         }
-        if (b == 0x09 or b == 0x1b) { // Tab: back to the editor
+        if (b == 0x09) { // Tab: back to the editor
             session.tree_focus = false;
             return i + 1;
         }
@@ -1402,7 +1409,9 @@ fn handleTreeInput(session: *Session, buf: []const u8, msg_buf: []u8, msg: *[]co
             i += 1;
             continue;
         }
-        i += 1;
+        // Anything else (Ctrl+Q, Ctrl+S, Ctrl+P, ...) belongs to the editor:
+        // hand the whole chunk back so the normal dispatch sees it.
+        return if (i == 0) null else i;
     }
     return i;
 }
@@ -1417,7 +1426,6 @@ fn openTreeSelection(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
     }
     var path_buf: [1024]u8 = undefined;
     const path = t.selectedPath(&path_buf) orelse return;
-    // Already open? Switch to it.
     for (session.docs.items, 0..) |doc, i| {
         if (doc.path) |p| {
             if (std.mem.eql(u8, p, path)) {

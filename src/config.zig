@@ -67,6 +67,9 @@ pub const Config = struct {
     tab_width: usize = 4,
     line_numbers: bool = true,
     syntax: bool = true,
+    /// Unicode icons in the file tree (false = one-letter ASCII markers).
+    /// ASCII is the default because many terminal fonts lack emoji glyphs.
+    icons_unicode: bool = false,
     /// Name of a theme from `themes/<name>.ini` (empty = built-in default).
     theme_name: [32]u8 = [_]u8{0} ** 32,
     theme_name_len: usize = 0,
@@ -158,6 +161,9 @@ pub fn apply(config: *Config, text: []const u8) void {
             if (parseBool(entry.value)) |b| config.line_numbers = b;
         } else if (std.mem.eql(u8, entry.key, "syntax")) {
             if (parseBool(entry.value)) |b| config.syntax = b;
+        } else if (std.mem.eql(u8, entry.key, "icons")) {
+            const v = std.mem.trim(u8, entry.value, " \t");
+            config.icons_unicode = std.ascii.eqlIgnoreCase(v, "unicode") or std.ascii.eqlIgnoreCase(v, "emoji");
         } else if (std.mem.eql(u8, entry.key, "theme")) {
             const v = std.mem.trim(u8, entry.value, " \t");
             const n = @min(v.len, config.theme_name.len);

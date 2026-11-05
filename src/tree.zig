@@ -82,6 +82,7 @@ pub const Tree = struct {
         var pass: usize = 0;
         while (pass < 2) : (pass += 1) {
             for (names.items) |name| {
+                if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
                 var path_buf: [MAX_PATH * 2]u8 = undefined;
                 const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, name }) catch continue;
                 const is_dir = os.isDirectory(path);
@@ -160,38 +161,59 @@ pub const Tree = struct {
 };
 
 // --- icons -----------------------------------------------------------------
-/// A single-cell glyph for a file, by extension. Anything unknown gets a dot.
-pub fn iconFor(name: []const u8, is_dir: bool, expanded: bool) []const u8 {
-    if (is_dir) return if (expanded) "v" else ">";
-    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return ".";
+/// A glyph for a file, by extension. These are plain Unicode symbols/emoji so
+/// they render in any terminal that has an emoji font; `[editor] icons = ascii`
+/// switches to one-letter markers for terminals without one.
+pub fn iconFor(name: []const u8, is_dir: bool, expanded: bool, unicode: bool) []const u8 {
+    if (is_dir) {
+        if (!unicode) return if (expanded) "v" else ">";
+        return if (expanded) "\u{1F4C2}" else "\u{1F4C1}";
+    }
+    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse {
+        return if (unicode) "\u{1F4C4}" else ".";
+    };
     const ext = name[dot + 1 ..];
+    if (!unicode) {
+        const ascii = [_]struct { ext: []const u8, glyph: []const u8 }{
+            .{ .ext = "zig", .glyph = "z" },  .{ .ext = "rs", .glyph = "r" },
+            .{ .ext = "py", .glyph = "p" },   .{ .ext = "js", .glyph = "j" },
+            .{ .ext = "ts", .glyph = "t" },   .{ .ext = "md", .glyph = "m" },
+            .{ .ext = "sh", .glyph = "$" },   .{ .ext = "html", .glyph = "<" },
+        };
+        for (ascii) |row| {
+            if (std.ascii.eqlIgnoreCase(ext, row.ext)) return row.glyph;
+        }
+        return ".";
+    }
     const table = [_]struct { ext: []const u8, glyph: []const u8 }{
-        .{ .ext = "zig", .glyph = "z" },
-        .{ .ext = "rs", .glyph = "r" },
-        .{ .ext = "py", .glyph = "p" },
-        .{ .ext = "js", .glyph = "j" },
-        .{ .ext = "ts", .glyph = "t" },
-        .{ .ext = "json", .glyph = "j" },
-        .{ .ext = "md", .glyph = "m" },
-        .{ .ext = "txt", .glyph = "t" },
-        .{ .ext = "sh", .glyph = "$" },
-        .{ .ext = "c", .glyph = "c" },
-        .{ .ext = "h", .glyph = "h" },
-        .{ .ext = "cpp", .glyph = "c" },
-        .{ .ext = "go", .glyph = "g" },
-        .{ .ext = "lua", .glyph = "l" },
-        .{ .ext = "toml", .glyph = "t" },
-        .{ .ext = "yaml", .glyph = "y" },
-        .{ .ext = "yml", .glyph = "y" },
-        .{ .ext = "ini", .glyph = "i" },
-        .{ .ext = "html", .glyph = "<" },
-        .{ .ext = "css", .glyph = "c" },
-        .{ .ext = "svg", .glyph = "s" },
+        .{ .ext = "zig", .glyph = "\u{1F4DC}" },   // scroll
+        .{ .ext = "rs", .glyph = "\u{1F980}" },   // crab
+        .{ .ext = "py", .glyph = "\u{1F40D}" },   // snake
+        .{ .ext = "js", .glyph = "\u{1F7E8}" },   // yellow square
+        .{ .ext = "ts", .glyph = "\u{1F7E6}" },   // blue square
+        .{ .ext = "json", .glyph = "\u{2699}" },  // gear
+        .{ .ext = "toml", .glyph = "\u{2699}" },
+        .{ .ext = "yaml", .glyph = "\u{2699}" },
+        .{ .ext = "yml", .glyph = "\u{2699}" },
+        .{ .ext = "ini", .glyph = "\u{2699}" },
+        .{ .ext = "md", .glyph = "\u{1F4DD}" },   // memo
+        .{ .ext = "txt", .glyph = "\u{1F4C4}" },  // page
+        .{ .ext = "sh", .glyph = "\u{1F5A5}" },   // desktop
+        .{ .ext = "c", .glyph = "\u{1F527}" },    // wrench
+        .{ .ext = "h", .glyph = "\u{1F527}" },
+        .{ .ext = "cpp", .glyph = "\u{1F527}" },
+        .{ .ext = "go", .glyph = "\u{1F439}" },   // hamster
+        .{ .ext = "lua", .glyph = "\u{1F319}" },  // moon
+        .{ .ext = "html", .glyph = "\u{1F310}" }, // globe
+        .{ .ext = "css", .glyph = "\u{1F3A8}" },  // palette
+        .{ .ext = "svg", .glyph = "\u{1F5BC}" },  // frame
+        .{ .ext = "png", .glyph = "\u{1F5BC}" },
+        .{ .ext = "jpg", .glyph = "\u{1F5BC}" },
     };
     for (table) |row| {
         if (std.ascii.eqlIgnoreCase(ext, row.ext)) return row.glyph;
     }
-    return ".";
+    return "\u{1F4C4}";
 }
 
 // --- tests -----------------------------------------------------------------
@@ -208,9 +230,10 @@ test "the tree lists the working directory" {
 }
 
 test "icons follow the extension" {
-    try std.testing.expectEqualStrings(">", iconFor("src", true, false));
-    try std.testing.expectEqualStrings("v", iconFor("src", true, true));
-    try std.testing.expectEqualStrings("z", iconFor("main.zig", false, false));
-    try std.testing.expectEqualStrings("m", iconFor("README.md", false, false));
-    try std.testing.expectEqualStrings(".", iconFor("Makefile", false, false));
+    try std.testing.expectEqualStrings("\u{1F4C1}", iconFor("src", true, false, true));
+    try std.testing.expectEqualStrings("\u{1F4C2}", iconFor("src", true, true, true));
+    try std.testing.expectEqualStrings("\u{1F4DC}", iconFor("main.zig", false, false, true));
+    try std.testing.expectEqualStrings(">", iconFor("src", true, false, false));
+    try std.testing.expectEqualStrings("z", iconFor("main.zig", false, false, false));
+    try std.testing.expectEqualStrings(".", iconFor("Makefile", false, false, false));
 }
