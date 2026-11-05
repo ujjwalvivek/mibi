@@ -82,6 +82,7 @@ const win = if (is_windows) struct {
     const ENABLE_ECHO_INPUT: DWORD = 0x0004;
     const ENABLE_MOUSE_INPUT: DWORD = 0x0010;
     const ENABLE_EXTENDED_FLAGS: DWORD = 0x0080;
+const ENABLE_QUICK_EDIT_MODE: DWORD = 0x0040;
     const FROM_LEFT_1ST_BUTTON_PRESSED: DWORD = 0x0001;
     const FROM_LEFT_2ND_BUTTON_PRESSED: DWORD = 0x0004;
     const RIGHTMOST_BUTTON_PRESSED: DWORD = 0x0002;
@@ -273,8 +274,9 @@ pub fn enterRaw() !void {
 
         // We translate INPUT_RECORDs ourselves, so no virtual-terminal input.
         const in_mode = (saved_in_mode &
-            ~(win.ENABLE_LINE_INPUT | win.ENABLE_ECHO_INPUT | win.ENABLE_PROCESSED_INPUT)) |
-            win.ENABLE_MOUSE_INPUT;
+            ~(win.ENABLE_LINE_INPUT | win.ENABLE_ECHO_INPUT | win.ENABLE_PROCESSED_INPUT |
+                win.ENABLE_QUICK_EDIT_MODE)) |
+            win.ENABLE_MOUSE_INPUT | win.ENABLE_EXTENDED_FLAGS;
         const out_mode = saved_out_mode |
             win.ENABLE_PROCESSED_OUTPUT | win.ENABLE_VIRTUAL_TERMINAL_PROCESSING;
         _ = win.SetConsoleMode(in, in_mode);

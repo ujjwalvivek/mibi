@@ -129,8 +129,10 @@ packaging.
 - Clipboard register plus **OSC 52** so copy reaches the system clipboard.
 - Undo/redo with typing grouped into single steps.
 - Find (incremental), replace all, and go-to-line.
-- Mouse: click places the cursor, the wheel scrolls three lines (the terminal
-  reports it; no mouse-only mode to learn).
+- Mouse: click text to place the cursor, click a tab to switch to it, click
+  picker rows (click again to accept), click the status-bar hint for help;
+  the wheel moves one line per notch. Quick-edit mode is turned off so the
+  console reports clicks to the editor.
 - Configurable keybindings and a colour theme via `mibi.ini` (`[keys]` and
   `[theme]`), with the whole palette and every action bindable. The help
   panel renders the keys you actually bound.
@@ -176,11 +178,11 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu |  82,320 |
-| x86_64-linux-gnu  |  90,456 |
+| aarch64-linux-gnu |  82,752 |
+| x86_64-linux-gnu  |  90,952 |
 | x86_64-macos      |  95,716 |
-| aarch64-macos     | 126,520 |
-| x86_64-windows    | 147,456 |
+| aarch64-macos     | 126,328 |
+| x86_64-windows    | 147,968 |
 
 ## Not yet
 

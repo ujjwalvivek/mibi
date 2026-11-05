@@ -639,11 +639,60 @@ def command_palette_runs_actions(m, path):
 @check
 def mouse_click_places_the_cursor(m, path):
     """A left click on a text row moves the cursor to that cell."""
-    m.send("\x1b[<0;5;2M")  # click: row 2, column 5 (1-based)
+    m.send("\x1b[<0;5;3M")  # click: screen row 3 (second text line), column 5
     m.wait_quiet()
     status = m.screen_text().splitlines()[-1]
     assert "2:3" in status, f"click did not move the cursor: {status!r}"
     m.shot("19-mouse")
+
+
+@check
+def mouse_clicks_tabs_and_picker(m, path):
+    """Click a tab to switch, click picker rows to select and accept."""
+    work = os.path.join(SHOT_DIR, "work-click")
+    os.makedirs(work, exist_ok=True)
+    with open(os.path.join(work, "a.txt"), "w", encoding="utf-8") as f:
+        f.write("alpha\nbeta\ngamma\ndelta")
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello\nworld\nthird\nfourth")
+
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+
+        # One wheel notch moves one line.
+        proc.send("\x1b[<65;5;3M")
+        proc.wait_quiet()
+        status = proc.screen_text().splitlines()[-1]
+        assert "2:1" in status, f"wheel did not move one line: {status!r}"
+
+        # A second tab, then click the first one in the tab bar.
+        proc.send("\x14")
+        proc.wait_quiet()
+        proc.send("\x1b[<0;4;1M")
+        proc.wait_quiet()
+        status = proc.screen_text().splitlines()[-1]
+        assert "notes.txt" in status, f"tab click did not switch: {status!r}"
+
+        # Click a picker row once to select it, again to accept.
+        proc.send("\x0f")
+        assert proc.wait_for("Open file"), "picker did not open"
+        proc.send("\x1b[<0;5;3M")
+        proc.wait_quiet()
+        proc.send("\x1b[<0;5;3M")
+        assert proc.wait_for("alpha"), "picker click did not open the file"
+        proc.shot("20-mouse-clicks")
+    finally:
+        proc.close()
+
+
+@check
+def mouse_click_toggles_the_help_hint(m, path):
+    """Clicking the status-bar help hint opens the panel."""
+    m.send("\x1b[<0;76;24M")  # the hint sits at the right edge of the last row
+    assert m.wait_for("mibi controls"), "help hint click did not open the panel"
+    m.shot("21-help-hint")
 
 
 @check

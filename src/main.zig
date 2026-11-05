@@ -55,7 +55,7 @@ const help_rows = [_]HelpRow{
     .{ .actions = &.{ .next_tab, .prev_tab }, .desc = "next / previous tab" },
     .{ .actions = &.{.help}, .desc = "toggle this help" },
     .{ .actions = &.{.quit}, .desc = "quit (asks if unsaved)" },
-    .{ .literal = "click / wheel", .desc = "place cursor / scroll" },
+    .{ .literal = "click / wheel", .desc = "cursor, tabs, pickers / scroll" },
 };
 
 pub const std_options: std.Options = .{
@@ -102,6 +102,8 @@ const Prompt = struct {
 /// allocated so the list can grow without invalidating live pointers.
 const UiRequest = enum { open_picker, theme_picker, command_palette };
 
+const MAX_TABS = 32;
+
 const Session = struct {
     allocator: std.mem.Allocator,
     docs: std.ArrayList(*Editor),
@@ -111,6 +113,10 @@ const Session = struct {
     ui_request: ?UiRequest = null,
     /// Set by the command palette: the run loop executes it like a key press.
     ui_action: ?keys.Action = null,
+    /// Screen columns of each tab, filled in by drawTabBar so clicks can hit
+    /// the same regions the user sees.
+    tab_spans: [MAX_TABS][2]u16 = undefined,
+    tab_count: usize = 0,
 
     fn init(allocator: std.mem.Allocator) Session {
         return .{ .allocator = allocator, .docs = std.ArrayList(*Editor).empty, .active = 0 };
@@ -440,7 +446,7 @@ fn processInput(
                 if (j >= buf.len) return i; // incomplete
                 if (buf[i + 2] == '<') {
                     // SGR mouse: ESC [ < button ; x ; y M
-                    handleMouse(session, buf[i + 2 .. j]);
+                    handleMouse(session, buf[i + 2 .. j], help);
                 } else {
                     applyCsi(session, buf[i + 2 .. j], buf[j], view_rows, running, prompt, msg_buf, msg, help, true) catch |e| setMsg(msg_buf, msg, @errorName(e));
                 }
@@ -464,9 +470,8 @@ fn processInput(
     return i;
 }
 
-/// Mouse: the primary button places the cursor, the wheel moves the view by
-/// three lines. `params` is the `<button;x;y` part of an SGR sequence, 1-based.
-fn handleMouse(session: *Session, params: []const u8) void {
+/// Parse the `<button;x;y` part of an SGR mouse sequence.
+fn parseMouse(params: []const u8) [3]u16 {
     var nums: [3]u16 = .{ 0, 0, 0 };
     var count: usize = 0;
     for (params) |c| {
@@ -478,16 +483,47 @@ fn handleMouse(session: *Session, params: []const u8) void {
         if (c < '0' or c > '9') break;
         nums[count] = nums[count] * 10 + (c - '0');
     }
+    return nums;
+}
+
+/// Mouse in the editor: click the tab bar to switch tabs, click the status-bar
+/// hint to toggle help, click text to place the cursor. The wheel moves one
+/// line per notch.
+fn handleMouse(session: *Session, params: []const u8, help: *bool) void {
+    const nums = parseMouse(params);
     const button = nums[0];
     const x = nums[1];
     const y = nums[2];
     const ed = session.current();
-    if (button == 64 or button == 65) { // wheel up / down: three lines
-        ed.movePage(if (button == 64) -1 else 1, 3, false);
+    if (button == 64 or button == 65) { // wheel up / down
+        ed.movePage(if (button == 64) -1 else 1, 1, false);
         return;
     }
-    if (button != 0 or y == 0) return; // primary button only, and not the tab bar
-    const row = ed.scroll_row + (y - 1);
+    if (button != 0) return; // primary button only
+
+    // Tab bar: switch to the tab under the pointer.
+    if (y == 1) {
+        var i: usize = 0;
+        while (i < session.tab_count) : (i += 1) {
+            const span = session.tab_spans[i];
+            if (x >= span[0] and x < span[1]) {
+                session.active = i;
+                return;
+            }
+        }
+        return;
+    }
+
+    // Status line: the right-hand help hint toggles the panel.
+    const size = term.size();
+    if (y == size.rows and size.cols > 10 and x + 10 > size.cols) {
+        help.* = !help.*;
+        return;
+    }
+
+    // Text: place the cursor at the clicked cell.
+    if (y < 2 or y >= size.rows) return;
+    const row = ed.scroll_row + (y - 2);
     const gutter: usize = if (session.config.line_numbers) digits(ed.lineCount()) + 1 else 0;
     const screen_col = if (x > 0) @as(usize, x) - 1 else 0;
     const col = if (screen_col > gutter) screen_col - gutter + ed.scroll_col else 0;
@@ -1201,6 +1237,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
 fn drawTabBar(s: *render.Screen, session: *Session, w: usize, text_fg: render.Color, dim_fg: render.Color) void {
     const bar_bg = session.config.theme.tab_bg;
     const active_bg = session.config.theme.tab_active_bg;
+    session.tab_count = 0;
     var x: usize = 0;
     while (x < w) : (x += 1) s.put(@intCast(x), 0, .{ .bg = bar_bg });
 
@@ -1216,6 +1253,10 @@ fn drawTabBar(s: *render.Screen, session: *Session, w: usize, text_fg: render.Co
             .fg = if (active) text_fg else dim_fg,
             .attr = .{ .bold = active },
         });
+        if (session.tab_count < MAX_TABS) {
+            session.tab_spans[session.tab_count] = .{ @intCast(tx), @intCast(tx + label.len) };
+            session.tab_count += 1;
+        }
         tx += label.len;
     }
 }
@@ -1433,6 +1474,25 @@ fn handlePickerInput(
                 } else {
                     if (i + 2 >= buf.len) return i;
                     end = i + 3;
+                }
+                if (buf[i + 2] == '<') {
+                    // Click in the list: select that row, accept it on a
+                    // second click (items start on screen row 3).
+                    const nums = parseMouse(buf[i + 2 .. end - 1]);
+                    if (nums[0] == 0 and nums[2] >= 3) {
+                        const idx = p.scroll + (nums[2] - 3);
+                        if (idx < p.filtered.items.len) {
+                            const was = idx == p.selected;
+                            p.selected = idx;
+                            previewTheme(session, mode, p, exe_dir);
+                            if (was) {
+                                try acceptPicker(session, slot, mode, registry, msg_buf, msg);
+                                return end;
+                            }
+                        }
+                    }
+                    i = end;
+                    continue;
                 }
                 const seq = buf[i..end];
                 if (std.mem.eql(u8, seq, "\x1b[A") or std.mem.eql(u8, seq, "\x1bOA")) {
@@ -2121,21 +2181,21 @@ test "quit on a clean buffer does not ask" {
     try std.testing.expect(d.prompt == null);
 }
 
-test "a mouse click places the cursor and the wheel scrolls" {
+test "a mouse click places the cursor and the wheel moves one line" {
     var d = try Drive.start("one\ntwo\nthree\nfour\nfive");
     defer d.stop();
+    var help = false;
 
-    // Click on the second line after the gutter (gutter is "1 " = 2 cells).
-    handleMouse(&d.session, "<0;4;3");
+    // Screen row 3 is the second text line; column 4 is after the "1 " gutter.
+    handleMouse(&d.session, "<0;4;3", &help);
     const rc = d.ed().rowCol();
-    try std.testing.expectEqual(@as(usize, 2), rc.row);
+    try std.testing.expectEqual(@as(usize, 1), rc.row);
     try std.testing.expectEqual(@as(usize, 1), rc.col);
 
-    // Wheel down moves three lines.
-    handleMouse(&d.session, "<65;1;1");
-    try std.testing.expectEqual(@as(usize, 4), d.ed().rowCol().row);
-    // Wheel up goes back.
-    handleMouse(&d.session, "<64;1;1");
+    // One wheel notch is one line.
+    handleMouse(&d.session, "<65;1;1", &help);
+    try std.testing.expectEqual(@as(usize, 2), d.ed().rowCol().row);
+    handleMouse(&d.session, "<64;1;1", &help);
     try std.testing.expectEqual(@as(usize, 1), d.ed().rowCol().row);
 }
 
