@@ -52,6 +52,8 @@ const win = struct {
     ) callconv(.winapi) HANDLE;
     extern "kernel32" fn FindNextFileW(hFindFile: HANDLE, lpFindFileData: *WIN32_FIND_DATAW) callconv(.winapi) c_int;
     extern "kernel32" fn FindClose(hFindFile: HANDLE) callconv(.winapi) c_int;
+    extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
+    extern "kernel32" fn DeleteFileW(lpFileName: [*:0]const u16) callconv(.winapi) c_int;
 
     const FILETIME = extern struct { dwLowDateTime: u32, dwHighDateTime: u32 };
     const WIN32_FIND_DATAW = extern struct {
@@ -79,11 +81,24 @@ const win = struct {
     const FILE_ATTRIBUTE_NORMAL: DWORD = 0x00000080;
     const INVALID_HANDLE_VALUE: HANDLE = @ptrFromInt(std.math.maxInt(usize));
 
+    const ERROR_FILE_NOT_FOUND: DWORD = 2;
+    const ERROR_PATH_NOT_FOUND: DWORD = 3;
+    const ERROR_ACCESS_DENIED: DWORD = 5;
+
     fn handle(fd: u32) ?HANDLE {
         return switch (fd) {
             STDIN => GetStdHandle(STD_INPUT_HANDLE),
             STDOUT => GetStdHandle(STD_OUTPUT_HANDLE),
             else => GetStdHandle(STD_ERROR_HANDLE),
+        };
+    }
+
+    /// Map a failed CreateFileW/WriteFile to a meaningful error.
+    fn lastError() anyerror {
+        return switch (GetLastError()) {
+            ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND => error.FileNotFound,
+            ERROR_ACCESS_DENIED => error.AccessDenied,
+            else => error.OpenFailed,
         };
     }
 };
@@ -149,17 +164,28 @@ pub fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8, max: usize)
             win.FILE_ATTRIBUTE_NORMAL,
             null,
         );
-        if (h == win.INVALID_HANDLE_VALUE) return error.OpenFailed;
+        if (h == win.INVALID_HANDLE_VALUE) return win.lastError();
         defer _ = win.CloseHandle(h);
         return readAllWindows(allocator, h, max);
     } else {
         const z = try allocator.dupeZ(u8, path);
         defer allocator.free(z);
         const fd = std.c.open(z.ptr, .{ .ACCMODE = .RDONLY }, @as(c_uint, 0));
-        if (fd < 0) return error.OpenFailed;
+        if (fd < 0) return openError(fd);
         defer _ = std.c.close(fd);
         return readAllUnix(allocator, fd, max);
     }
+}
+
+/// Map a failed `open` to the errors callers care about.
+fn openError(rc: c_int) anyerror {
+    if (is_windows) return error.OpenFailed;
+    return switch (std.c.errno(rc)) {
+        .NOENT => error.FileNotFound,
+        .ACCES, .PERM => error.AccessDenied,
+        .ISDIR => error.IsDir,
+        else => error.OpenFailed,
+    };
 }
 
 fn readAllUnix(allocator: std.mem.Allocator, fd: i32, max: usize) ![]u8 {
@@ -204,7 +230,7 @@ pub fn writeFile(path: []const u8, bytes: []const u8) !void {
             win.FILE_ATTRIBUTE_NORMAL,
             null,
         );
-        if (h == win.INVALID_HANDLE_VALUE) return error.OpenFailed;
+        if (h == win.INVALID_HANDLE_VALUE) return win.lastError();
         defer _ = win.CloseHandle(h);
         var i: usize = 0;
         while (i < bytes.len) {
@@ -217,7 +243,7 @@ pub fn writeFile(path: []const u8, bytes: []const u8) !void {
         const z = try std.heap.page_allocator.dupeZ(u8, path);
         defer std.heap.page_allocator.free(z);
         const fd = std.c.open(z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c_uint, 0o644));
-        if (fd < 0) return error.OpenFailed;
+        if (fd < 0) return openError(fd);
         defer _ = std.c.close(fd);
         var i: usize = 0;
         while (i < bytes.len) {
@@ -228,10 +254,29 @@ pub fn writeFile(path: []const u8, bytes: []const u8) !void {
     }
 }
 
+/// Delete `path`. A file that is already gone is not an error.
+pub fn deleteFile(path: []const u8) !void {
+    if (is_windows) {
+        const wpath = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path);
+        defer std.heap.page_allocator.free(wpath);
+        if (win.DeleteFileW(wpath.ptr) == 0) {
+            if (win.GetLastError() == win.ERROR_FILE_NOT_FOUND) return;
+            return error.DeleteFailed;
+        }
+    } else {
+        const z = try std.heap.page_allocator.dupeZ(u8, path);
+        defer std.heap.page_allocator.free(z);
+        const rc = std.c.unlink(z.ptr);
+        if (rc < 0) {
+            if (std.c.errno(rc) == .NOENT) return;
+            return error.DeleteFailed;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Directory listing (for path prompts)
 // ---------------------------------------------------------------------------
-
 /// Append the names of the entries in `path` to `out` (caller frees each).
 pub fn listDirNames(allocator: std.mem.Allocator, path: []const u8, out: *std.ArrayList([]u8)) !void {
     if (is_windows) return listDirWindows(allocator, path, out);
