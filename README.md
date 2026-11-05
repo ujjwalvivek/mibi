@@ -1,5 +1,7 @@
 # mibi
 
+<img src="assets/png/mibi-128.png" width="96" alt="mibi">
+
 A tiny, modern terminal text editor. Non-modal, in the spirit of nano/micro,
 built in Zig with no third-party dependencies.
 
@@ -27,6 +29,38 @@ toolchain (0.16.0) is fetched into `tools/zig` on first use.
 .\build.ps1 -Doptimize=Debug
 .\build.ps1 -Dtarget=x86_64-linux-gnu   # cross-compile
 ```
+
+## Configuration
+
+Copy `mibi.ini.example` to `mibi.ini` next to the binary (or into the directory
+you run mibi from); it is optional and every key falls back to a default.
+Unknown keys are ignored.
+
+```ini
+[editor]
+tab_width = 2
+line_numbers = false
+syntax = true
+
+[theme]
+background = #0e0e0e   ; unset keeps the terminal's own background
+text = #d8dee9
+keyword1 = #c678dd
+comment = #6a7382
+```
+
+The theme controls the whole palette: editor text, gutter, selection, tab bar,
+status line, help panel and the syntax classes. Colours are `#rrggbb` or `#rgb`.
+
+Language definitions are separate: drop a `.ini` into `syntax.d/` (kibi's
+format, 52 languages ship with mibi) and it is picked up at startup.
+
+## Icons
+
+`assets/` holds the app icon (`mibi.svg`, `mibi.ico` and PNGs from 16 to
+1024 px). Windows builds embed `mibi.ico` as a resource, and
+`.\build.ps1` installs the icons under `zig-out/share/mibi/icons` for
+packaging.
 
 ## Controls
 
@@ -104,11 +138,11 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 
 | Target | Bytes |
 | --- | ---: |
-| aarch64-linux-gnu | 58,080 |
-| x86_64-linux-gnu | 63,576 |
-| x86_64-macos | 71,020 |
-| aarch64-macos | 107,304 |
-| x86_64-windows | 115,200 |
+| aarch64-linux-gnu | 61,440 |
+| x86_64-linux-gnu | 67,608 |
+| x86_64-macos | 75,116 |
+| aarch64-macos | 107,720 |
+| x86_64-windows | 122,880 |
 
 ## Not yet
 

@@ -422,6 +422,29 @@ def syntax_highlighting_emits_colours(m, path):
 
 
 @check
+def config_file_sets_theme_and_gutter(m, path):
+    """mibi.ini can hide line numbers and recolour the text."""
+    cfg_dir = os.path.join(SHOT_DIR, "work-cfg")
+    os.makedirs(cfg_dir, exist_ok=True)
+    with open(os.path.join(cfg_dir, "mibi.ini"), "w", encoding="utf-8") as f:
+        f.write("[editor]\nline_numbers = false\n\n[theme]\ntext = #ff0000\n")
+    with open(os.path.join(cfg_dir, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello\nworld")
+
+    proc = Mibi(["notes.txt"], cwd=cfg_dir)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        lines = proc.screen_text().splitlines()
+        assert lines[1].startswith("hello"), f"line numbers not hidden: {lines[1]!r}"
+        fg = proc.screen.fg_at(1, 0)
+        assert fg == (255, 0, 0), f"theme text colour not applied: {fg}"
+        proc.shot("12-config")
+    finally:
+        proc.close()
+
+
+@check
 def unicode_and_wide_cells(m, path):
     """A CJK character takes two cells and does not break the layout."""
     m.send("\x1b[F")  # End of the current line

@@ -37,7 +37,18 @@ pub fn build(b: *std.Build) void {
         .name = "mibi",
         .root_module = exe_mod,
     });
+    // Windows builds carry the app icon (assets/mibi.ico) as a resource.
+    if (target.result.os.tag == .windows) {
+        exe_mod.addWin32ResourceFile(.{ .file = b.path("assets/mibi.rc") });
+    }
     b.installArtifact(exe);
+
+    // Icons for packaging: zig-out/share/mibi/icons.
+    b.installDirectory(.{
+        .source_dir = b.path("assets"),
+        .install_dir = .prefix,
+        .install_subdir = "share/mibi/icons",
+    });
 
     // Language definitions travel with the binary: `syntax.d` is looked up next
     // to the executable (or in the working directory when running from source).

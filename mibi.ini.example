@@ -1,0 +1,32 @@
+; mibi configuration.
+;
+; Copy this file to `mibi.ini` next to the binary, or into the directory you
+; run mibi from. Every key is optional: unset values keep the defaults, and
+; unknown keys are ignored.
+
+[editor]
+; Cells a tab advances to (clamped to 1-16).
+tab_width = 4
+; Line numbers in the left gutter.
+line_numbers = true
+; Syntax highlighting from syntax.d/*.ini.
+syntax = true
+
+[theme]
+; Colours are #rrggbb or #rgb. Uncomment to override the default palette.
+; background = #0e0e0e   ; unset keeps the terminal's own background
+; text = #d8dee9
+; gutter = #5c6370
+; selection = #334566
+; bar_bg = #282838
+; accent = #8bd450
+; hint_bg = #1e1e2a
+; hint_fg = #8892a4
+; tab_bg = #1e1e2a
+; tab_active_bg = #334566
+; help_bg = #1a1a24
+; comment = #6a7382
+; keyword1 = #c678dd
+; keyword2 = #e5c07b
+; string = #98c379
+; number = #d19a66

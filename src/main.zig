@@ -18,11 +18,11 @@ const Editor = editor_mod.Editor;
 const utf8 = @import("text.zig");
 const width = @import("width.zig");
 const syntax = @import("syntax.zig");
+const config_mod = @import("config.zig");
 
 pub const version = "0.0.1";
 
 const MAX_FILE = 64 * 1024 * 1024;
-const TAB_STOP = 4;
 
 const help_lines = [_][]const u8{
     "mibi controls",
@@ -96,6 +96,7 @@ const Session = struct {
     allocator: std.mem.Allocator,
     docs: std.ArrayList(*Editor),
     active: usize,
+    config: config_mod.Config = .{},
 
     fn init(allocator: std.mem.Allocator) Session {
         return .{ .allocator = allocator, .docs = std.ArrayList(*Editor).empty, .active = 0 };
@@ -121,7 +122,8 @@ const Session = struct {
         const ed = try self.allocator.create(Editor);
         errdefer self.allocator.destroy(ed);
         ed.* = try Editor.init(self.allocator, path, data);
-        ed.lang = lang;
+        ed.tab_width = self.config.tab_width;
+        ed.lang = if (self.config.syntax) lang else null;
         errdefer ed.deinit();
         try self.docs.append(self.allocator, ed);
         self.active = self.docs.items.len - 1;
@@ -200,17 +202,19 @@ fn run(init: std.process.Init.Minimal) !void {
     // working directory (kibi's model: data files, not code).
     var registry = syntax.Registry.init(allocator);
     defer registry.deinit();
-    if (os.exeDirAlloc(allocator)) |exe_dir| {
-        defer allocator.free(exe_dir);
+    const exe_dir = os.exeDirAlloc(allocator) catch null;
+    defer if (exe_dir) |d| allocator.free(d);
+    if (exe_dir) |dir| {
         var dir_buf: [1024]u8 = undefined;
-        if (std.fmt.bufPrint(&dir_buf, "{s}/syntax.d", .{exe_dir})) |dir| {
-            _ = registry.loadDir(dir);
+        if (std.fmt.bufPrint(&dir_buf, "{s}/syntax.d", .{dir})) |sub_dir| {
+            _ = registry.loadDir(sub_dir);
         } else |_| {}
-    } else |_| {}
+    }
     if (registry.langs.items.len == 0) _ = registry.loadDir("syntax.d");
 
     var session = Session.init(allocator);
     defer session.deinit();
+    session.config = config_mod.load(allocator, exe_dir);
     try session.add(path, initial, registry.find(path));
     if (initial_owned) |d| allocator.free(d);
 
@@ -726,14 +730,14 @@ fn digits(n: usize) usize {
 }
 
 /// Colour for a syntax class; plain text keeps the editor's normal colour.
-fn syntaxColor(class: syntax.Class, normal: render.Color) render.Color {
+fn syntaxColor(class: syntax.Class, theme: config_mod.Theme) render.Color {
     return switch (class) {
-        .normal => normal,
-        .comment, .ml_comment => render.Color{ .rgb = .{ .r = 0x6a, .g = 0x73, .b = 0x82 } },
-        .keyword1 => render.Color{ .rgb = .{ .r = 0xc6, .g = 0x78, .b = 0xdd } },
-        .keyword2 => render.Color{ .rgb = .{ .r = 0xe5, .g = 0xc0, .b = 0x7b } },
-        .string, .ml_string => render.Color{ .rgb = .{ .r = 0x98, .g = 0xc3, .b = 0x79 } },
-        .number => render.Color{ .rgb = .{ .r = 0xd1, .g = 0x9a, .b = 0x66 } },
+        .normal => theme.text,
+        .comment, .ml_comment => theme.comment,
+        .keyword1 => theme.keyword1,
+        .keyword2 => theme.keyword2,
+        .string, .ml_string => theme.string,
+        .number => theme.number,
     };
 }
 
@@ -744,19 +748,28 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
     if (h < 3 or w < 4) return;
 
     const ed = session.current();
+    const theme = session.config.theme;
     const view_rows = h - 2; // row 0 is the tab bar, row h-1 the status line
     const total = ed.lineCount();
-    const gutter: usize = digits(total) + 1;
+    const gutter: usize = if (session.config.line_numbers) digits(total) + 1 else 0;
     const text_cols: usize = if (w > gutter + 1) w - gutter - 1 else 0;
     ed.scrollToCursor(view_rows, text_cols);
 
-    const gutter_fg = render.Color{ .rgb = .{ .r = 0x5c, .g = 0x63, .b = 0x70 } };
-    const text_fg = render.Color{ .rgb = .{ .r = 0xd8, .g = 0xde, .b = 0xe9 } };
-    const sel_bg = render.Color{ .rgb = .{ .r = 0x33, .g = 0x45, .b = 0x66 } };
-    const bar_bg = render.Color{ .rgb = .{ .r = 0x28, .g = 0x28, .b = 0x38 } };
-    const accent = render.Color{ .rgb = .{ .r = 0x8b, .g = 0xd4, .b = 0x50 } };
-    const hint_bg = render.Color{ .rgb = .{ .r = 0x1e, .g = 0x1e, .b = 0x2a } };
-    const hint_fg = render.Color{ .rgb = .{ .r = 0x88, .g = 0x92, .b = 0xa4 } };
+    const gutter_fg = theme.gutter;
+    const text_fg = theme.text;
+    const sel_bg = theme.selection;
+    const bar_bg = theme.bar_bg;
+    const accent = theme.accent;
+    const hint_bg = theme.hint_bg;
+    const hint_fg = theme.hint_fg;
+
+    if (theme.background != .default) {
+        var by: usize = 0;
+        while (by < h) : (by += 1) {
+            var bx: usize = 0;
+            while (bx < w) : (bx += 1) s.put(@intCast(bx), @intCast(by), .{ .bg = theme.background });
+        }
+    }
 
     drawTabBar(s, session, w, text_fg, gutter_fg);
 
@@ -779,12 +792,14 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
         const nspans = ed.highlightLine(lr, &syn_state, &spans);
 
         // Gutter.
-        var num_buf: [24]u8 = undefined;
-        const num = std.fmt.bufPrint(&num_buf, "{d}", .{lr + 1}) catch "";
-        const gx = gutter - 1;
-        var k: usize = 0;
-        while (k + num.len < gx) : (k += 1) s.put(@intCast(k), y, .{ .ch = ' ' });
-        s.putStr(@intCast(gx - num.len), y, num, .{ .fg = gutter_fg });
+        if (gutter > 0) {
+            var num_buf: [24]u8 = undefined;
+            const num = std.fmt.bufPrint(&num_buf, "{d}", .{lr + 1}) catch "";
+            const gx = gutter - 1;
+            var k: usize = 0;
+            while (k + num.len < gx) : (k += 1) s.put(@intCast(k), y, .{ .ch = ' ' });
+            s.putStr(@intCast(gx - num.len), y, num, .{ .fg = gutter_fg });
+        }
 
         // Text (wide characters take two cells; the second is marked cont).
         var dcol: usize = 0;
@@ -800,10 +815,11 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
                 spans[span_i].class
             else
                 .normal;
-            const fg = syntaxColor(cls, text_fg);
+            const fg = syntaxColor(cls, theme);
             if (cp == '\r') continue; // CRLF: the CR is never drawn (or counted)
             if (cp == '\t') {
-                const next = (dcol / TAB_STOP + 1) * TAB_STOP;
+                const tab = ed.tab_width;
+                const next = (dcol / tab + 1) * tab;
                 while (dcol < next) : (dcol += 1) {
                     if (dcol >= ed.scroll_col) {
                         var cell = render.Cell{ .ch = ' ', .fg = fg };
@@ -882,13 +898,13 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
 
     // The help panel covers the bottom rows, so a prompt (which lives on the
     // last row) takes precedence over it while it is open.
-    if (help and prompt == null) drawHelp(s, w, h);
+    if (help and prompt == null) drawHelp(s, w, h, theme);
 }
 
 /// One row of tabs: ` name [+] ` per document, the active one highlighted.
 fn drawTabBar(s: *render.Screen, session: *Session, w: usize, text_fg: render.Color, dim_fg: render.Color) void {
-    const bar_bg = render.Color{ .rgb = .{ .r = 0x1e, .g = 0x1e, .b = 0x2a } };
-    const active_bg = render.Color{ .rgb = .{ .r = 0x33, .g = 0x45, .b = 0x66 } };
+    const bar_bg = session.config.theme.tab_bg;
+    const active_bg = session.config.theme.tab_active_bg;
     var x: usize = 0;
     while (x < w) : (x += 1) s.put(@intCast(x), 0, .{ .bg = bar_bg });
 
@@ -909,13 +925,13 @@ fn drawTabBar(s: *render.Screen, session: *Session, w: usize, text_fg: render.Co
 }
 
 /// Bottom panel listing the controls (temporary; will become a real panel).
-fn drawHelp(s: *render.Screen, w: usize, h: usize) void {
+fn drawHelp(s: *render.Screen, w: usize, h: usize, theme: config_mod.Theme) void {
     if (h < 2) return;
     const panel_h = @min(h - 1, help_lines.len + 1);
     const top = h - panel_h;
-    const bg = render.Color{ .rgb = .{ .r = 0x1a, .g = 0x1a, .b = 0x24 } };
-    const fg = render.Color{ .rgb = .{ .r = 0xd8, .g = 0xde, .b = 0xe9 } };
-    const title_fg = render.Color{ .rgb = .{ .r = 0x8b, .g = 0xd4, .b = 0x50 } };
+    const bg = theme.help_bg;
+    const fg = theme.text;
+    const title_fg = theme.accent;
 
     var y: usize = top;
     while (y < h) : (y += 1) {
@@ -1565,6 +1581,43 @@ test "an edit that opens a block comment re-colours the lines below" {
     draw(&s, &d.session, "", null, false);
     const after = s.back[row + 2].fg;
     try std.testing.expect(!std.meta.eql(before, after));
+}
+
+test "the config theme colours the text" {
+    var d = try Drive.start("hello");
+    defer d.stop();
+    d.session.config.theme.text = .{ .rgb = .{ .r = 0xff, .g = 0x00, .b = 0x00 } };
+    var s = try render.Screen.init(std.testing.allocator, 20, 4);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+    const cell = s.back[1 * s.cols + 2]; // row 1, first text cell (gutter is 2)
+    const fg = switch (cell.fg) {
+        .rgb => |c| c,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(u8, 0xff), fg.r);
+}
+
+test "line numbers can be turned off" {
+    var d = try Drive.start("hello");
+    defer d.stop();
+    d.session.config.line_numbers = false;
+    var s = try render.Screen.init(std.testing.allocator, 20, 4);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+    var buf: [32]u8 = undefined;
+    const row = rowText(&s, 1, &buf);
+    try std.testing.expect(std.mem.startsWith(u8, row, "hello"));
+}
+
+test "the config tab width drives the cursor column" {
+    var d = try Drive.start("\tx");
+    defer d.stop();
+    d.session.current().cursor = 1;
+    d.session.current().tab_width = 2;
+    try std.testing.expectEqual(@as(usize, 2), d.session.current().cursorDisplayCol());
+    d.session.current().tab_width = 8;
+    try std.testing.expectEqual(@as(usize, 8), d.session.current().cursorDisplayCol());
 }
 
 test "the tab bar shows every open document" {

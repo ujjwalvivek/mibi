@@ -12,7 +12,6 @@ const width = @import("width.zig");
 const syntax = @import("syntax.zig");
 
 const MAX_UNDO = 512;
-const TAB_STOP = 4;
 
 pub const Range = struct { start: usize, end: usize };
 pub const RowCol = struct { row: usize, col: usize };
@@ -21,6 +20,8 @@ pub const Editor = struct {
     allocator: Allocator,
     buf: Buffer,
     cursor: usize = 0,
+    /// Cells a tab advances to; set from the config.
+    tab_width: usize = 4,
     scroll_row: usize = 0,
     scroll_col: usize = 0,
     path: ?[]u8 = null,
@@ -597,7 +598,7 @@ pub const Editor = struct {
         while (i < rc.col and i < ln.len) {
             const cp = utf8.nextCp(ln, &i);
             if (cp == '\t') {
-                dcol = (dcol / TAB_STOP + 1) * TAB_STOP;
+                dcol = (dcol / self.tab_width + 1) * self.tab_width;
             } else if (cp == '\r') {
                 // A CR is never drawn (CRLF files), so it occupies no cell;
                 // counting it would put the cursor one column past the text.

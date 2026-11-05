@@ -1,0 +1,3 @@
+// Windows icon for mibi.exe (Explorer, taskbar, shortcuts).
+// Paths are relative to this file.
+IDI_ICON1 ICON "mibi.ico"
