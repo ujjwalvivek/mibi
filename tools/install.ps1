@@ -1,13 +1,14 @@
 param(
     [string]$Target = (Join-Path $env:LOCALAPPDATA 'Programs\Mibi'),
+    [string]$Font = 'Maple Mono NF',
     [switch]$Quiet
 )
 # Installs (or updates) the built editor into %LOCALAPPDATA%\Programs\Mibi:
-# the binary, syntax.d, themes and a launcher that opens it in the mibi
-# Windows Terminal profile (so it gets the Maple Mono NF font).
+# binary, syntax.d, themes, a launcher, and the Windows Terminal profile.
 $ErrorActionPreference = 'Stop'
 
-$src = Join-Path $PSScriptRoot '..\zig-out\bin'
+$Root = Join-Path $PSScriptRoot '..'
+$src = Join-Path $Root 'zig-out\bin'
 $exe = Join-Path $src 'mibi.exe'
 if (-not (Test-Path $exe)) { throw "No build found at $exe - run .\build.ps1 first" }
 
@@ -25,10 +26,10 @@ foreach ($dir in 'syntax.d', 'themes') {
 # Keep the user's config: only seed it the first time.
 $ini = Join-Path $Target 'mibi.ini'
 if (-not (Test-Path $ini)) {
-    Copy-Item (Join-Path $PSScriptRoot '..\mibi.ini.example') $ini -Force
+    Copy-Item (Join-Path $Root 'mibi.ini.example') $ini -Force
 }
 
-# Launcher: run inside the mibi profile so the terminal uses Maple Mono NF.
+# Launcher: run inside the mibi profile so the terminal uses the Nerd Font.
 $launcher = @"
 @echo off
 where wt.exe >nul 2>nul
@@ -40,13 +41,26 @@ wt.exe -p mibi "%~dp0mibi.exe" %*
 "@
 Set-Content -Path (Join-Path $Target 'mibi.cmd') -Value $launcher -Encoding ASCII
 
-# Point the Windows Terminal profile at the installed binary.
-$fragment = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\Fragments\mibi\mibi.json'
-if (Test-Path $fragment) {
-    $json = Get-Content $fragment -Raw
+# Windows Terminal profile: fill in this machine's paths from the packaged
+# template (zig-out\share\mibi\windows-terminal) or the repo's assets.
+$fragSrc = @(
+    (Join-Path $src '..\share\mibi\windows-terminal\mibi.json'),
+    (Join-Path $Root 'assets\windows-terminal\mibi.json')
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+$fragDest = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\Fragments\mibi'
+if ($fragSrc) {
+    New-Item -ItemType Directory -Force $fragDest | Out-Null
+    $json = Get-Content $fragSrc -Raw
     $slashed = (Join-Path $Target 'mibi.exe') -replace '\\', '/'
     $json = $json -replace '"commandline": "[^"]*"', ('"commandline": "' + $slashed + '"')
-    Set-Content -Path $fragment -Value $json -Encoding UTF8
+    $json = $json -replace '"face": "[^"]*"', ('"face": "' + $Font + '"')
+    Set-Content -Path (Join-Path $fragDest 'mibi.json') -Value $json -Encoding UTF8
+    foreach ($icon in @(
+        (Join-Path $src '..\share\mibi\icons\png\mibi-128.png'),
+        (Join-Path $Root 'assets\png\mibi-128.png')
+    )) {
+        if (Test-Path $icon) { Copy-Item $icon $fragDest -Force; break }
+    }
 }
 
 # Windows Terminal materialises fragment profiles into settings.json the first
@@ -69,6 +83,6 @@ if (-not $Quiet) {
     Write-Host "Installed mibi in $Target"
     Write-Host "  binary:   $(Join-Path $Target 'mibi.exe')"
     Write-Host "  launcher: $(Join-Path $Target 'mibi.cmd')  (opens in the mibi profile)"
-    Write-Host "  profile:  commandline updated in $fragment"
+    Write-Host "  profile:  $fragDest\mibi.json"
     Write-Host "Add $Target to PATH if you want to type 'mibi' anywhere."
 }
