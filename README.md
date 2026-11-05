@@ -5,8 +5,8 @@ built in Zig with no third-party dependencies.
 
 Status: **Phase 3 in progress** - Phase 2 (open, edit, select, copy, undo,
 save) is complete and hardened, plus the Unicode width table,
-find/replace/go-to-line and a help panel. Cross-platform (Linux, macOS,
-Windows).
+find/replace/go-to-line, a help panel and multiple documents in tabs.
+Cross-platform (Linux, macOS, Windows).
 
 ```
 mibi                # new buffer
@@ -50,9 +50,11 @@ toolchain (0.16.0) is fetched into `tools/zig` on first use.
 | `Ctrl+R` | replace all |
 | `Ctrl+G` | go to `line[:column]` |
 | `Ctrl+S` | save; asks for a name if the buffer is unnamed |
-| `Ctrl+O` | open a file (Tab completes the path; asks first if there are unsaved edits) |
+| `Ctrl+O` | open a file in a new tab (Tab completes the path) |
+| `Ctrl+T` / `Ctrl+W` | new tab / close tab (closing the last one quits) |
+| `Ctrl+PgUp` / `Ctrl+PgDn` | previous / next tab |
 | `Ctrl+?` / `F1` | help panel |
-| `Ctrl+Q` | quit (asks first if there are unsaved edits) |
+| `Ctrl+Q` | quit (asks first if any tab has unsaved edits) |
 
 ## Features
 
@@ -66,9 +68,10 @@ toolchain (0.16.0) is fetched into `tools/zig` on first use.
 - Undo/redo with typing grouped into single steps.
 - Find (incremental), replace all, and go-to-line.
 - Line numbers, status bar (name, dirty `[+]`, cursor, line count, size).
-- File open/save; path prompts list the directory; Tab completes. Quit and
-  Open ask before discarding unsaved edits, and a failed open or save reports
-  the actual OS error rather than failing silently.
+- Multiple documents as tabs: a tab bar with per-document dirty markers,
+  Ctrl+T / Ctrl+W, Ctrl+PgUp / Ctrl+PgDn, and a quit that checks every tab.
+- File open/save; path prompts list the directory; Tab completes. A failed
+  open or save reports the actual OS error rather than failing silently.
 - Cell-grid **diff renderer**: changed rows are rewritten in full.
 - Raw mode, alternate screen, resize handling, auto-wrap disabled, UTF-8
   console codepage set on Windows.
@@ -77,7 +80,7 @@ toolchain (0.16.0) is fetched into `tools/zig` on first use.
 ## Architecture
 
 ```
-src/main.zig     entry, input decoding, prompts, drawing
+src/main.zig     entry, input decoding, prompts, tabs, drawing
 src/editor.zig   cursor, selection, editing, undo/redo, clipboard, search, files
 src/buffer.zig   piece table + cached line index
 src/render.zig   cell grid + ANSI diff
@@ -95,14 +98,13 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 
 | Target | Bytes |
 | --- | ---: |
-| aarch64-linux-gnu | 53,384 |
-| x86_64-linux-gnu | 59,552 |
-| x86_64-macos | 66,854 |
-| aarch64-macos | 90,216 |
-| x86_64-windows | 107,520 |
+| aarch64-linux-gnu | 54,040 |
+| x86_64-linux-gnu | 60,784 |
+| x86_64-macos | 66,862 |
+| aarch64-macos | 90,072 |
+| x86_64-windows | 109,056 |
 
 ## Not yet
 
-Tabs / multiple files, syntax highlighting, config file, keybindings, themes,
-mouse, splits, file tree, command palette, multi-cursor, macros, regex,
-embedded terminal.
+Syntax highlighting, config file, keybindings, themes, mouse, splits, file
+tree, command palette, multi-cursor, macros, regex, embedded terminal.

@@ -42,7 +42,9 @@ const help_lines = [_][]const u8{
     "  Enter / Tab            new line / indent",
     "  Backspace / Delete     delete",
     "  Ctrl+S                 save (Save as if unnamed)",
-    "  Ctrl+O                 open (Tab completes path)",
+    "  Ctrl+O                 open in a new tab (Tab completes path)",
+    "  Ctrl+T / Ctrl+W        new tab / close tab",
+    "  Ctrl+PgUp / Ctrl+PgDn  previous / next tab",
     "  Ctrl+?  / F1           toggle this help",
     "  Ctrl+Q                 quit (asks if unsaved)",
 };
@@ -74,7 +76,7 @@ fn fatal(err: anyerror) noreturn {
     os.exit(1);
 }
 
-const PromptKind = enum { save_as, open, find, replace_find, replace_with, goto, confirm_quit, confirm_open };
+const PromptKind = enum { save_as, open, find, replace_find, replace_with, goto, confirm_quit, confirm_close };
 
 const Prompt = struct {
     kind: PromptKind,
@@ -85,6 +87,78 @@ const Prompt = struct {
     /// The find text remembered between the replace prompts.
     find_buf: [256]u8 = undefined,
     find_len: usize = 0,
+};
+
+/// All open documents in tab order, with one active. Editors are heap
+/// allocated so the list can grow without invalidating live pointers.
+const Session = struct {
+    allocator: std.mem.Allocator,
+    docs: std.ArrayList(*Editor),
+    active: usize,
+
+    fn init(allocator: std.mem.Allocator) Session {
+        return .{ .allocator = allocator, .docs = std.ArrayList(*Editor).empty, .active = 0 };
+    }
+
+    fn deinit(self: *Session) void {
+        for (self.docs.items) |ed| {
+            ed.deinit();
+            self.allocator.destroy(ed);
+        }
+        self.docs.deinit(self.allocator);
+    }
+
+    fn count(self: *Session) usize {
+        return self.docs.items.len;
+    }
+
+    fn current(self: *Session) *Editor {
+        return self.docs.items[self.active];
+    }
+
+    fn add(self: *Session, path: ?[]const u8, data: []const u8) !void {
+        const ed = try self.allocator.create(Editor);
+        errdefer self.allocator.destroy(ed);
+        ed.* = try Editor.init(self.allocator, path, data);
+        errdefer ed.deinit();
+        try self.docs.append(self.allocator, ed);
+        self.active = self.docs.items.len - 1;
+    }
+
+    /// Close the active tab; the caller quits when the last one goes.
+    fn closeActive(self: *Session) void {
+        if (self.docs.items.len == 0) return;
+        const ed = self.docs.items[self.active];
+        ed.deinit();
+        self.allocator.destroy(ed);
+        _ = self.docs.orderedRemove(self.active);
+        if (self.active >= self.docs.items.len and self.docs.items.len > 0) {
+            self.active = self.docs.items.len - 1;
+        }
+    }
+
+    fn cycle(self: *Session, delta: isize) void {
+        const n = self.docs.items.len;
+        if (n <= 1) return;
+        const i: isize = @as(isize, @intCast(self.active)) + delta;
+        self.active = @intCast(@mod(i, @as(isize, @intCast(n))));
+    }
+
+    fn anyDirty(self: *Session) bool {
+        for (self.docs.items) |ed| {
+            if (ed.dirty) return true;
+        }
+        return false;
+    }
+
+    fn findByPath(self: *Session, path: []const u8) ?usize {
+        for (self.docs.items, 0..) |ed, i| {
+            if (ed.path) |p| {
+                if (std.mem.eql(u8, p, path)) return i;
+            }
+        }
+        return null;
+    }
 };
 
 fn run(init: std.process.Init.Minimal) !void {
@@ -120,8 +194,9 @@ fn run(init: std.process.Init.Minimal) !void {
         };
         if (initial_owned) |d| initial = d;
     }
-    var ed = try Editor.init(allocator, path, initial);
-    defer ed.deinit();
+    var session = Session.init(allocator);
+    defer session.deinit();
+    try session.add(path, initial);
     if (initial_owned) |d| allocator.free(d);
 
     try term.enterRaw();
@@ -155,13 +230,15 @@ fn run(init: std.process.Init.Minimal) !void {
         }
 
         // Keep the view on the cursor; when the view scrolls, repaint the whole
-        // screen so no stale cells can survive the jump.
+        // screen so no stale cells can survive the jump. Rows 0 and h-1 are the
+        // tab bar and the status/prompt line.
         {
+            const ed = session.current();
             const total = ed.lineCount();
             const gutter = digits(total) + 1;
             const w: usize = screen.cols;
             const text_cols: usize = if (w > gutter + 1) w - gutter - 1 else 0;
-            ed.scrollToCursor(@as(usize, screen.rows) - 1, text_cols);
+            ed.scrollToCursor(viewRows(screen.rows), text_cols);
             if (ed.scroll_row != last_scroll_row or ed.scroll_col != last_scroll_col) {
                 last_scroll_row = ed.scroll_row;
                 last_scroll_col = ed.scroll_col;
@@ -169,7 +246,7 @@ fn run(init: std.process.Init.Minimal) !void {
             }
         }
 
-        draw(&screen, &ed, msg, prompt, help);
+        draw(&screen, &session, msg, prompt, help);
         try screen.render();
 
         const n = try term.readInput(&input);
@@ -192,16 +269,16 @@ fn run(init: std.process.Init.Minimal) !void {
         pending_len += n;
 
         msg = "";
-        const view_rows: usize = @as(usize, screen.rows) - 1;
+        const view_rows = viewRows(screen.rows);
         // Consume whole tokens. A prompt can close in the middle of a chunk
         // (Enter), after which the remaining bytes are ordinary editing input.
         var off: usize = 0;
         while (off < pending_len and running) {
             const chunk = pending[off..pending_len];
             const used = if (prompt != null)
-                try handlePromptInput(&ed, &prompt, chunk, &running, &msg_buf, &msg)
+                try handlePromptInput(&session, &prompt, chunk, &running, &msg_buf, &msg)
             else
-                try processInput(&ed, chunk, view_rows, &running, &prompt, &help, &msg_buf, &msg);
+                try processInput(&session, chunk, view_rows, &running, &prompt, &help, &msg_buf, &msg);
             if (used == 0) break; // incomplete escape sequence: wait for more
             off += used;
         }
@@ -228,7 +305,7 @@ fn setErrMsg(buf: []u8, out: *[]const u8, prefix: []const u8, err: anyerror) voi
 /// were consumed. An escape sequence split across reads is left for next time,
 /// so its bytes are never mistaken for typed text.
 fn processInput(
-    ed: *Editor,
+    session: *Session,
     buf: []const u8,
     view_rows: usize,
     running: *bool,
@@ -239,6 +316,9 @@ fn processInput(
 ) !usize {
     var i: usize = 0;
     while (i < buf.len) {
+        if (!running.*) break;
+        // A key may open or close a tab, so re-fetch the active editor.
+        const ed = session.current();
         const b = buf[i];
         if (b == 0x1f) { // Ctrl+? / Ctrl+/ : toggle help
             help.* = !help.*;
@@ -255,7 +335,7 @@ fn processInput(
                 if (buf[j] == '~' and std.mem.eql(u8, buf[i + 2 .. j], "11")) {
                     help.* = !help.*; // F1
                 } else {
-                    applyCsi(ed, buf[i + 2 .. j], buf[j], view_rows) catch |e| setMsg(msg_buf, msg, @errorName(e));
+                    applyCsi(session, buf[i + 2 .. j], buf[j], view_rows) catch |e| setMsg(msg_buf, msg, @errorName(e));
                 }
                 i = j + 1;
             } else if (k == 'O') {
@@ -277,24 +357,40 @@ fn processInput(
                 i += 1;
             }
         } else {
-            applyByte(ed, b, running, prompt, msg_buf, msg) catch |e| setMsg(msg_buf, msg, @errorName(e));
+            applyByte(session, b, running, prompt, msg_buf, msg) catch |e| setMsg(msg_buf, msg, @errorName(e));
             i += 1;
         }
     }
     return i;
 }
 
-fn applyByte(ed: *Editor, b: u8, running: *bool, prompt: *?Prompt, msg_buf: []u8, msg: *[]const u8) !void {
+/// Rows available for document text: everything but the tab bar and status line.
+fn viewRows(rows: u16) usize {
+    return if (rows > 2) @as(usize, rows) - 2 else 0;
+}
+
+fn applyByte(session: *Session, b: u8, running: *bool, prompt: *?Prompt, msg_buf: []u8, msg: *[]const u8) !void {
+    const ed = session.current();
     if (b == 0x13) { // Ctrl+S: save, or ask for a name
         if (ed.path == null) {
             prompt.* = .{ .kind = .save_as };
         } else ed.save() catch |e| {
             setErrMsg(msg_buf, msg, "Save failed", e);
         };
-    } else if (b == 0x0f) { // Ctrl+O: confirm first if there are unsaved edits
-        prompt.* = .{ .kind = if (ed.dirty) .confirm_open else .open };
-    } else if (b == 0x11) { // Ctrl+Q: confirm first if there are unsaved edits
+    } else if (b == 0x14) { // Ctrl+T: new empty tab
+        try session.add(null, "");
+        setMsg(msg_buf, msg, "New tab");
+    } else if (b == 0x17) { // Ctrl+W: close the tab; closing the last one quits
         if (ed.dirty) {
+            prompt.* = .{ .kind = .confirm_close };
+        } else {
+            session.closeActive();
+            if (session.count() == 0) running.* = false;
+        }
+    } else if (b == 0x0f) { // Ctrl+O: open into a new tab
+        prompt.* = .{ .kind = .open };
+    } else if (b == 0x11) { // Ctrl+Q: confirm first if any tab is dirty
+        if (session.anyDirty()) {
             prompt.* = .{ .kind = .confirm_quit };
         } else running.* = false;
     } else if (b == 0x01) { // Ctrl+A
@@ -302,17 +398,17 @@ fn applyByte(ed: *Editor, b: u8, running: *bool, prompt: *?Prompt, msg_buf: []u8
     } else if (b == 0x03) { // Ctrl+C
         try ed.copy();
         setMsg(msg_buf, msg, "Copied");
-        try sendOsc52(ed.registerText());
+        try sendOsc52(session.current().registerText());
     } else if (b == 0x18) { // Ctrl+X
         try ed.cut();
         setMsg(msg_buf, msg, "Cut");
-        try sendOsc52(ed.registerText());
+        try sendOsc52(session.current().registerText());
     } else if (b == 0x16) { // Ctrl+V
         try ed.paste();
     } else if (b == 0x06) { // Ctrl+F: find
-        prompt.* = .{ .kind = .find, .origin = ed.cursor };
+        prompt.* = .{ .kind = .find, .origin = session.current().cursor };
     } else if (b == 0x12) { // Ctrl+R: replace
-        prompt.* = .{ .kind = .replace_find, .origin = ed.cursor };
+        prompt.* = .{ .kind = .replace_find, .origin = session.current().cursor };
     } else if (b == 0x07) { // Ctrl+G: go to line
         prompt.* = .{ .kind = .goto };
     } else if (b == 0x04) { // Ctrl+D
@@ -349,7 +445,7 @@ fn skipEscape(buf: []const u8, i: usize) ?usize {
 }
 
 fn handlePromptInput(
-    ed: *Editor,
+    session: *Session,
     slot: *?Prompt,
     buf: []const u8,
     running: *bool,
@@ -369,17 +465,17 @@ fn handlePromptInput(
                 i = next;
                 continue;
             }
-            if (p.kind == .find or p.kind == .replace_find) ed.cursor = p.origin;
+            if (p.kind == .find or p.kind == .replace_find) session.current().cursor = p.origin;
             slot.* = null;
             return i + 1;
         }
         if (b == 0x0d or b == 0x0a) {
             // Enter on a yes/no question means the default answer: no.
-            if (p.kind == .confirm_quit or p.kind == .confirm_open) {
+            if (p.kind == .confirm_quit or p.kind == .confirm_close) {
                 slot.* = null;
                 return i + 1;
             }
-            const close = try executePrompt(ed, p, msg_buf, msg);
+            const close = try executePrompt(session, p, msg_buf, msg);
             if (close) {
                 slot.* = null;
                 return i + 1;
@@ -390,7 +486,7 @@ fn handlePromptInput(
         if (b == 0x7f or b == 0x08) {
             if (p.len > 0) p.len -= 1;
         } else if (b == 0x09) {
-            if (p.kind == .save_as or p.kind == .open) try completePath(ed.allocator, p);
+            if (p.kind == .save_as or p.kind == .open) try completePath(session.current().allocator, p);
         } else if (b >= 0x20 and p.len < p.buf.len) {
             switch (p.kind) {
                 .confirm_quit => {
@@ -398,11 +494,12 @@ fn handlePromptInput(
                     slot.* = null;
                     return i + 1;
                 },
-                .confirm_open => {
+                .confirm_close => {
                     if (b == 'y' or b == 'Y') {
-                        p.kind = .open;
-                        p.len = 0;
-                    } else slot.* = null;
+                        session.closeActive();
+                        if (session.count() == 0) running.* = false;
+                    }
+                    slot.* = null;
                     return i + 1;
                 },
                 else => {
@@ -411,7 +508,7 @@ fn handlePromptInput(
                 },
             }
         }
-        if (p.kind == .find or p.kind == .replace_find) try liveSearch(ed, p);
+        if (p.kind == .find or p.kind == .replace_find) try liveSearch(session.current(), p);
         i += 1;
     }
     return i;
@@ -429,8 +526,9 @@ fn liveSearch(ed: *Editor, p: *Prompt) !void {
 }
 
 /// Run the prompt's action. Returns whether the prompt should close.
-fn executePrompt(ed: *Editor, p: *Prompt, msg_buf: []u8, msg: *[]const u8) !bool {
+fn executePrompt(session: *Session, p: *Prompt, msg_buf: []u8, msg: *[]const u8) !bool {
     const text = p.buf[0..p.len];
+    const ed = session.current();
     switch (p.kind) {
         .save_as => {
             if (text.len == 0) return true;
@@ -449,13 +547,25 @@ fn executePrompt(ed: *Editor, p: *Prompt, msg_buf: []u8, msg: *[]const u8) !bool
                 return true;
             };
             defer allocator.free(data);
-            try ed.replaceContents(data);
-            try ed.setPath(text);
+            // Already open: switch to that tab rather than opening it twice.
+            if (session.findByPath(text)) |idx| {
+                session.active = idx;
+                setMsg(msg_buf, msg, "Switched");
+                return true;
+            }
+            // A fresh `mibi` (one empty, unnamed, clean tab) opens in place.
+            if (session.count() == 1 and ed.path == null and !ed.dirty and session.current().text().len == 0) {
+                try ed.replaceContents(data);
+                try ed.setPath(text);
+                setMsg(msg_buf, msg, "Opened");
+                return true;
+            }
+            try session.add(text, data);
             setMsg(msg_buf, msg, "Opened");
             return true;
         },
         // Yes/no prompts are answered in handlePromptInput, never here.
-        .confirm_quit, .confirm_open => return true,
+        .confirm_quit, .confirm_close => return true,
         .find => {
             try ed.setSearch(text);
             return true;
@@ -495,7 +605,8 @@ fn executePrompt(ed: *Editor, p: *Prompt, msg_buf: []u8, msg: *[]const u8) !bool
 }
 
 /// Apply a CSI sequence given its parameter bytes and final byte.
-fn applyCsi(ed: *Editor, params_bytes: []const u8, final: u8, view_rows: usize) !void {
+fn applyCsi(session: *Session, params_bytes: []const u8, final: u8, view_rows: usize) !void {
+    const ed = session.current();
     var params: [4]u16 = .{ 0, 0, 0, 0 };
     var np: usize = 0;
     for (params_bytes) |c| {
@@ -522,8 +633,8 @@ fn applyCsi(ed: *Editor, params_bytes: []const u8, final: u8, view_rows: usize) 
             1, 7 => ed.moveHome(shift),
             4, 8 => ed.moveEnd(shift),
             3 => try ed.deleteForward(),
-            5 => ed.movePage(-1, view_rows, shift),
-            6 => ed.movePage(1, view_rows, shift),
+            5 => if (ctrl) session.cycle(-1) else ed.movePage(-1, view_rows, shift),
+            6 => if (ctrl) session.cycle(1) else ed.movePage(1, view_rows, shift),
             else => {},
         },
         else => {},
@@ -590,13 +701,14 @@ fn digits(n: usize) usize {
     return d;
 }
 
-fn draw(s: *render.Screen, ed: *Editor, msg: []const u8, prompt: ?Prompt, help: bool) void {
+fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, help: bool) void {
     s.clear();
     const w: usize = s.cols;
     const h: usize = s.rows;
-    if (h < 2 or w < 4) return;
+    if (h < 3 or w < 4) return;
 
-    const view_rows = h - 1;
+    const ed = session.current();
+    const view_rows = h - 2; // row 0 is the tab bar, row h-1 the status line
     const total = ed.lineCount();
     const gutter: usize = digits(total) + 1;
     const text_cols: usize = if (w > gutter + 1) w - gutter - 1 else 0;
@@ -610,12 +722,15 @@ fn draw(s: *render.Screen, ed: *Editor, msg: []const u8, prompt: ?Prompt, help: 
     const hint_bg = render.Color{ .rgb = .{ .r = 0x1e, .g = 0x1e, .b = 0x2a } };
     const hint_fg = render.Color{ .rgb = .{ .r = 0x88, .g = 0x92, .b = 0xa4 } };
 
-    const sel = ed.selectionRange();
-    const rc = ed.rowCol();
-    const cur_dcol = ed.cursorDisplayCol();
+    drawTabBar(s, session, w, text_fg, gutter_fg);
+
+    const sel = session.current().selectionRange();
+    const rc = session.current().rowCol();
+    const cur_dcol = session.current().cursorDisplayCol();
 
     var row: usize = 0;
     while (row < view_rows) : (row += 1) {
+        const y: u16 = @intCast(row + 1);
         const lr = ed.scroll_row + row;
         if (lr >= total) break;
         const line = ed.line(lr);
@@ -627,8 +742,8 @@ fn draw(s: *render.Screen, ed: *Editor, msg: []const u8, prompt: ?Prompt, help: 
         const num = std.fmt.bufPrint(&num_buf, "{d}", .{lr + 1}) catch "";
         const gx = gutter - 1;
         var k: usize = 0;
-        while (k + num.len < gx) : (k += 1) s.put(@intCast(k), @intCast(row), .{ .ch = ' ' });
-        s.putStr(@intCast(gx - num.len), @intCast(row), num, .{ .fg = gutter_fg });
+        while (k + num.len < gx) : (k += 1) s.put(@intCast(k), y, .{ .ch = ' ' });
+        s.putStr(@intCast(gx - num.len), y, num, .{ .fg = gutter_fg });
 
         // Text (wide characters take two cells; the second is marked cont).
         var dcol: usize = 0;
@@ -645,7 +760,7 @@ fn draw(s: *render.Screen, ed: *Editor, msg: []const u8, prompt: ?Prompt, help: 
                     if (dcol >= ed.scroll_col) {
                         var cell = render.Cell{ .ch = ' ' };
                         if (selected) cell.bg = sel_bg;
-                        s.put(@intCast(sx), @intCast(row), cell);
+                        s.put(@intCast(sx), y, cell);
                         sx += 1;
                         if (sx >= w) break;
                     }
@@ -658,11 +773,11 @@ fn draw(s: *render.Screen, ed: *Editor, msg: []const u8, prompt: ?Prompt, help: 
                 if (sx + cw > w) break;
                 var cell = render.Cell{ .ch = cp, .fg = text_fg };
                 if (selected) cell.bg = sel_bg;
-                s.put(@intCast(sx), @intCast(row), cell);
+                s.put(@intCast(sx), y, cell);
                 if (cw == 2) {
                     var cont = render.Cell{ .ch = ' ', .fg = text_fg, .cont = true };
                     if (selected) cont.bg = sel_bg;
-                    s.put(@intCast(sx + 1), @intCast(row), cont);
+                    s.put(@intCast(sx + 1), y, cont);
                 }
                 sx += cw;
             }
@@ -673,7 +788,7 @@ fn draw(s: *render.Screen, ed: *Editor, msg: []const u8, prompt: ?Prompt, help: 
         if (sel) |sr| {
             if (line_end >= sr.start and line_end < sr.end and dcol >= ed.scroll_col) {
                 const cell_x = gutter + (dcol - ed.scroll_col);
-                if (cell_x < w) s.put(@intCast(cell_x), @intCast(row), .{ .ch = ' ', .bg = sel_bg });
+                if (cell_x < w) s.put(@intCast(cell_x), y, .{ .ch = ' ', .bg = sel_bg });
             }
         }
 
@@ -690,9 +805,9 @@ fn draw(s: *render.Screen, ed: *Editor, msg: []const u8, prompt: ?Prompt, help: 
                     uw = 1;
                 }
                 if (cx + uw <= w) {
-                    s.put(@intCast(cx), @intCast(row), .{ .ch = under, .fg = text_fg, .attr = .{ .reverse = true } });
+                    s.put(@intCast(cx), y, .{ .ch = under, .fg = text_fg, .attr = .{ .reverse = true } });
                     if (uw == 2) {
-                        s.put(@intCast(cx + 1), @intCast(row), .{ .ch = ' ', .fg = text_fg, .attr = .{ .reverse = true }, .cont = true });
+                        s.put(@intCast(cx + 1), y, .{ .ch = ' ', .fg = text_fg, .attr = .{ .reverse = true }, .cont = true });
                     }
                 }
             }
@@ -720,6 +835,29 @@ fn draw(s: *render.Screen, ed: *Editor, msg: []const u8, prompt: ?Prompt, help: 
     // The help panel covers the bottom rows, so a prompt (which lives on the
     // last row) takes precedence over it while it is open.
     if (help and prompt == null) drawHelp(s, w, h);
+}
+
+/// One row of tabs: ` name [+] ` per document, the active one highlighted.
+fn drawTabBar(s: *render.Screen, session: *Session, w: usize, text_fg: render.Color, dim_fg: render.Color) void {
+    const bar_bg = render.Color{ .rgb = .{ .r = 0x1e, .g = 0x1e, .b = 0x2a } };
+    const active_bg = render.Color{ .rgb = .{ .r = 0x33, .g = 0x45, .b = 0x66 } };
+    var x: usize = 0;
+    while (x < w) : (x += 1) s.put(@intCast(x), 0, .{ .bg = bar_bg });
+
+    var tx: usize = 0;
+    for (session.docs.items, 0..) |ed, i| {
+        const name = ed.path orelse "[No Name]";
+        var buf: [160]u8 = undefined;
+        const label = std.fmt.bufPrint(&buf, " {s}{s} ", .{ name, if (ed.dirty) " [+]" else "" }) catch continue;
+        if (tx + label.len > w) break;
+        const active = i == session.active;
+        s.putStr(@intCast(tx), 0, label, .{
+            .bg = if (active) active_bg else bar_bg,
+            .fg = if (active) text_fg else dim_fg,
+            .attr = .{ .bold = active },
+        });
+        tx += label.len;
+    }
 }
 
 /// Bottom panel listing the controls (temporary; will become a real panel).
@@ -804,10 +942,10 @@ fn drawPrompt(
         .replace_with => "With: ",
         .goto => "Go to line: ",
         .confirm_quit => "Unsaved changes - quit without saving? (y/N) ",
-        .confirm_open => "Unsaved changes - discard and open? (y/N) ",
+        .confirm_close => "Unsaved changes - close without saving? (y/N) ",
     };
     s.putStr(0, y, label, .{ .bg = bar_bg, .fg = accent });
-    if (p.kind == .confirm_quit or p.kind == .confirm_open) return; // yes/no, no text field
+    if (p.kind == .confirm_quit or p.kind == .confirm_close) return; // yes/no, no text field
     s.putStr(@intCast(label.len), y, p.buf[0..p.len], .{ .bg = bar_bg, .fg = text_fg });
     const cx = label.len + p.len;
     if (cx < w) s.put(@intCast(cx), y, .{ .ch = ' ', .bg = bar_bg, .attr = .{ .reverse = true } });
@@ -843,8 +981,9 @@ fn drawStatus(
 }
 
 test "an escape sequence split across reads is not typed as text" {
-    var ed = try Editor.init(std.testing.allocator, null, "one two three");
-    defer ed.deinit();
+    var session = Session.init(std.testing.allocator);
+    defer session.deinit();
+    try session.add(null, "one two three");
     var running = true;
     var prompt: ?Prompt = null;
     var help = false;
@@ -853,61 +992,63 @@ test "an escape sequence split across reads is not typed as text" {
 
     // Ctrl+Right arrives as "\x1b[1;5" then "C".
     const first = "\x1b[1;5";
-    const consumed1 = try processInput(&ed, first, 10, &running, &prompt, &help, &mb, &msg);
+    const consumed1 = try processInput(&session, first, 10, &running, &prompt, &help, &mb, &msg);
     try std.testing.expectEqual(@as(usize, 0), consumed1); // held back, not consumed
-    try std.testing.expectEqualStrings("one two three", ed.text());
+    try std.testing.expectEqualStrings("one two three", session.current().text());
 
     var combined: [32]u8 = undefined;
     @memcpy(combined[0..first.len], first);
     combined[first.len] = 'C';
     const total = first.len + 1;
-    const consumed2 = try processInput(&ed, combined[0..total], 10, &running, &prompt, &help, &mb, &msg);
+    const consumed2 = try processInput(&session, combined[0..total], 10, &running, &prompt, &help, &mb, &msg);
     try std.testing.expectEqual(total, consumed2);
-    try std.testing.expectEqual(@as(usize, 4), ed.cursor); // after "one "
-    try std.testing.expectEqualStrings("one two three", ed.text());
+    try std.testing.expectEqual(@as(usize, 4), session.current().cursor); // after "one "
+    try std.testing.expectEqualStrings("one two three", session.current().text());
 }
 
 test "page down and page up move by a page" {
-    var ed = try Editor.init(std.testing.allocator, null, "0\n1\n2\n3\n4\n5\n6\n7\n8\n9");
-    defer ed.deinit();
+    var session = Session.init(std.testing.allocator);
+    defer session.deinit();
+    try session.add(null, "0\n1\n2\n3\n4\n5\n6\n7\n8\n9");
     var running = true;
     var prompt: ?Prompt = null;
     var help = false;
     var mb: [64]u8 = undefined;
     var msg: []const u8 = "";
 
-    const consumed = try processInput(&ed, "\x1b[6~", 3, &running, &prompt, &help, &mb, &msg);
+    const consumed = try processInput(&session, "\x1b[6~", 3, &running, &prompt, &help, &mb, &msg);
     try std.testing.expectEqual(@as(usize, 4), consumed);
-    try std.testing.expectEqual(@as(usize, 3), ed.rowCol().row);
+    try std.testing.expectEqual(@as(usize, 3), session.current().rowCol().row);
 
-    _ = try processInput(&ed, "\x1b[5~", 3, &running, &prompt, &help, &mb, &msg);
-    try std.testing.expectEqual(@as(usize, 0), ed.rowCol().row);
+    _ = try processInput(&session, "\x1b[5~", 3, &running, &prompt, &help, &mb, &msg);
+    try std.testing.expectEqual(@as(usize, 0), session.current().rowCol().row);
 }
 
 test "ctrl+a selects all and ctrl+x cuts the selection" {
-    var ed = try Editor.init(std.testing.allocator, null, "hello world");
-    defer ed.deinit();
+    var session = Session.init(std.testing.allocator);
+    defer session.deinit();
+    try session.add(null, "hello world");
     var running = true;
     var prompt: ?Prompt = null;
     var help = false;
     var mb: [64]u8 = undefined;
     var msg: []const u8 = "";
 
-    _ = try processInput(&ed, "\x01", 10, &running, &prompt, &help, &mb, &msg); // Ctrl+A
-    const r = ed.selectionRange();
+    _ = try processInput(&session, "\x01", 10, &running, &prompt, &help, &mb, &msg); // Ctrl+A
+    const r = session.current().selectionRange();
     try std.testing.expect(r != null);
     try std.testing.expectEqual(@as(usize, 0), r.?.start);
     try std.testing.expectEqual(@as(usize, 11), r.?.end);
 
-    _ = try processInput(&ed, "\x18", 10, &running, &prompt, &help, &mb, &msg); // Ctrl+X
-    try std.testing.expectEqualStrings("", ed.text());
-    try std.testing.expectEqualStrings("hello world", ed.registerText());
+    _ = try processInput(&session, "\x18", 10, &running, &prompt, &help, &mb, &msg); // Ctrl+X
+    try std.testing.expectEqualStrings("", session.current().text());
+    try std.testing.expectEqualStrings("hello world", session.current().registerText());
 }
 
 // --- integration drive: feed real key bytes through the real handlers ------
 
 const Drive = struct {
-    ed: Editor,
+    session: Session,
     running: bool = true,
     prompt: ?Prompt = null,
     help: bool = false,
@@ -917,10 +1058,15 @@ const Drive = struct {
     pending_len: usize = 0,
 
     fn start(text: []const u8) !Drive {
-        return .{ .ed = try Editor.init(std.testing.allocator, null, text) };
+        var d = Drive{ .session = Session.init(std.testing.allocator) };
+        try d.session.add(null, text);
+        return d;
     }
     fn stop(self: *Drive) void {
-        self.ed.deinit();
+        self.session.deinit();
+    }
+    fn ed(self: *Drive) *Editor {
+        return self.session.current();
     }
     /// Feed bytes exactly as the run loop would: whole tokens, switching
     /// between prompt and normal handling mid-chunk, keeping any incomplete
@@ -934,9 +1080,9 @@ const Drive = struct {
         while (off < self.pending_len and self.running) {
             const chunk = self.pending[off..self.pending_len];
             const used: usize = if (self.prompt != null)
-                try handlePromptInput(&self.ed, &self.prompt, chunk, &self.running, &self.mb, &self.msg)
+                try handlePromptInput(&self.session, &self.prompt, chunk, &self.running, &self.mb, &self.msg)
             else
-                try processInput(&self.ed, chunk, 10, &self.running, &self.prompt, &self.help, &self.mb, &self.msg);
+                try processInput(&self.session, chunk, 10, &self.running, &self.prompt, &self.help, &self.mb, &self.msg);
             if (used == 0) break; // incomplete escape sequence
             off += used;
         }
@@ -967,48 +1113,48 @@ test "typing, enter, tab, backspace, delete" {
     var d = try Drive.start("");
     defer d.stop();
     try d.send("abc");
-    try std.testing.expectEqualStrings("abc", d.ed.text());
+    try std.testing.expectEqualStrings("abc", d.ed().text());
     try d.send("\r");
-    try std.testing.expectEqualStrings("abc\n", d.ed.text());
+    try std.testing.expectEqualStrings("abc\n", d.ed().text());
     try d.send("\t");
-    try std.testing.expectEqualStrings("abc\n    ", d.ed.text());
+    try std.testing.expectEqualStrings("abc\n    ", d.ed().text());
     try d.send("\x7f");
-    try std.testing.expectEqualStrings("abc\n   ", d.ed.text());
+    try std.testing.expectEqualStrings("abc\n   ", d.ed().text());
     try d.send("\x1b[3~"); // delete at end: no-op
-    try std.testing.expectEqualStrings("abc\n   ", d.ed.text());
+    try std.testing.expectEqualStrings("abc\n   ", d.ed().text());
 }
 
 test "movement: arrows, home, end, word, page" {
     var d = try Drive.start("one two three\nfour\nfive");
     defer d.stop();
     try d.send("\x1b[C\x1b[C");
-    try std.testing.expectEqual(@as(usize, 2), d.ed.cursor);
+    try std.testing.expectEqual(@as(usize, 2), d.ed().cursor);
     try d.send("\x1b[1;5C"); // Ctrl+Right -> after "one "
-    try std.testing.expectEqual(@as(usize, 4), d.ed.cursor);
+    try std.testing.expectEqual(@as(usize, 4), d.ed().cursor);
     try d.send("\x1b[F"); // End
-    try std.testing.expectEqual(@as(usize, 13), d.ed.cursor);
+    try std.testing.expectEqual(@as(usize, 13), d.ed().cursor);
     try d.send("\x1b[H"); // Home
-    try std.testing.expectEqual(@as(usize, 0), d.ed.cursor);
+    try std.testing.expectEqual(@as(usize, 0), d.ed().cursor);
     try d.send("\x1b[6~"); // PageDown -> last line
-    try std.testing.expectEqual(@as(usize, 2), d.ed.rowCol().row);
+    try std.testing.expectEqual(@as(usize, 2), d.ed().rowCol().row);
     try d.send("\x1b[5~"); // PageUp -> first line
-    try std.testing.expectEqual(@as(usize, 0), d.ed.rowCol().row);
+    try std.testing.expectEqual(@as(usize, 0), d.ed().rowCol().row);
 }
 
 test "selection: extend, collapse, clear" {
     var d = try Drive.start("hello");
     defer d.stop();
     try d.send("\x1b[1;2C\x1b[1;2C"); // Shift+Right x2 -> 0..2
-    try std.testing.expectEqual(@as(usize, 2), d.ed.selectionRange().?.end);
+    try std.testing.expectEqual(@as(usize, 2), d.ed().selectionRange().?.end);
     try d.send("\x1b[C"); // plain Right collapses to the end (2)
-    try std.testing.expect(d.ed.selectionRange() == null);
-    try std.testing.expectEqual(@as(usize, 2), d.ed.cursor);
+    try std.testing.expect(d.ed().selectionRange() == null);
+    try std.testing.expectEqual(@as(usize, 2), d.ed().cursor);
     try d.send("\x1b[1;2C\x1b[1;2C"); // Shift+Right x2 -> 2..4
     try d.send("\x1b[D"); // plain Left collapses to the start (2)
-    try std.testing.expectEqual(@as(usize, 2), d.ed.cursor);
+    try std.testing.expectEqual(@as(usize, 2), d.ed().cursor);
     try d.send("\x1b[1;2C"); // Shift+Right -> 2..3
     try d.send("\x1b\x1b"); // Esc (a lone Esc is only disambiguated by the next byte)
-    try std.testing.expect(d.ed.selectionRange() == null);
+    try std.testing.expect(d.ed().selectionRange() == null);
 }
 
 test "copy, cut, paste" {
@@ -1016,11 +1162,11 @@ test "copy, cut, paste" {
     defer d.stop();
     try d.send("\x01"); // Ctrl+A
     try d.send("\x03"); // Ctrl+C
-    try std.testing.expectEqualStrings("hello world", d.ed.registerText());
+    try std.testing.expectEqualStrings("hello world", d.ed().registerText());
     try d.send("\x18"); // Ctrl+X
-    try std.testing.expectEqualStrings("", d.ed.text());
+    try std.testing.expectEqualStrings("", d.ed().text());
     try d.send("\x16"); // Ctrl+V
-    try std.testing.expectEqualStrings("hello world", d.ed.text());
+    try std.testing.expectEqualStrings("hello world", d.ed().text());
 }
 
 test "undo, redo, and redo cleared by a new edit" {
@@ -1028,20 +1174,20 @@ test "undo, redo, and redo cleared by a new edit" {
     defer d.stop();
     try d.send("abc def");
     try d.send("\x1a"); // Ctrl+Z
-    try std.testing.expectEqualStrings("", d.ed.text());
+    try std.testing.expectEqualStrings("", d.ed().text());
     try d.send("\x19"); // Ctrl+Y
-    try std.testing.expectEqualStrings("abc def", d.ed.text());
+    try std.testing.expectEqualStrings("abc def", d.ed().text());
     try d.send("\x1a"); // Ctrl+Z
     try d.send("X"); // new edit clears redo
     try d.send("\x19"); // Ctrl+Y: no-op
-    try std.testing.expectEqualStrings("X", d.ed.text());
+    try std.testing.expectEqualStrings("X", d.ed().text());
 }
 
 test "duplicate line" {
     var d = try Drive.start("alpha\nbeta");
     defer d.stop();
     try d.send("\x04"); // Ctrl+D
-    try std.testing.expectEqualStrings("alpha\nalpha\nbeta", d.ed.text());
+    try std.testing.expectEqualStrings("alpha\nalpha\nbeta", d.ed().text());
 }
 
 test "stress: many edits, undos and redos stay consistent" {
@@ -1055,24 +1201,24 @@ test "stress: many edits, undos and redos stay consistent" {
         try d.send("x");
         try d.send("\r");
         try d.send("\x7f"); // backspace
-        draw(&s, &d.ed, "", null, false);
+        draw(&s, &d.session, "", null, false);
     }
     i = 0;
     while (i < 120) : (i += 1) {
         try d.send("\x1a"); // undo past the beginning
-        draw(&s, &d.ed, "", null, false);
+        draw(&s, &d.session, "", null, false);
     }
-    try std.testing.expectEqualStrings("alpha\nbeta\ngamma", d.ed.text());
+    try std.testing.expectEqualStrings("alpha\nbeta\ngamma", d.ed().text());
     i = 0;
     while (i < 120) : (i += 1) {
         try d.send("\x19"); // redo past the end
-        draw(&s, &d.ed, "", null, false);
+        draw(&s, &d.session, "", null, false);
     }
     // A fresh edit after all that must not corrupt the buffer.
     try d.send("Z");
-    draw(&s, &d.ed, "", null, false);
+    draw(&s, &d.session, "", null, false);
     try d.send("\x1a");
-    draw(&s, &d.ed, "", null, false);
+    draw(&s, &d.session, "", null, false);
 }
 
 test "save-as and open prompts" {
@@ -1097,21 +1243,22 @@ test "save-as and open prompts" {
 }
 
 test "render shows text, gutter and selection" {
-    var ed = try Editor.init(std.testing.allocator, null, "hello\nworld");
-    defer ed.deinit();
+    var session = Session.init(std.testing.allocator);
+    defer session.deinit();
+    try session.add(null, "hello\nworld");
     var s = try render.Screen.init(std.testing.allocator, 20, 5);
     defer s.deinit();
 
-    draw(&s, &ed, "", null, false);
+    draw(&s, &session, "", null, false);
     var buf: [64]u8 = undefined;
-    const r0 = rowText(&s, 0, &buf);
-    try std.testing.expect(std.mem.indexOf(u8, r0, "hello") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r0, "1") != null); // gutter
+    const r1 = rowText(&s, 1, &buf); // row 0 is the tab bar
+    try std.testing.expect(std.mem.indexOf(u8, r1, "hello") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r1, "1") != null); // gutter
 
-    ed.selectAll();
-    draw(&s, &ed, "", null, false);
+    session.current().selectAll();
+    draw(&s, &session, "", null, false);
     // First text cell (gutter is 2 wide for 2 lines) carries the selection bg.
-    const sel_bg = switch (s.back[0 * s.cols + 2].bg) {
+    const sel_bg = switch (s.back[1 * s.cols + 2].bg) {
         .default => false,
         else => true,
     };
@@ -1155,12 +1302,13 @@ test "unicode cell widths" {
 }
 
 test "wide characters occupy two cells" {
-    var ed = try Editor.init(std.testing.allocator, null, "\u{4E2D}x");
-    defer ed.deinit();
+    var session = Session.init(std.testing.allocator);
+    defer session.deinit();
+    try session.add(null, "\u{4E2D}x");
     var s = try render.Screen.init(std.testing.allocator, 10, 3);
     defer s.deinit();
-    draw(&s, &ed, "", null, false);
-    const base = 0 * s.cols; // row 0; gutter is 2 wide for 1 line
+    draw(&s, &session, "", null, false);
+    const base = 1 * s.cols; // row 1: first text row (row 0 is the tab bar)
     try std.testing.expectEqual(@as(u21, 0x4E2D), s.back[base + 2].ch);
     try std.testing.expect(s.back[base + 3].cont);
     try std.testing.expectEqual(@as(u21, 'x'), s.back[base + 4].ch);
@@ -1173,19 +1321,19 @@ test "find, replace and goto" {
     // Ctrl+F then type "two" jumps to the first match at offset 4.
     try d.send("\x06");
     try d.send("two");
-    try std.testing.expectEqual(@as(usize, 4), d.ed.cursor);
+    try std.testing.expectEqual(@as(usize, 4), d.ed().cursor);
     try d.send("\r"); // accept
 
     try d.send("\x1bOR"); // F3 -> next
-    try std.testing.expectEqual(@as(usize, 12), d.ed.cursor);
+    try std.testing.expectEqual(@as(usize, 12), d.ed().cursor);
     try d.send("\x1b[1;2R"); // Shift+F3 -> previous
-    try std.testing.expectEqual(@as(usize, 4), d.ed.cursor);
+    try std.testing.expectEqual(@as(usize, 4), d.ed().cursor);
 
     // Ctrl+G, go to line 1 column 1.
     try d.send("\x07");
     try d.send("1:1");
     try d.send("\r");
-    try std.testing.expectEqual(@as(usize, 0), d.ed.cursor);
+    try std.testing.expectEqual(@as(usize, 0), d.ed().cursor);
 
     // Ctrl+R replaces every "one" with "1".
     try d.send("\x12");
@@ -1193,7 +1341,7 @@ test "find, replace and goto" {
     try d.send("\r");
     try d.send("1");
     try d.send("\r");
-    try std.testing.expectEqualStrings("1 two 1 two 1", d.ed.text());
+    try std.testing.expectEqualStrings("1 two 1 two 1", d.ed().text());
 }
 
 // --- hardening regressions: prompts, file safety, unicode status bar --------
@@ -1227,7 +1375,7 @@ test "quit asks before discarding unsaved changes" {
     try d.send("n"); // no: stay
     try std.testing.expect(d.prompt == null);
     try std.testing.expect(d.running);
-    try std.testing.expectEqualStrings("abc", d.ed.text());
+    try std.testing.expectEqualStrings("abc", d.ed().text());
 
     try d.send("\x11");
     try d.send("y"); // yes: quit without saving
@@ -1242,24 +1390,87 @@ test "quit on a clean buffer does not ask" {
     try std.testing.expect(d.prompt == null);
 }
 
-test "open asks before discarding unsaved changes" {
-    var d = try Drive.start("");
+test "ctrl+o opens a new tab without discarding the current one" {
+    var d = try Drive.start("dirty");
     defer d.stop();
-    try d.send("dirty");
-    try d.send("\x0f"); // Ctrl+O
-    try std.testing.expect(d.prompt != null);
-    try std.testing.expectEqual(PromptKind.confirm_open, d.prompt.?.kind);
-
-    try d.send("n"); // keep the buffer
-    try std.testing.expect(d.prompt == null);
-    try std.testing.expectEqualStrings("dirty", d.ed.text());
-
-    try d.send("\x0f");
-    try d.send("y"); // discard -> the Open prompt takes over
+    try d.send("x"); // dirty
+    try d.send("\x0f"); // Ctrl+O: no confirm needed, nothing is replaced
     try std.testing.expect(d.prompt != null);
     try std.testing.expectEqual(PromptKind.open, d.prompt.?.kind);
     try d.send("\x1b");
-    try std.testing.expect(d.prompt == null);
+    try std.testing.expectEqualStrings("xdirty", d.ed().text());
+    try std.testing.expectEqual(@as(usize, 1), d.session.count());
+}
+
+test "ctrl+t adds a tab and ctrl+w closes it" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    try d.send("\x14"); // Ctrl+T
+    try std.testing.expectEqual(@as(usize, 2), d.session.count());
+    try std.testing.expectEqualStrings("", d.ed().text());
+    try d.send("two");
+    try std.testing.expectEqualStrings("two", d.ed().text());
+
+    try d.send("\x17"); // Ctrl+W on a dirty tab asks first
+    try std.testing.expectEqual(PromptKind.confirm_close, d.prompt.?.kind);
+    try d.send("n");
+    try std.testing.expectEqual(@as(usize, 2), d.session.count());
+
+    try d.send("\x17");
+    try d.send("y");
+    try std.testing.expectEqual(@as(usize, 1), d.session.count());
+    try std.testing.expectEqualStrings("one", d.ed().text());
+}
+
+test "ctrl+pgup and ctrl+pgdn cycle tabs" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    try d.send("\x14");
+    try d.send("two");
+    try std.testing.expectEqualStrings("two", d.ed().text());
+    try d.send("\x1b[5;5~"); // Ctrl+PgUp
+    try std.testing.expectEqualStrings("one", d.ed().text());
+    try d.send("\x1b[6;5~"); // Ctrl+PgDn
+    try std.testing.expectEqualStrings("two", d.ed().text());
+}
+
+test "closing the last tab quits" {
+    var d = try Drive.start("only");
+    defer d.stop();
+    try d.send("\x17"); // Ctrl+W on a clean, last tab
+    try std.testing.expect(!d.running);
+    try std.testing.expectEqual(@as(usize, 0), d.session.count());
+}
+
+test "quit asks when a background tab is dirty" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    try d.send("x"); // tab 0 dirty
+    try d.send("\x14"); // tab 1, clean
+    try std.testing.expect(!d.ed().dirty);
+    try d.send("\x11"); // Ctrl+Q
+    try std.testing.expectEqual(PromptKind.confirm_quit, d.prompt.?.kind);
+    try d.send("n");
+    try std.testing.expect(d.running);
+}
+
+test "the tab bar shows every open document" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    try d.send("\x14"); // Ctrl+T: a second, empty document
+    var s = try render.Screen.init(std.testing.allocator, 40, 6);
+    defer s.deinit();
+
+    draw(&s, &d.session, "", null, false);
+    var buf: [128]u8 = undefined;
+    const bar = rowText(&s, 0, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, bar, "[No Name]  [No Name]") != null);
+
+    try d.send("\x1b[5;5~"); // Ctrl+PgUp back to the first document
+    draw(&s, &d.session, "", null, false);
+    // The first document row starts one line below the tab bar.
+    const text_row = rowText(&s, 1, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, text_row, "1 one") != null);
 }
 
 test "a failed save-as keeps the old path and the dirty flag" {
@@ -1270,14 +1481,17 @@ test "a failed save-as keeps the old path and the dirty flag" {
     try d.send("no-such-dir/out.txt");
     try d.send("\r");
     try std.testing.expect(d.prompt == null);
-    try std.testing.expect(d.ed.path == null); // unchanged
-    try std.testing.expect(d.ed.dirty);
+    try std.testing.expect(d.ed().path == null); // unchanged
+    try std.testing.expect(d.ed().dirty);
     try std.testing.expect(std.mem.indexOf(u8, d.msg, "Save failed") != null);
 }
 
-test "save writes the file, then open reads it back" {
+test "save writes the file, then open reads it back in a new tab" {
     const path = "mibi-save-test.tmp";
+    const other = "mibi-open-test.tmp";
     defer os.deleteFile(path) catch {};
+    defer os.deleteFile(other) catch {};
+    try os.writeFile(other, "other file\n");
 
     var d = try Drive.start("");
     defer d.stop();
@@ -1286,21 +1500,28 @@ test "save writes the file, then open reads it back" {
     try d.send(path);
     try d.send("\r");
     try std.testing.expect(d.prompt == null);
-    try std.testing.expectEqualStrings(path, d.ed.path.?);
-    try std.testing.expect(!d.ed.dirty);
+    try std.testing.expectEqualStrings(path, d.ed().path.?);
+    try std.testing.expect(!d.ed().dirty);
 
     const data = try os.readFileAlloc(std.testing.allocator, path, 1024);
     defer std.testing.allocator.free(data);
     try std.testing.expectEqualStrings("hello\nworld", data);
 
-    // Change the buffer, then re-open the saved file: the disk wins.
+    // Change the buffer, then open another file: it gets its own tab.
     try d.send("!!!");
-    try d.send("\x0f"); // Ctrl+O -> confirm
-    try d.send("y");
+    try d.send("\x0f"); // Ctrl+O
+    try d.send(other);
+    try d.send("\r");
+    try std.testing.expectEqual(@as(usize, 2), d.session.count());
+    try std.testing.expectEqualStrings("other file\n", d.ed().text());
+    try std.testing.expectEqualStrings(other, d.ed().path.?);
+
+    // Opening a file that is already open switches to its tab instead.
+    try d.send("\x0f");
     try d.send(path);
     try d.send("\r");
-    try std.testing.expectEqualStrings("hello\nworld", d.ed.text());
-    try std.testing.expect(!d.ed.dirty);
+    try std.testing.expectEqual(@as(usize, 2), d.session.count());
+    try std.testing.expectEqualStrings("hello\nworld!!!", d.ed().text());
 }
 
 test "a split arrow key in a prompt is held, not typed" {
@@ -1324,7 +1545,7 @@ test "bytes after a prompt closes in the same chunk are edited into the buffer" 
     // Enter accepts the go-to and the trailing X is ordinary editing input.
     try d.send("2\rX");
     try std.testing.expect(d.prompt == null);
-    try std.testing.expectEqualStrings("X", d.ed.text());
+    try std.testing.expectEqualStrings("X", d.ed().text());
 }
 
 test "readFileAlloc reports a missing file distinctly" {
@@ -1345,23 +1566,25 @@ test "putStr decodes utf-8 and honours display width" {
 }
 
 test "an open prompt is not hidden by the help panel" {
-    var ed = try Editor.init(std.testing.allocator, null, "x");
-    defer ed.deinit();
+    var session = Session.init(std.testing.allocator);
+    defer session.deinit();
+    try session.add(null, "x");
     var s = try render.Screen.init(std.testing.allocator, 40, 8);
     defer s.deinit();
     const p: Prompt = .{ .kind = .find };
-    draw(&s, &ed, "", p, true);
+    draw(&s, &session, "", p, true);
     var buf: [64]u8 = undefined;
     const last = rowText(&s, 7, &buf);
     try std.testing.expect(std.mem.indexOf(u8, last, "Find: ") != null);
 }
 
 test "a non-ascii file name renders as text in the status bar" {
-    var ed = try Editor.init(std.testing.allocator, "caf\u{00e9}.txt", "x");
-    defer ed.deinit();
+    var session = Session.init(std.testing.allocator);
+    defer session.deinit();
+    try session.add("caf\u{00e9}.txt", "x");
     var s = try render.Screen.init(std.testing.allocator, 40, 3);
     defer s.deinit();
-    draw(&s, &ed, "", null, false);
+    draw(&s, &session, "", null, false);
     var buf: [128]u8 = undefined;
     const status = rowText(&s, 2, &buf);
     try std.testing.expect(std.mem.indexOf(u8, status, "caf\u{00e9}.txt") != null);

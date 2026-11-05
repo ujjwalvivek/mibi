@@ -253,9 +253,10 @@ def assert_not_in(screen, needle, what=""):
 
 @check
 def startup_renders_file(m, path):
-    """Opening a file shows the gutter, the text and the status bar."""
+    """Opening a file shows the tab bar, the gutter, the text and the status."""
     assert m.wait_for("hello"), "no text after startup"
     screen = m.screen_text()
+    assert_in(screen, "notes.txt", "tab bar")
     assert_in(screen, "1 hello", "gutter + first line")
     assert_in(screen, "2 world", "second line")
     assert_in(screen, "mibi 0.0.1", "status bar")
@@ -337,6 +338,48 @@ def goto_and_replace(m, path):
 
 
 @check
+def tabs_open_switch_and_close(m, path):
+    """Ctrl+T opens a tab, Ctrl+PgUp/PgDn switch, Ctrl+W closes it."""
+    m.send("\x14")  # Ctrl+T
+    screen = m.screen_text()
+    assert_in(screen, "[No Name]", "new tab label")
+    assert_in(screen, "notes.txt", "first tab still listed")
+    m.send("draft")
+    assert m.wait_for("draft"), "typing did not go to the new tab"
+
+    m.send("\x1b[5;5~")  # Ctrl+PgUp -> first tab
+    m.wait_quiet()
+    assert_in(m.screen_text(), "hello", "did not switch back to the first tab")
+    m.send("\x1b[6;5~")  # Ctrl+PgDn -> second tab
+    m.wait_quiet()
+    assert_in(m.screen_text(), "draft", "did not switch to the second tab")
+
+    m.send("\x17")  # Ctrl+W on a dirty tab asks first
+    assert m.wait_for("close without saving? (y/N)"), "no close confirmation"
+    m.shot("09-tabs")
+    m.send("y")
+    m.wait_quiet()
+    screen = m.screen_text()
+    assert_in(screen, "notes.txt")
+    assert_not_in(screen, "draft", "the closed tab is gone")
+
+
+@check
+def open_adds_a_tab(m, path):
+    """Ctrl+O opens a file into a new tab instead of replacing the buffer."""
+    m.send("\x0f")  # Ctrl+O
+    assert m.wait_for("Open:"), "open prompt missing"
+    m.send("other.txt")
+    m.send("\r")
+    m.wait_quiet()
+    screen = m.screen_text()
+    assert_in(screen, "second file", "opened file content")
+    assert_in(screen, "notes.txt", "first tab still open")
+    assert_in(screen, "other.txt", "second tab listed")
+    m.shot("10-open-tab")
+
+
+@check
 def unicode_and_wide_cells(m, path):
     """A CJK character takes two cells and does not break the layout."""
     m.send("\x1b[F")  # End of the current line
@@ -407,6 +450,8 @@ def main():
     for fn in selected:
         with open(path, "w", encoding="utf-8") as f:
             f.write("hello\nworld")
+        with open(os.path.join(tmpdir, "other.txt"), "w", encoding="utf-8") as f:
+            f.write("second file\n")
         m = Mibi(["notes.txt"], cwd=tmpdir)
         try:
             if not m.wait_for("hello"):

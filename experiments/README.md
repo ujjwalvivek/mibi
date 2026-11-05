@@ -34,12 +34,12 @@ boundary; never print via `std.debug` or `std.Io.Threaded`.
 
 | Target | Phase 1 (skeleton) | Phase 2 (editing) | Current (Phase 2 hardened + Phase 3 features) |
 | --- | ---: | ---: | ---: |
-| `x86_64-linux-gnu` | 8,960 | 26,168 | 59,552 |
-| `aarch64-linux-gnu` | 8,816 | 24,752 | 53,384 |
-| `x86_64-macos` | 16,994 | 33,922 | 66,854 |
-| `aarch64-macos` | 50,304 | 69,392 | 90,216 |
-| `x86_64-windows-gnu` | 50,176 | 71,680 | 107,520 |
-| `x86_64-windows` | 55,808 | 69,632 | 107,520 |
+| `x86_64-linux-gnu` | 8,960 | 26,168 | 60,784 |
+| `aarch64-linux-gnu` | 8,816 | 24,752 | 54,040 |
+| `x86_64-macos` | 16,994 | 33,922 | 66,862 |
+| `aarch64-macos` | 50,304 | 69,392 | 90,072 |
+| `x86_64-windows-gnu` | 50,176 | 71,680 | 109,056 |
+| `x86_64-windows` | 55,808 | 69,632 | 109,056 |
 
 The hardening pass (cached line index, UTF-8 `putStr`, file-safety guards,
 richer error reporting) cost ~1.5-2 KB per target. Current numbers are explicit
