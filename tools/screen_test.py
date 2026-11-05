@@ -624,6 +624,29 @@ def theme_background_covers_the_text_area(m, path):
 
 
 @check
+def command_palette_runs_actions(m, path):
+    """Ctrl+P lists every action; picking one runs it."""
+    m.send("\x10")  # Ctrl+P
+    assert m.wait_for("Commands"), "command palette did not open"
+    m.send("new_tab")
+    m.send("\r")
+    m.wait_quiet()
+    text = m.screen_text()
+    assert "[No Name]" in text, f"new_tab did not run: {text.splitlines()[0]!r}"
+    m.shot("18-palette")
+
+
+@check
+def mouse_click_places_the_cursor(m, path):
+    """A left click on a text row moves the cursor to that cell."""
+    m.send("\x1b[<0;5;2M")  # click: row 2, column 5 (1-based)
+    m.wait_quiet()
+    status = m.screen_text().splitlines()[-1]
+    assert "2:3" in status, f"click did not move the cursor: {status!r}"
+    m.shot("19-mouse")
+
+
+@check
 def unicode_and_wide_cells(m, path):
     """A CJK character takes two cells and does not break the layout."""
     m.send("\x1b[F")  # End of the current line

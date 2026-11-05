@@ -4,7 +4,7 @@
 
 const std = @import("std");
 
-pub const Mode = enum { open_file, theme };
+pub const Mode = enum { open_file, theme, commands };
 
 pub const MAX_FILTER = 96;
 pub const MAX_DIR = 512;

@@ -44,10 +44,20 @@ const win = if (is_windows) struct {
         UnicodeChar: u16,
         dwControlKeyState: u32,
     };
+    const MOUSE_EVENT_RECORD = extern struct {
+        dwMousePosition: COORD,
+        dwButtonState: u32,
+        dwControlKeyState: u32,
+        dwEventFlags: u32,
+    };
+    /// The event union sits at offset 4: WORD EventType, then padding.
     const INPUT_RECORD = extern struct {
         EventType: u16,
         _pad: u16,
-        KeyEvent: KEY_EVENT_RECORD,
+        Event: extern union {
+            KeyEvent: KEY_EVENT_RECORD,
+            MouseEvent: MOUSE_EVENT_RECORD,
+        },
     };
 
     extern "kernel32" fn GetStdHandle(n: DWORD) callconv(.winapi) ?HANDLE;
@@ -64,11 +74,18 @@ const win = if (is_windows) struct {
     const STD_INPUT_HANDLE: DWORD = @bitCast(@as(i32, -10));
     const STD_OUTPUT_HANDLE: DWORD = @bitCast(@as(i32, -11));
 
+    const MOUSE_EVENT: u16 = 0x0002;
     const ENABLE_PROCESSED_OUTPUT: DWORD = 0x0001;
     const ENABLE_VIRTUAL_TERMINAL_PROCESSING: DWORD = 0x0004;
     const ENABLE_PROCESSED_INPUT: DWORD = 0x0001;
     const ENABLE_LINE_INPUT: DWORD = 0x0002;
     const ENABLE_ECHO_INPUT: DWORD = 0x0004;
+    const ENABLE_MOUSE_INPUT: DWORD = 0x0010;
+    const ENABLE_EXTENDED_FLAGS: DWORD = 0x0080;
+    const FROM_LEFT_1ST_BUTTON_PRESSED: DWORD = 0x0001;
+    const FROM_LEFT_2ND_BUTTON_PRESSED: DWORD = 0x0004;
+    const RIGHTMOST_BUTTON_PRESSED: DWORD = 0x0002;
+    const MOUSE_WHEELED: DWORD = 0x0004;
 
     const KEY_EVENT: u16 = 0x0001;
     const WINDOW_BUFFER_SIZE_EVENT: u16 = 0x0004;
@@ -99,6 +116,28 @@ const win = if (is_windows) struct {
             else
                 std.fmt.bufPrint(out, "\x1b[{d};{d}~", .{ base, mod }));
         const written = s catch return 0;
+        return written.len;
+    }
+
+    /// Translate a mouse event into an SGR mouse sequence
+    /// (`ESC [ < button ; x ; y M`), 1-based like a real terminal.
+    fn translateMouse(m: MOUSE_EVENT_RECORD, out: []u8) usize {
+        const x: u16 = @intCast(m.dwMousePosition.X + 1);
+        const y: u16 = @intCast(m.dwMousePosition.Y + 1);
+        var button: u16 = 0;
+        if (m.dwEventFlags & win.MOUSE_WHEELED != 0) {
+            const delta: i16 = @bitCast(@as(u16, @truncate(m.dwButtonState >> 16)));
+            button = if (delta > 0) 64 else 65;
+        } else if (m.dwButtonState & win.FROM_LEFT_1ST_BUTTON_PRESSED != 0) {
+            button = 0;
+        } else if (m.dwButtonState & win.FROM_LEFT_2ND_BUTTON_PRESSED != 0) {
+            button = 1;
+        } else if (m.dwButtonState & win.RIGHTMOST_BUTTON_PRESSED != 0) {
+            button = 2;
+        } else {
+            return 0; // release, or motion we do not use
+        }
+        const written = std.fmt.bufPrint(out, "\x1b[<{d};{d};{d}M", .{ button, x, y }) catch return 0;
         return written.len;
     }
 
@@ -189,8 +228,11 @@ const win = if (is_windows) struct {
                 if (n > 0) break;
                 return 0;
             }
-            if (rec.EventType == KEY_EVENT and rec.KeyEvent.bKeyDown != 0) {
-                n += translateKey(rec.KeyEvent, buf[n..]);
+            if (rec.EventType == KEY_EVENT and rec.Event.KeyEvent.bKeyDown != 0) {
+                n += translateKey(rec.Event.KeyEvent, buf[n..]);
+            }
+            if (rec.EventType == MOUSE_EVENT) {
+                n += translateMouse(rec.Event.MouseEvent, buf[n..]);
             }
             if (n >= buf.len) break;
         }
@@ -230,8 +272,9 @@ pub fn enterRaw() !void {
         if (win.GetConsoleMode(out, &saved_out_mode) == 0) return error.NotATerminal;
 
         // We translate INPUT_RECORDs ourselves, so no virtual-terminal input.
-        const in_mode = saved_in_mode &
-            ~(win.ENABLE_LINE_INPUT | win.ENABLE_ECHO_INPUT | win.ENABLE_PROCESSED_INPUT);
+        const in_mode = (saved_in_mode &
+            ~(win.ENABLE_LINE_INPUT | win.ENABLE_ECHO_INPUT | win.ENABLE_PROCESSED_INPUT)) |
+            win.ENABLE_MOUSE_INPUT;
         const out_mode = saved_out_mode |
             win.ENABLE_PROCESSED_OUTPUT | win.ENABLE_VIRTUAL_TERMINAL_PROCESSING;
         _ = win.SetConsoleMode(in, in_mode);

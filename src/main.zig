@@ -27,7 +27,8 @@ pub const version = "0.0.1";
 const MAX_FILE = 64 * 1024 * 1024;
 
 const HelpRow = struct {
-    actions: []const keys.Action,
+    actions: []const keys.Action = &.{},
+    literal: ?[]const u8 = null,
     desc: []const u8,
 };
 
@@ -49,10 +50,12 @@ const help_rows = [_]HelpRow{
     .{ .actions = &.{.save}, .desc = "save" },
     .{ .actions = &.{.open}, .desc = "open file picker" },
     .{ .actions = &.{.theme_picker}, .desc = "theme picker (live preview)" },
+    .{ .actions = &.{.command_palette}, .desc = "command palette" },
     .{ .actions = &.{ .new_tab, .close_tab }, .desc = "new / close tab" },
     .{ .actions = &.{ .next_tab, .prev_tab }, .desc = "next / previous tab" },
     .{ .actions = &.{.help}, .desc = "toggle this help" },
     .{ .actions = &.{.quit}, .desc = "quit (asks if unsaved)" },
+    .{ .literal = "click / wheel", .desc = "place cursor / scroll" },
 };
 
 pub const std_options: std.Options = .{
@@ -97,7 +100,7 @@ const Prompt = struct {
 
 /// All open documents in tab order, with one active. Editors are heap
 /// allocated so the list can grow without invalidating live pointers.
-const UiRequest = enum { open_picker, theme_picker };
+const UiRequest = enum { open_picker, theme_picker, command_palette };
 
 const Session = struct {
     allocator: std.mem.Allocator,
@@ -106,6 +109,8 @@ const Session = struct {
     config: config_mod.Config = .{},
     /// Set by an action that needs the UI layer to open a picker.
     ui_request: ?UiRequest = null,
+    /// Set by the command palette: the run loop executes it like a key press.
+    ui_action: ?keys.Action = null,
 
     fn init(allocator: std.mem.Allocator) Session {
         return .{ .allocator = allocator, .docs = std.ArrayList(*Editor).empty, .active = 0 };
@@ -367,11 +372,23 @@ fn run(init: std.process.Init.Minimal) !void {
                 try processInput(&session, chunk, view_rows, &running, &prompt, &help, &msg_buf, &msg);
             if (used == 0) break; // incomplete escape sequence: wait for more
             off += used;
+            // The command palette asks for an action to run.
+            if (session.ui_action) |action| {
+                session.ui_action = null;
+                switch (defaultKeyFor(action, false)) {
+                    .byte => |b| applyByte(&session, b, &running, &prompt, &msg_buf, &msg, &help, view_rows, false) catch |e| setMsg(&msg_buf, &msg, @errorName(e)),
+                    .csi => |c| applyCsi(&session, c.params, c.final, view_rows, &running, &prompt, &msg_buf, &msg, &help, false) catch |e| setMsg(&msg_buf, &msg, @errorName(e)),
+                }
+            }
             // An action can ask for a picker (Ctrl+O, F2): open it right away so
             // the first press is enough.
             if (session.ui_request) |req| {
                 session.ui_request = null;
-                const mode: picker.Mode = if (req == .theme_picker) .theme else .open_file;
+                const mode: picker.Mode = switch (req) {
+                    .theme_picker => .theme,
+                    .command_palette => .commands,
+                    .open_picker => .open_file,
+                };
                 openPicker(&session, &picker_state, mode, &theme_before, exe_dir);
                 picker_mode = mode;
             }
@@ -421,7 +438,12 @@ fn processInput(
                     if (buf[j] >= 0x40 and buf[j] <= 0x7E) break;
                 }
                 if (j >= buf.len) return i; // incomplete
-                applyCsi(session, buf[i + 2 .. j], buf[j], view_rows, running, prompt, msg_buf, msg, help, true) catch |e| setMsg(msg_buf, msg, @errorName(e));
+                if (buf[i + 2] == '<') {
+                    // SGR mouse: ESC [ < button ; x ; y M
+                    handleMouse(session, buf[i + 2 .. j]);
+                } else {
+                    applyCsi(session, buf[i + 2 .. j], buf[j], view_rows, running, prompt, msg_buf, msg, help, true) catch |e| setMsg(msg_buf, msg, @errorName(e));
+                }
                 i = j + 1;
             } else if (k == 'O') {
                 if (i + 2 >= buf.len) return i;
@@ -440,6 +462,36 @@ fn processInput(
         }
     }
     return i;
+}
+
+/// Mouse: the primary button places the cursor, the wheel moves the view by
+/// three lines. `params` is the `<button;x;y` part of an SGR sequence, 1-based.
+fn handleMouse(session: *Session, params: []const u8) void {
+    var nums: [3]u16 = .{ 0, 0, 0 };
+    var count: usize = 0;
+    for (params) |c| {
+        if (c == '<') continue;
+        if (c == ';') {
+            if (count < nums.len - 1) count += 1;
+            continue;
+        }
+        if (c < '0' or c > '9') break;
+        nums[count] = nums[count] * 10 + (c - '0');
+    }
+    const button = nums[0];
+    const x = nums[1];
+    const y = nums[2];
+    const ed = session.current();
+    if (button == 64 or button == 65) { // wheel up / down: three lines
+        ed.movePage(if (button == 64) -1 else 1, 3, false);
+        return;
+    }
+    if (button != 0 or y == 0) return; // primary button only, and not the tab bar
+    const row = ed.scroll_row + (y - 1);
+    const gutter: usize = if (session.config.line_numbers) digits(ed.lineCount()) + 1 else 0;
+    const screen_col = if (x > 0) @as(usize, x) - 1 else 0;
+    const col = if (screen_col > gutter) screen_col - gutter + ed.scroll_col else 0;
+    ed.gotoLineCol(row, col);
 }
 
 /// Rows available for document text: everything but the tab bar and status line.
@@ -480,6 +532,7 @@ fn defaultKeyFor(action: keys.Action, shift: bool) DefaultKey {
         .backspace => .{ .byte = 0x7f },
         .help => .{ .byte = 0x1f },
         .theme_picker => .{ .csi = .{ .params = "", .final = 'Q' } },
+        .command_palette => .{ .byte = 0x10 },
         .clear_selection => .{ .byte = 0x1b },
         .move_up => moveCsi('A', shift),
         .move_down => moveCsi('B', shift),
@@ -617,6 +670,8 @@ fn applyByte(
             session.closeActive();
             if (session.count() == 0) running.* = false;
         }
+    } else if (b == 0x10) { // Ctrl+P: command palette
+        session.ui_request = .command_palette;
     } else if (b == 0x0f) { // Ctrl+O: open the file picker
         session.ui_request = .open_picker;
     } else if (b == 0x11) { // Ctrl+Q: confirm first if any tab is dirty
@@ -1194,6 +1249,7 @@ fn openPicker(
             loadThemesInto(&p, exe_dir);
             p.selectByName(session.config.themeName());
         },
+        .commands => loadCommandsInto(&p),
     }
     slot.* = p;
 }
@@ -1210,6 +1266,13 @@ fn loadDirInto(p: *picker.Picker, dir: []const u8) void {
         var buf: [1024]u8 = undefined;
         const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, name }) catch continue;
         p.add(name, os.isDirectory(path)) catch {};
+    }
+    p.refilter();
+}
+
+fn loadCommandsInto(p: *picker.Picker) void {
+    inline for (@typeInfo(keys.Action).@"enum".fields) |field| {
+        p.add(field.name, false) catch {};
     }
     p.refilter();
 }
@@ -1278,6 +1341,11 @@ fn acceptPicker(
         return;
     };
     switch (mode) {
+        .commands => {
+            // The run loop executes the action like a key press would.
+            if (keys.actionFromName(item.text)) |action| session.ui_action = action;
+            closePicker(slot);
+        },
         .theme => {
             // Persist the choice: the next start should come up in this theme.
             const name = item.text;
@@ -1431,6 +1499,7 @@ fn drawPicker(s: *render.Screen, p: *picker.Picker, mode: picker.Mode, theme: co
     const title = switch (mode) {
         .open_file => "Open file",
         .theme => "Theme",
+        .commands => "Commands",
     };
     var head_buf: [256]u8 = undefined;
     const head = std.fmt.bufPrint(&head_buf, " {s}: {s} ({d}/{d})", .{
@@ -1509,7 +1578,7 @@ fn drawHelp(s: *render.Screen, session: *Session, w: usize, h: usize, theme: con
     var i: usize = 0;
     while (i < help_rows.len and top + 1 + i < h) : (i += 1) {
         var keys_buf: [96]u8 = undefined;
-        const keys_text = joinActionKeys(session, help_rows[i].actions, &keys_buf);
+        const keys_text = if (help_rows[i].literal) |lit| lit else joinActionKeys(session, help_rows[i].actions, &keys_buf);
         const pad = if (keys_text.len < pad_text.len) pad_text[0 .. pad_text.len - keys_text.len] else " ";
         var line_buf: [192]u8 = undefined;
         const line = std.fmt.bufPrint(&line_buf, "  {s}{s}{s}", .{ keys_text, pad, help_rows[i].desc }) catch help_rows[i].desc;
@@ -2050,6 +2119,45 @@ test "quit on a clean buffer does not ask" {
     try d.send("\x11"); // Ctrl+Q
     try std.testing.expect(!d.running);
     try std.testing.expect(d.prompt == null);
+}
+
+test "a mouse click places the cursor and the wheel scrolls" {
+    var d = try Drive.start("one\ntwo\nthree\nfour\nfive");
+    defer d.stop();
+
+    // Click on the second line after the gutter (gutter is "1 " = 2 cells).
+    handleMouse(&d.session, "<0;4;3");
+    const rc = d.ed().rowCol();
+    try std.testing.expectEqual(@as(usize, 2), rc.row);
+    try std.testing.expectEqual(@as(usize, 1), rc.col);
+
+    // Wheel down moves three lines.
+    handleMouse(&d.session, "<65;1;1");
+    try std.testing.expectEqual(@as(usize, 4), d.ed().rowCol().row);
+    // Wheel up goes back.
+    handleMouse(&d.session, "<64;1;1");
+    try std.testing.expectEqual(@as(usize, 1), d.ed().rowCol().row);
+}
+
+test "the command palette lists actions and runs the chosen one" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    try d.send("\x10"); // Ctrl+P
+    try std.testing.expect(d.prompt == null);
+    try std.testing.expectEqual(UiRequest.command_palette, d.session.ui_request.?);
+
+    // Accepting an entry asks the run loop to execute that action.
+    var slot: ?picker.Picker = picker.Picker.init(std.testing.allocator);
+    defer closePicker(&slot);
+    const p = &slot.?;
+    try p.add("new_tab", false);
+    p.refilter();
+    var mb: [96]u8 = undefined;
+    var msg: []const u8 = "";
+    var registry = syntax.Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try acceptPicker(&d.session, &slot, .commands, &registry, &mb, &msg);
+    try std.testing.expectEqual(keys.Action.new_tab, d.session.ui_action.?);
 }
 
 test "the file picker opens into a new tab without discarding the current one" {
