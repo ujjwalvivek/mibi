@@ -55,3 +55,17 @@ try {
 } finally {
     Pop-Location
 }
+
+# Keep the installed copy (if any) in step with the build, so `mibi` from the
+# profile always runs the binary you just built.
+if (-not ($args -contains 'test') -and -not ($args -contains 'size')) {
+    $installed = Join-Path $env:LOCALAPPDATA 'Programs\Mibi\mibi.exe'
+    if (Test-Path $installed) {
+        try {
+            & (Join-Path $Root 'tools\install.ps1') -Quiet
+            Write-Host "installed copy updated: $(Join-Path $env:LOCALAPPDATA 'Programs\Mibi')"
+        } catch {
+            Write-Host "install sync skipped: $_" -ForegroundColor Yellow
+        }
+    }
+}

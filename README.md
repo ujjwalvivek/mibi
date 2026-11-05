@@ -66,6 +66,18 @@ it. Themes are data files, so adding one costs no binary size.
 Language definitions are separate: drop a `.ini` into `syntax.d/` (kibi's
 format, 52 languages ship with mibi) and it is picked up at startup.
 
+## Installing
+
+```powershell
+.\build.ps1            # build into zig-out\bin
+.\tools\install.ps1    # copy the binary, syntax.d and themes to %LOCALAPPDATA%\Programs\Mibi
+```
+
+After that every `build.ps1` run updates the installed copy automatically (if it
+exists), so the `mibi` Windows Terminal profile always launches the binary you
+just built. `tools\install.ps1` also writes `mibi.cmd`, which opens the editor
+in the `mibi` profile so it gets the Maple Mono NF font.
+
 ## Running in your terminal
 
 mibi is a terminal text editor: it runs inside a terminal, and the window
