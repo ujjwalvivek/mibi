@@ -133,9 +133,10 @@ packaging.
 - Undo/redo with typing grouped into single steps.
 - Find (incremental), replace all, and go-to-line.
 - Regular expressions: `Ctrl+R` inside find/replace switches the search to a
-  pattern engine (classes and ranges, groups, alternation, anchors,
-  `\d \w \s \b`, `* + ?` with lazy variants). Backtracking is step-capped,
-  and there are no backreferences or capture groups yet.
+  pattern engine (classes and ranges, groups with captures, alternation,
+  anchors, `\d \w \s \b`, `* + ? {n,m}` with lazy variants). Replacements
+  expand `$0`..`$9` from the captured groups. Backtracking is step-capped and
+  there are no backreferences yet.
 - File tree sidebar (`Ctrl+B`): directories expand with Enter/`j`/`k` or a
   click, files open in a tab. Icons are Nerd Font glyphs: see
   [assets/fonts/README.md](assets/fonts/README.md) for installing Maple Mono NF
@@ -190,11 +191,11 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu |  98,688 |
-| x86_64-linux-gnu  |  108,456 |
-| x86_64-macos      |  116,220 |
-| aarch64-macos     | 145,320 |
-| x86_64-windows    | 167,424 |
+| aarch64-linux-gnu |  104,768 |
+| x86_64-linux-gnu  |  114,456 |
+| x86_64-macos      |  124,412 |
+| aarch64-macos     | 146,024 |
+| x86_64-windows    | 173,568 |
 
 ## Not yet
 

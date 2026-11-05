@@ -17,6 +17,46 @@ const MAX_UNDO = 512;
 pub const Range = struct { start: usize, end: usize };
 pub const RowCol = struct { row: usize, col: usize };
 
+/// Append `repl` to `out`, expanding `$0`..`$9` with the captured text.
+fn appendExpanded(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    repl: []const u8,
+    text: []const u8,
+    caps: *const [regex.MAX_SLOTS]?usize,
+) !void {
+    var i: usize = 0;
+    while (i < repl.len) {
+        const c = repl[i];
+        if (c == '$' and i + 1 < repl.len) {
+            const d = repl[i + 1];
+            if (d >= '0' and d <= '9') {
+                const slot: usize = @as(usize, d - '0') * 2;
+                if (slot + 1 < caps.len) {
+                    if (caps[slot]) |start| {
+                        if (caps[slot + 1]) |end| {
+                            if (start <= end and end <= text.len) {
+                                try out.appendSlice(allocator, text[start..end]);
+                                i += 2;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                i += 2;
+                continue;
+            }
+            if (d == '$') {
+                try out.append(allocator, '$');
+                i += 2;
+                continue;
+            }
+        }
+        try out.append(allocator, c);
+        i += 1;
+    }
+}
+
 pub const Editor = struct {
     allocator: Allocator,
     buf: Buffer,
@@ -60,6 +100,7 @@ pub const Editor = struct {
     }
 
     pub fn deinit(self: *Editor) void {
+        if (self.regex_prog) |*p| p.deinit();
         if (self.path) |p| self.allocator.free(p);
         if (self.search) |s| self.allocator.free(s);
         self.register.deinit(self.allocator);
@@ -543,17 +584,10 @@ pub const Editor = struct {
     /// Replace every occurrence of `needle` with `repl`; returns the count.
     pub fn replaceAll(self: *Editor, needle: []const u8, repl: []const u8) !usize {
         if (needle.len == 0) return 0;
+        if (self.regex_prog) |*prog| return self.replaceAllRegex(prog, repl);
         var positions = std.ArrayList(regex.Match).empty;
         defer positions.deinit(self.allocator);
-        if (self.regex_prog) |*prog| {
-            const f = self.buf.flat();
-            var i: usize = 0;
-            while (regex.find(prog, f, i)) |m| {
-                try positions.append(self.allocator, m);
-                i = if (m.end > m.start) m.end else m.end + 1;
-                if (i > f.len) break;
-            }
-        } else {
+        {
             const f = self.buf.flat();
             var i: usize = 0;
             while (std.mem.indexOfPos(u8, f, i, needle)) |p| {
@@ -577,6 +611,36 @@ pub const Editor = struct {
         self.cursor = positions.items[0].start;
         self.sel_anchor = null;
         return positions.items.len;
+    }
+
+    /// Regex replace: rebuilds the whole buffer so replacements can grow or
+    /// shrink and `$1`..`$9` / `$0` expand to the captured text.
+    fn replaceAllRegex(self: *Editor, prog: *const regex.Program, repl: []const u8) !usize {
+        const f = self.buf.flat();
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(self.allocator);
+        var caps: [regex.MAX_SLOTS]?usize = .{null} ** regex.MAX_SLOTS;
+        var last: usize = 0;
+        var count: usize = 0;
+        var i: usize = 0;
+        while (regex.findCaptures(prog, f, i, &caps)) |m| {
+            try out.appendSlice(self.allocator, f[last..m.start]);
+            try appendExpanded(self.allocator, &out, repl, f, &caps);
+            last = m.end;
+            count += 1;
+            i = if (m.end > m.start) m.end else m.end + 1;
+            if (i > f.len) break;
+        }
+        if (count == 0) return 0;
+        try out.appendSlice(self.allocator, f[last..]);
+        try self.beginEdit(false);
+        try self.buf.delete(0, f.len);
+        try self.buf.insert(0, out.items);
+        self.dirty = true;
+        self.clearSyntax();
+        self.cursor = 0;
+        self.sel_anchor = null;
+        return count;
     }
 
     // --- files -----------------------------------------------------------
@@ -865,4 +929,14 @@ test "undo everything then redo everything restores both states" {
         try expectLinesMatch(&e);
     }
     try std.testing.expectEqualStrings(before, e.text());
+}
+
+test "regex replace expands capture groups" {
+    var ed = try Editor.init(std.testing.allocator, null, "foo=1 bar=2");
+    defer ed.deinit();
+    ed.search_regex = true;
+    try ed.setSearch("(\\w+)=(\\d+)");
+    const n = try ed.replaceAll("(\\w+)=(\\d+)", "$2:$1");
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqualStrings("1:foo 2:bar", ed.text());
 }
