@@ -1,0 +1,8 @@
+.{
+    .name = .mibi,
+    .version = "0.0.1",
+    .fingerprint = 0xccabd0b40c275194,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

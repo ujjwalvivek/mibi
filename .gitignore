@@ -1,0 +1,26 @@
+# Build output and caches
+.zig-cache/
+.zig-cache-global/
+zig-out/
+zig-out-new/
+
+# Vendored toolchain (fetched by tools/get-zig.ps1 / get-zig-linux.sh)
+tools/zig/
+tools/zig-linux/
+tools/dl/
+
+# Probe build output
+experiments/out/
+
+# Cross-compile / probe binaries
+/winsize.exe
+/mibi-linux
+/mibi-macos
+
+# Runtime and test scratch
+mibi.ini
+mibi-input.log
+mibi-test.tmp
+
+# Local design notes (kept out of the repo)
+PLAN.md
