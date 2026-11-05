@@ -56,19 +56,11 @@ const win = struct {
     extern "kernel32" fn DeleteFileW(lpFileName: [*:0]const u16) callconv(.winapi) c_int;
     extern "kernel32" fn GetModuleFileNameW(hModule: ?HANDLE, lpFilename: [*]u16, nSize: DWORD) callconv(.winapi) DWORD;
     extern "kernel32" fn GetEnvironmentVariableW(lpName: [*:0]const u16, lpBuffer: [*]u16, nSize: DWORD) callconv(.winapi) DWORD;
-    extern "kernel32" fn GetFileAttributesW(lpFileName: [*:0]const u16) callconv(.winapi) DWORD;
-    extern "kernel32" fn GetFullPathNameW(lpFileName: [*:0]const u16, nBufferLength: DWORD, lpBuffer: [*]u16, lpFilePart: ?*?[*]u16) callconv(.winapi) DWORD;
+    extern "kernel32" fn GetConsoleProcessList(lProcessList: [*]DWORD, dwProcessCount: DWORD) callconv(.winapi) DWORD;
+    extern "kernel32" fn GetConsoleWindow() callconv(.winapi) ?*anyopaque;
+    extern "user32" fn MessageBoxW(hWnd: ?*anyopaque, lpText: [*:0]const u16, lpCaption: [*:0]const u16, uType: c_uint) callconv(.winapi) c_int;
+    extern "user32" fn ShowWindow(hWnd: ?*anyopaque, nCmdShow: c_int) callconv(.winapi) c_int;
 
-    const shell32 = struct {
-        extern "shell32" fn ShellExecuteW(
-            hwnd: ?*anyopaque,
-            lpOperation: ?[*:0]const u16,
-            lpFile: ?[*:0]const u16,
-            lpParameters: ?[*:0]const u16,
-            lpDirectory: ?[*:0]const u16,
-            nShowCmd: c_int,
-        ) callconv(.winapi) ?*anyopaque;
-    };
 
     const FILETIME = extern struct { dwLowDateTime: u32, dwHighDateTime: u32 };
     const WIN32_FIND_DATAW = extern struct {
@@ -327,47 +319,33 @@ pub fn inWindowsTerminal() bool {
     return true;
 }
 
-/// Start `exe_path` in a new Windows Terminal window with the user's default
-/// profile, passing `extra_args` (quoted where needed). This is how a process
-/// started in a bare console hands itself off to the user's terminal.
-pub fn spawnInWindowsTerminal(exe_path: []const u8, extra_args: []const u8) !void {
+/// How many processes share this console. One means the console window was
+/// created just for us (a double-click or a shortcut), not a real terminal.
+pub fn consoleProcessCount() u32 {
     if (is_windows) {
-        const allocator = std.heap.page_allocator;
-        var params = std.ArrayList(u8).empty;
-        defer params.deinit(allocator);
-        try params.append(allocator, '"');
-        try params.appendSlice(allocator, exe_path);
-        try params.append(allocator, '"');
-        if (extra_args.len > 0) {
-            try params.append(allocator, ' ');
-            try params.appendSlice(allocator, extra_args);
-        }
-        const w_params = try std.unicode.utf8ToUtf16LeAllocZ(allocator, params.items);
-        defer allocator.free(w_params);
-        const w_verb = try std.unicode.utf8ToUtf16LeAllocZ(allocator, "open");
-        defer allocator.free(w_verb);
-        const w_file = try std.unicode.utf8ToUtf16LeAllocZ(allocator, "wt.exe");
-        defer allocator.free(w_file);
-        const rc = win.shell32.ShellExecuteW(null, w_verb.ptr, w_file.ptr, w_params.ptr, null, 1);
-        if (@intFromPtr(rc) <= 32) return error.SpawnFailed;
-    } else {
-        return error.Unsupported;
+        var pids: [4]win.DWORD = undefined;
+        return win.GetConsoleProcessList(&pids, pids.len);
+    }
+    return 2; // Unix terminals always have a shell attached
+}
+
+/// Hide our own console window (the flash before the message box).
+pub fn hideConsoleWindow() void {
+    if (is_windows) {
+        if (win.GetConsoleWindow()) |hwnd| _ = win.ShowWindow(hwnd, 0); // SW_HIDE
     }
 }
 
-/// Absolute form of `path` (Windows: GetFullPathNameW). Windows Terminal
-/// starts in its profile's directory, so a relative path must be resolved
-/// before the hand-off.
-pub fn absPathAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+/// Blocking message box, used to explain that mibi needs a terminal.
+pub fn messageBox(text: []const u8, caption: []const u8) void {
     if (is_windows) {
-        const wpath = try std.unicode.utf8ToUtf16LeAllocZ(allocator, path);
-        defer allocator.free(wpath);
-        var buf: [4096]u16 = undefined;
-        const n = win.GetFullPathNameW(wpath.ptr, @intCast(buf.len), &buf, null);
-        if (n == 0 or n > buf.len) return error.PathFailed;
-        return std.unicode.utf16LeToUtf8Alloc(allocator, buf[0..n]);
+        const allocator = std.heap.page_allocator;
+        const wtext = std.unicode.utf8ToUtf16LeAllocZ(allocator, text) catch return;
+        defer allocator.free(wtext);
+        const wcaption = std.unicode.utf8ToUtf16LeAllocZ(allocator, caption) catch return;
+        defer allocator.free(wcaption);
+        _ = win.MessageBoxW(null, wtext.ptr, wcaption.ptr, 0x00000040); // MB_ICONINFORMATION
     }
-    return allocator.dupe(u8, path);
 }
 
 /// Delete `path`. A file that is already gone is not an error.

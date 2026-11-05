@@ -57,25 +57,20 @@ format, 52 languages ship with mibi) and it is picked up at startup.
 
 ## Running in your terminal
 
-mibi is a TUI: the window belongs to the terminal emulator, so mibi cannot
-remove its chrome. It does make sure it runs *inside your* terminal:
+mibi is a terminal text editor: it runs inside a terminal, and the window
+chrome belongs to that terminal. Double-clicking the executable does not start
+a stray console — it shows a short message telling you to open a terminal,
+then exits.
 
-- Run `mibi <file>` from a terminal you already have open: it uses that window
-  and profile, and sets the tab title (`mibi - notes.txt`).
-- If Windows starts the binary in a bare console (double-click, or conhost is
-  the default terminal), mibi hands itself off to Windows Terminal with your
-  default profile and exits. The hand-off is skipped when `WT_SESSION` is
-  already set (so it cannot loop) or when `--in-terminal` is passed;
-  `terminal = console` in `mibi.ini` turns it off entirely.
-- Double-clicking an unsigned local build makes Windows SmartScreen prompt
-  ("Windows protected your PC"). That is Windows, not mibi: click *Run anyway*,
-  or launch from a terminal, or double-click
-  `assets/windows-terminal/mibi.cmd`, which goes through `wt.exe` and avoids
-  the check.
-- `assets/windows-terminal/install.ps1` adds a proper Windows Terminal profile
-  (icon, colour scheme, font). See
+- `mibi <file>` from a terminal you already have open uses that window and
+  profile, and sets the tab title (`mibi - notes.txt`).
+- `--in-terminal` skips the double-click check (used by scripts and tests).
+- `assets/windows-terminal/install.ps1` adds a Windows Terminal profile (icon,
+  colour scheme, font). See
   [assets/windows-terminal/README.md](assets/windows-terminal/README.md) for
   chrome-less settings (F11 focus mode, hiding tabs from the title bar).
+- Double-clicking an unsigned local build also makes Windows SmartScreen ask
+  "Windows protected your PC"; click *Run anyway*, or launch from a terminal.
 
 ## Icons
 
@@ -164,11 +159,11 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 
 | Target | Bytes |
 | --- | ---: |
-| aarch64-linux-gnu | 71,120 |
-| x86_64-linux-gnu | 77,016 |
+| aarch64-linux-gnu | 70,960 |
+| x86_64-linux-gnu | 76,808 |
 | x86_64-macos | 83,332 |
 | aarch64-macos | 108,280 |
-| x86_64-windows | 134,144 |
+| x86_64-windows | 133,632 |
 
 ## Not yet
 

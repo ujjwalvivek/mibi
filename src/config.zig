@@ -37,17 +37,12 @@ fn rgb(r: u8, g: u8, b: u8) Color {
     return .{ .rgb = .{ .r = r, .g = g, .b = b } };
 }
 
-/// Where the editor wants its window: hand off to Windows Terminal when
-/// started in a bare console, or stay put.
-pub const Terminal = enum { auto, wt, console };
-
 pub const Config = struct {
     theme: Theme = .{},
     keys: keys.KeyMap = .{},
     tab_width: usize = 4,
     line_numbers: bool = true,
     syntax: bool = true,
-    terminal: Terminal = .auto,
 };
 
 fn hexVal(c: u8) ?u8 {
@@ -119,15 +114,6 @@ pub fn apply(config: *Config, text: []const u8) void {
             if (parseBool(entry.value)) |b| config.line_numbers = b;
         } else if (std.mem.eql(u8, entry.key, "syntax")) {
             if (parseBool(entry.value)) |b| config.syntax = b;
-        } else if (std.mem.eql(u8, entry.key, "terminal")) {
-            const v = std.mem.trim(u8, entry.value, " \t");
-            if (std.mem.eql(u8, v, "wt")) {
-                config.terminal = .wt;
-            } else if (std.mem.eql(u8, v, "console")) {
-                config.terminal = .console;
-            } else if (std.mem.eql(u8, v, "auto")) {
-                config.terminal = .auto;
-            }
         }
     }
 }
@@ -219,17 +205,6 @@ test "parses [keys] bindings and ignores unknown actions" {
     try std.testing.expectEqual(keys.Action.save, config.keys.lookup("f2").?);
     try std.testing.expectEqual(keys.Action.move_word_left, config.keys.lookup("ctrl+shift+left").?);
     try std.testing.expectEqual(@as(usize, 3), config.keys.count); // the bad one was skipped
-}
-
-test "parses the terminal hand-off setting" {
-    var config = Config{};
-    try std.testing.expectEqual(Terminal.auto, config.terminal);
-    apply(&config, "terminal = console\n");
-    try std.testing.expectEqual(Terminal.console, config.terminal);
-    apply(&config, "terminal = wt\n");
-    try std.testing.expectEqual(Terminal.wt, config.terminal);
-    apply(&config, "terminal = nonsense\n");
-    try std.testing.expectEqual(Terminal.wt, config.terminal); // unchanged
 }
 
 test "a missing config file keeps the defaults" {

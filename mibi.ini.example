@@ -11,9 +11,6 @@ tab_width = 4
 line_numbers = true
 ; Syntax highlighting from syntax.d/*.ini.
 syntax = true
-; Where to run: auto hands off to Windows Terminal when started in a bare
-; console; wt always does; console never does.
-terminal = auto
 
 [theme]
 ; Colours are #rrggbb or #rgb. Uncomment to override the default palette.

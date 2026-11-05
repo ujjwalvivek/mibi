@@ -22,14 +22,13 @@ full path of the executable.
 
 ## Launching
 
-- **From a terminal you already have open**: just run `mibi <file>` — it runs in
-  that window, with that profile.
-- **From Explorer / a shortcut**: the binary hands itself off to Windows
-  Terminal (`wt.exe <mibi.exe> <file>`) with your default profile and exits, so
-  no bare console window is left behind. Set `terminal = console` in `mibi.ini`
-  to keep it in the console instead, or `terminal = wt` to always hand off.
-- **Without changing the default**: `mibi.cmd` does the same hand-off
-  explicitly and falls back to a plain console if Windows Terminal is missing.
+- **From a terminal you already have open**: run `mibi <file>` — it uses that
+  window, with that profile, and sets the tab title.
+- **Double-clicking** the executable shows a message ("mibi is a terminal text
+  editor") and exits, instead of leaving you in a bare console. Start it from a
+  terminal, or use `mibi.cmd`.
+- **From the profile menu**: after `install.ps1`, "mibi" appears in Windows
+  Terminal's profile dropdown with its own icon and colours.
 
 ## SmartScreen
 

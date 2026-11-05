@@ -38,10 +38,10 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
     // Windows builds carry the app icon (assets/mibi.ico) as a resource, and
-    // use ShellExecuteW to hand off to Windows Terminal.
+    // use a message box when started without a terminal.
     if (target.result.os.tag == .windows) {
         exe_mod.addWin32ResourceFile(.{ .file = b.path("assets/mibi.rc") });
-        exe_mod.linkSystemLibrary("shell32", .{});
+        exe_mod.linkSystemLibrary("user32", .{});
     }
     b.installArtifact(exe);
 

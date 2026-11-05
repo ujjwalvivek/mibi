@@ -198,30 +198,20 @@ fn run(init: std.process.Init.Minimal) !void {
     defer if (exe_dir) |d| allocator.free(d);
     const config = config_mod.load(allocator, exe_dir);
 
-    // A console app cannot choose its host window. When Windows started us in a
-    // bare console (double-click, or the default terminal is conhost), hand the
-    // session to Windows Terminal with the user's default profile and exit.
-    //
-    // Only the file is passed: wt.exe parses any `--option` itself and rejects
-    // unknown ones. The child cannot loop because Windows Terminal sets
-    // WT_SESSION for everything it hosts, and that check runs first.
-    if (os.is_windows and !in_terminal and config.terminal != .console and !os.inWindowsTerminal()) {
-        if (os.exePathAlloc(allocator)) |exe| {
-            defer allocator.free(exe);
-            var args_buf = std.ArrayList(u8).empty;
-            defer args_buf.deinit(allocator);
-            if (path) |p| {
-                // Windows Terminal starts in its profile's directory, so a
-                // relative path would resolve somewhere else.
-                const abs = os.absPathAlloc(allocator, p) catch null;
-                defer if (abs) |a| allocator.free(a);
-                const target = abs orelse p;
-                args_buf.append(allocator, '"') catch {};
-                args_buf.appendSlice(allocator, target) catch {};
-                args_buf.append(allocator, '"') catch {};
-            }
-            if (os.spawnInWindowsTerminal(exe, args_buf.items)) |_| return else |_| {}
-        } else |_| {}
+    // Double-clicking a console app gets a console window of its own, which is
+    // not what a TUI wants. When that happens, hide the flash and explain that
+    // mibi runs inside a terminal. `--in-terminal` skips the check.
+    if (os.is_windows and !in_terminal and !os.inWindowsTerminal() and os.consoleProcessCount() <= 1) {
+        os.hideConsoleWindow();
+        os.messageBox(
+            "mibi is a terminal text editor.\n\n" ++
+                "Open it from a terminal window instead of double-clicking:\n\n" ++
+                "    mibi <file>     in Windows Terminal (or any terminal)\n" ++
+                "    mibi.cmd        in assets\\windows-terminal\\\n\n" ++
+                "The README covers the Windows Terminal profile, colours and keys.",
+            "mibi",
+        );
+        return;
     }
 
     var initial: []const u8 = "";
