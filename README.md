@@ -3,8 +3,10 @@
 A tiny, modern terminal text editor. Non-modal, in the spirit of nano/micro,
 built in Zig with no third-party dependencies.
 
-Status: **Phase 2 complete** - it opens, edits, selects, copies, undoes and
-saves real files. Cross-platform (Linux, macOS, Windows).
+Status: **Phase 3 in progress** - Phase 2 (open, edit, select, copy, undo,
+save) is complete and hardened, plus the Unicode width table,
+find/replace/go-to-line and a help panel. Cross-platform (Linux, macOS,
+Windows).
 
 ```
 mibi                # new buffer
@@ -20,6 +22,7 @@ toolchain (0.16.0) is fetched into `tools/zig` on first use.
 .\build.ps1                 # -> zig-out\bin\mibi.exe (ReleaseSmall)
 .\build.ps1 run             # build and run
 .\build.ps1 test            # unit tests
+.\build.ps1 size            # build every target and check the size gate
 .\build.ps1 -Doptimize=Debug
 .\build.ps1 -Dtarget=x86_64-linux-gnu   # cross-compile
 ```
@@ -32,33 +35,41 @@ toolchain (0.16.0) is fetched into `tools/zig` on first use.
 | `Enter` | new line |
 | `Tab` | insert 4 spaces |
 | `Backspace` / `Delete` | delete before / after the cursor |
-| `←` `→` `↑` `↓` | move |
-| `Ctrl+←` / `Ctrl+→` | move by word |
+| arrows | move |
+| `Ctrl+arrows` | move by word |
 | `Home` / `End` | start / end of line |
 | `PgUp` / `PgDn` | move a page |
-| `Shift` + any movement | extend the selection |
+| `Shift` + movement | extend the selection |
 | `Ctrl+A` | select all |
 | `Esc` | clear the selection (or cancel a prompt) |
-| `Ctrl+C` | copy selection (or line) → register + system clipboard (OSC 52) |
-| `Ctrl+X` | cut selection (or line) |
+| `Ctrl+C` / `Ctrl+X` | copy / cut selection (or line) |
 | `Ctrl+V` | paste from the register |
 | `Ctrl+D` | duplicate the current line |
-| `Ctrl+Z` / `Ctrl+Y` | undo / redo (runs of typing undo together) |
+| `Ctrl+Z` / `Ctrl+Y` | undo / redo |
+| `Ctrl+F` | find (incremental); `F3` / `Shift+F3` next / previous |
+| `Ctrl+R` | replace all |
+| `Ctrl+G` | go to `line[:column]` |
 | `Ctrl+S` | save; asks for a name if the buffer is unnamed |
-| `Ctrl+O` | open a file (type a path) |
-| `Ctrl+Q` | quit |
+| `Ctrl+O` | open a file (Tab completes the path; asks first if there are unsaved edits) |
+| `Ctrl+?` / `F1` | help panel |
+| `Ctrl+Q` | quit (asks first if there are unsaved edits) |
 
 ## Features
 
-- UTF-8 text, decoded to codepoints (no byte mojibake), tab expansion.
-- Piece-table buffer: cheap edits, good on large files.
-- Cursor with column memory through short lines; word movement.
-- Selection with a highlight, and a block cursor.
+- UTF-8 text, decoded to codepoints, with a generated Unicode width table
+  (CJK and emoji take two cells, combining marks zero).
+- Piece-table buffer: cheap edits, good on large files. A cached line index
+  keeps row lookups a binary search, so drawing stays proportional to the
+  visible rows rather than the file size.
+- Cursor with column memory; word movement; selection with a highlight.
 - Clipboard register plus **OSC 52** so copy reaches the system clipboard.
 - Undo/redo with typing grouped into single steps.
+- Find (incremental), replace all, and go-to-line.
 - Line numbers, status bar (name, dirty `[+]`, cursor, line count, size).
-- File open/save, and Save-As / Open prompts.
-- Cell-grid **diff renderer**: only changed cells are written to the terminal.
+- File open/save; path prompts list the directory; Tab completes. Quit and
+  Open ask before discarding unsaved edits, and a failed open or save reports
+  the actual OS error rather than failing silently.
+- Cell-grid **diff renderer**: changed rows are rewritten in full.
 - Raw mode, alternate screen, resize handling, auto-wrap disabled, UTF-8
   console codepage set on Windows.
 - Cross-platform from one codebase: `src/os.zig` (kernel32 / libc), `src/term.zig`.
@@ -67,27 +78,31 @@ toolchain (0.16.0) is fetched into `tools/zig` on first use.
 
 ```
 src/main.zig     entry, input decoding, prompts, drawing
-src/editor.zig   cursor, selection, editing, undo/redo, clipboard, files
-src/buffer.zig   piece table
+src/editor.zig   cursor, selection, editing, undo/redo, clipboard, search, files
+src/buffer.zig   piece table + cached line index
 src/render.zig   cell grid + ANSI diff
-src/term.zig     raw mode, alt screen, size
+src/term.zig     raw mode, alt screen, size, input
 src/os.zig       raw OS layer (no std.Io)
+src/text.zig     UTF-8 helpers
+src/width.zig    generated Unicode width table
 ```
 
 ## Size
 
-ReleaseSmall, stripped, cross-compiled (see `experiments/README.md`):
+ReleaseSmall, stripped, cross-compiled. `.\build.ps1 size` rebuilds every
+target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
+150 KB, hard ceiling 1 MB); see `experiments/README.md` for the probe data.
 
 | Target | Bytes |
 | --- | ---: |
-| x86_64-linux-gnu | ~33 KB |
-| aarch64-linux-gnu | ~31 KB |
-| x86_64-macos | ~34 KB |
-| aarch64-macos | ~70 KB |
-| x86_64-windows | ~76 KB |
+| aarch64-linux-gnu | 53,384 |
+| x86_64-linux-gnu | 59,552 |
+| x86_64-macos | 66,854 |
+| aarch64-macos | 90,216 |
+| x86_64-windows | 107,520 |
 
 ## Not yet
 
-Tabs/multiple files, search & replace, syntax highlighting, config, keybinds,
-themes, mouse, splits, file tree, command palette, multi-cursor, macros, regex,
-embedded terminal. See `PLAN.md`.
+Tabs / multiple files, syntax highlighting, config file, keybindings, themes,
+mouse, splits, file tree, command palette, multi-cursor, macros, regex,
+embedded terminal.
