@@ -69,13 +69,15 @@ pub const Config = struct {
     syntax: bool = true,
     /// Unicode icons in the file tree (false = one-letter ASCII markers).
     /// ASCII is the default because many terminal fonts lack emoji glyphs.
-    icons_unicode: bool = false,
+    icons_unicode: bool = true,
     /// Name of a theme from `themes/<name>.ini` (empty = built-in default).
     theme_name: [32]u8 = [_]u8{0} ** 32,
     theme_name_len: usize = 0,
     /// The `mibi.ini` that was loaded (empty when the defaults were used).
     source: [1024]u8 = [_]u8{0} ** 1024,
     source_len: usize = 0,
+    /// Set when the saved theme name has no matching themes/<name>.ini.
+    theme_missing: bool = false,
 
     pub fn themeName(self: *const Config) []const u8 {
         return self.theme_name[0..self.theme_name_len];
@@ -163,7 +165,7 @@ pub fn apply(config: *Config, text: []const u8) void {
             if (parseBool(entry.value)) |b| config.syntax = b;
         } else if (std.mem.eql(u8, entry.key, "icons")) {
             const v = std.mem.trim(u8, entry.value, " \t");
-            config.icons_unicode = std.ascii.eqlIgnoreCase(v, "unicode") or std.ascii.eqlIgnoreCase(v, "emoji");
+            config.icons_unicode = !std.ascii.eqlIgnoreCase(v, "ascii");
         } else if (std.mem.eql(u8, entry.key, "theme")) {
             const v = std.mem.trim(u8, entry.value, " \t");
             const n = @min(v.len, config.theme_name.len);
@@ -202,7 +204,11 @@ pub fn load(allocator: std.mem.Allocator, exe_dir: ?[]const u8) Config {
     // A named theme is the base; keys in this file's [theme] then override it.
     var name_buf: [32]u8 = undefined;
     if (themeNameFrom(data, &name_buf)) |name| {
-        if (loadTheme(allocator, exe_dir, name)) |theme| config.theme = theme;
+        if (loadTheme(allocator, exe_dir, name)) |theme| {
+            config.theme = theme;
+        } else {
+            config.theme_missing = true;
+        }
     }
     apply(&config, data);
     return config;
@@ -262,6 +268,44 @@ pub fn saveTheme(allocator: std.mem.Allocator, config: *Config, name: []const u8
         return;
     };
     config.setSource(path);
+    config.theme_missing = false;
+
+    // There is usually more than one config (the working directory's and the
+    // one next to the binary). Write the choice into the other one as well so
+    // launching from a different directory does not bring back the old theme.
+    var other_buf: [1024]u8 = undefined;
+    if (otherConfigPath(config, &other_buf)) |other| {
+        if (!std.mem.eql(u8, other, path)) {
+            var probe = Config{};
+            probe.setSource(other);
+            saveThemeTo(allocator, other, name) catch {};
+        }
+    }
+}
+
+/// The config path that was *not* loaded, if one exists.
+fn otherConfigPath(self: *const Config, buf: []u8) ?[]const u8 {
+    if (self.source_len == 0) return null;
+    const loaded = self.sourcePath();
+    // Loaded from the working directory: the other one sits next to the exe.
+    if (!std.mem.startsWith(u8, loaded, "mibi.ini") and !std.mem.eql(u8, loaded, "mibi.ini")) {
+        if (readFile(std.heap.page_allocator, "mibi.ini")) |t| {
+            std.heap.page_allocator.free(t);
+            return "mibi.ini";
+        }
+        return null;
+    }
+    // Loaded "mibi.ini": look for one next to the executable.
+    const dir = std.fs.path.dirname(loaded) orelse return null;
+    _ = dir;
+    const exe_dir = os.exeDirAlloc(std.heap.page_allocator) catch return null;
+    defer std.heap.page_allocator.free(exe_dir);
+    const candidate = std.fmt.bufPrint(buf, "{s}/mibi.ini", .{exe_dir}) catch return null;
+    if (readFile(std.heap.page_allocator, candidate)) |t| {
+        std.heap.page_allocator.free(t);
+        return candidate;
+    }
+    return null;
 }
 
 fn saveThemeTo(allocator: std.mem.Allocator, path: []const u8, name: []const u8) !void {

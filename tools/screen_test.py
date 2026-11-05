@@ -746,10 +746,12 @@ def file_tree_lists_and_opens(m, path):
         proc.send("\x02")  # Ctrl+B
         proc.wait_quiet()
         text = proc.screen_text()
-        assert "> sub" in text, f"tree missing the directory entry: {text[:160]!r}"
-        assert ". notes.txt" in text, "tree missing the file icon"
+        assert " sub" in text, f"tree missing the directory entry: {text[:160]!r}"
+        assert " notes.txt" in text, "tree missing the file entry"
 
-        proc.send("\r")  # the selected entry is the sub directory
+        proc.send("\x1b[B")  # down past the ".." row to the sub directory
+        proc.wait_quiet()
+        proc.send("\r")
         proc.wait_quiet()
         assert "inner.txt" in proc.screen_text(), "directory did not expand"
 

@@ -13,12 +13,16 @@ pub const Entry = struct {
     path: []u8,
     is_dir: bool,
     depth: usize,
+    /// The synthetic ".." row that walks up one directory.
+    is_parent: bool = false,
 };
 
 pub const Tree = struct {
     allocator: std.mem.Allocator,
     root: [MAX_PATH]u8 = undefined,
     root_len: usize = 0,
+    parent: [MAX_PATH]u8 = undefined,
+    parent_len: usize = 0,
     entries: std.ArrayList(Entry),
     expanded: std.ArrayList([]u8),
     selected: usize = 0,
@@ -30,9 +34,7 @@ pub const Tree = struct {
             .entries = std.ArrayList(Entry).empty,
             .expanded = std.ArrayList([]u8).empty,
         };
-        const n = @min(root.len, t.root.len);
-        @memcpy(t.root[0..n], root[0..n]);
-        t.root_len = n;
+        t.setRoot(root);
         try t.reload();
         return t;
     }
@@ -48,6 +50,53 @@ pub const Tree = struct {
         return self.root[0..self.root_len];
     }
 
+    fn setRoot(self: *Tree, root: []const u8) void {
+        const n = @min(root.len, self.root.len);
+        @memcpy(self.root[0..n], root[0..n]);
+        self.root_len = n;
+        self.parent_len = 0;
+        const p = parentOf(self.rootPath()) orelse return;
+        const m = @min(p.len, self.parent.len);
+        @memcpy(self.parent[0..m], p[0..m]);
+        self.parent_len = m;
+    }
+
+    pub fn parentPath(self: *const Tree) []const u8 {
+        return self.parent[0..self.parent_len];
+    }
+
+    /// Walk up one directory (the ".." row).
+    pub fn goUp(self: *Tree) !void {
+        if (self.parent_len == 0) return;
+        var buf: [MAX_PATH]u8 = undefined;
+        const parent = self.parentPath();
+        const n = @min(parent.len, buf.len);
+        @memcpy(buf[0..n], parent[0..n]);
+        self.setRoot(buf[0..n]);
+        for (self.expanded.items) |p| self.allocator.free(p);
+        self.expanded.clearRetainingCapacity();
+        self.selected = 0;
+        try self.reload();
+    }
+
+    /// The directory above `path`, or null at the filesystem root.
+    fn parentOf(path: []const u8) ?[]const u8 {
+        var end = path.len;
+        while (end > 0 and (path[end - 1] == '/' or path[end - 1] == '\\')) end -= 1;
+        var i = end;
+        while (i > 0) : (i -= 1) {
+            if (path[i - 1] == '/' or path[i - 1] == '\\') {
+                if (i == 1) return path[0..1]; // "/" or "C:\"
+                return path[0 .. i - 1];
+            }
+        }
+        // Relative paths without a separator: "." lives above, and a bare
+        // name lives in the working directory.
+        if (std.mem.eql(u8, path, ".")) return "..";
+        if (std.mem.eql(u8, path, "..")) return "../..";
+        return ".";
+    }
+
     fn clearEntries(self: *Tree) void {
         for (self.entries.items) |e| {
             self.allocator.free(e.name);
@@ -59,6 +108,15 @@ pub const Tree = struct {
     /// Rebuild the visible list: root children, then expanded directories.
     pub fn reload(self: *Tree) !void {
         self.clearEntries();
+        if (self.parent_len > 0) {
+            try self.entries.append(self.allocator, .{
+                .name = try self.allocator.dupe(u8, ".."),
+                .path = try self.allocator.dupe(u8, ""),
+                .is_dir = true,
+                .depth = 0,
+                .is_parent = true,
+            });
+        }
         try self.addDir("", 0);
         self.selected = @min(self.selected, if (self.entries.items.len > 0) self.entries.items.len - 1 else 0);
     }
@@ -161,16 +219,15 @@ pub const Tree = struct {
 };
 
 // --- icons -----------------------------------------------------------------
-/// A glyph for a file, by extension. These are plain Unicode symbols/emoji so
-/// they render in any terminal that has an emoji font; `[editor] icons = ascii`
-/// switches to one-letter markers for terminals without one.
+/// Nerd Font glyphs per file type (single cell each). `[editor] icons = ascii`
+/// falls back to letter markers for terminals without a patched font.
 pub fn iconFor(name: []const u8, is_dir: bool, expanded: bool, unicode: bool) []const u8 {
     if (is_dir) {
         if (!unicode) return if (expanded) "v" else ">";
-        return if (expanded) "\u{1F4C2}" else "\u{1F4C1}";
+        return if (expanded) "\u{f07c}" else "\u{f07b}"; // folder / folder-open
     }
     const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse {
-        return if (unicode) "\u{1F4C4}" else ".";
+        return if (unicode) "\u{f15b}" else ".";
     };
     const ext = name[dot + 1 ..];
     if (!unicode) {
@@ -186,34 +243,34 @@ pub fn iconFor(name: []const u8, is_dir: bool, expanded: bool, unicode: bool) []
         return ".";
     }
     const table = [_]struct { ext: []const u8, glyph: []const u8 }{
-        .{ .ext = "zig", .glyph = "\u{1F4DC}" },   // scroll
-        .{ .ext = "rs", .glyph = "\u{1F980}" },   // crab
-        .{ .ext = "py", .glyph = "\u{1F40D}" },   // snake
-        .{ .ext = "js", .glyph = "\u{1F7E8}" },   // yellow square
-        .{ .ext = "ts", .glyph = "\u{1F7E6}" },   // blue square
-        .{ .ext = "json", .glyph = "\u{2699}" },  // gear
-        .{ .ext = "toml", .glyph = "\u{2699}" },
-        .{ .ext = "yaml", .glyph = "\u{2699}" },
-        .{ .ext = "yml", .glyph = "\u{2699}" },
-        .{ .ext = "ini", .glyph = "\u{2699}" },
-        .{ .ext = "md", .glyph = "\u{1F4DD}" },   // memo
-        .{ .ext = "txt", .glyph = "\u{1F4C4}" },  // page
-        .{ .ext = "sh", .glyph = "\u{1F5A5}" },   // desktop
-        .{ .ext = "c", .glyph = "\u{1F527}" },    // wrench
-        .{ .ext = "h", .glyph = "\u{1F527}" },
-        .{ .ext = "cpp", .glyph = "\u{1F527}" },
-        .{ .ext = "go", .glyph = "\u{1F439}" },   // hamster
-        .{ .ext = "lua", .glyph = "\u{1F319}" },  // moon
-        .{ .ext = "html", .glyph = "\u{1F310}" }, // globe
-        .{ .ext = "css", .glyph = "\u{1F3A8}" },  // palette
-        .{ .ext = "svg", .glyph = "\u{1F5BC}" },  // frame
-        .{ .ext = "png", .glyph = "\u{1F5BC}" },
-        .{ .ext = "jpg", .glyph = "\u{1F5BC}" },
+        .{ .ext = "zig", .glyph = "\u{e6a9}" },   // zig
+        .{ .ext = "rs", .glyph = "\u{e7a8}" },    // rust
+        .{ .ext = "py", .glyph = "\u{e73c}" },    // python
+        .{ .ext = "js", .glyph = "\u{e74e}" },    // javascript
+        .{ .ext = "ts", .glyph = "\u{e628}" },    // typescript
+        .{ .ext = "json", .glyph = "\u{e60b}" },  // json
+        .{ .ext = "toml", .glyph = "\u{e615}" },  // config
+        .{ .ext = "yaml", .glyph = "\u{e615}" },
+        .{ .ext = "yml", .glyph = "\u{e615}" },
+        .{ .ext = "ini", .glyph = "\u{e615}" },
+        .{ .ext = "md", .glyph = "\u{e73e}" },    // markdown
+        .{ .ext = "txt", .glyph = "\u{f15c}" },   // file-text
+        .{ .ext = "sh", .glyph = "\u{f489}" },    // terminal
+        .{ .ext = "c", .glyph = "\u{e61e}" },     // c
+        .{ .ext = "h", .glyph = "\u{f0fd}" },     // h-square
+        .{ .ext = "cpp", .glyph = "\u{e61d}" },   // c++
+        .{ .ext = "go", .glyph = "\u{e627}" },    // go
+        .{ .ext = "lua", .glyph = "\u{e620}" },   // lua
+        .{ .ext = "html", .glyph = "\u{e736}" },  // html5
+        .{ .ext = "css", .glyph = "\u{e749}" },   // css3
+        .{ .ext = "svg", .glyph = "\u{f1c5}" },   // file-image
+        .{ .ext = "png", .glyph = "\u{f1c5}" },
+        .{ .ext = "jpg", .glyph = "\u{f1c5}" },
     };
     for (table) |row| {
         if (std.ascii.eqlIgnoreCase(ext, row.ext)) return row.glyph;
     }
-    return "\u{1F4C4}";
+    return "\u{f15b}";
 }
 
 // --- tests -----------------------------------------------------------------
@@ -230,9 +287,9 @@ test "the tree lists the working directory" {
 }
 
 test "icons follow the extension" {
-    try std.testing.expectEqualStrings("\u{1F4C1}", iconFor("src", true, false, true));
-    try std.testing.expectEqualStrings("\u{1F4C2}", iconFor("src", true, true, true));
-    try std.testing.expectEqualStrings("\u{1F4DC}", iconFor("main.zig", false, false, true));
+    try std.testing.expectEqualStrings("\u{f07b}", iconFor("src", true, false, true));
+    try std.testing.expectEqualStrings("\u{f07c}", iconFor("src", true, true, true));
+    try std.testing.expectEqualStrings("\u{e6a9}", iconFor("main.zig", false, false, true));
     try std.testing.expectEqualStrings(">", iconFor("src", true, false, false));
     try std.testing.expectEqualStrings("z", iconFor("main.zig", false, false, false));
     try std.testing.expectEqualStrings(".", iconFor("Makefile", false, false, false));

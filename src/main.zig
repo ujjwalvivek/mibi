@@ -287,6 +287,10 @@ fn run(init: std.process.Init.Minimal) !void {
     var input: [256]u8 = undefined;
     var msg_buf: [96]u8 = undefined;
     var msg: []const u8 = "";
+    var theme_warn_buf: [128]u8 = undefined;
+    if (session.config.theme_missing) {
+        msg = std.fmt.bufPrint(&theme_warn_buf, "theme '{s}' not found", .{session.config.themeName()}) catch "theme not found";
+    }
     var prompt: ?Prompt = null;
     var running = true;
     var help = false;
@@ -1176,7 +1180,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
         const cursor_line = lr == rc.row and std.meta.activeTag(line_bg) != .default;
         const row_bg = if (cursor_line) line_bg else theme.background;
         if (cursor_line) {
-            var cx: usize = 0;
+            var cx: usize = side; // never paint over the sidebar
             while (cx < w) : (cx += 1) s.put(@intCast(cx), y, .{ .ch = ' ', .bg = line_bg });
         }
 
@@ -1321,7 +1325,9 @@ fn drawTree(s: *render.Screen, t: *tree_mod.Tree, focused: bool, h: usize, theme
         while (x < side_w) : (x += 1) s.put(@intCast(x), @intCast(1 + row), .{ .ch = ' ', .bg = row_bg });
 
         const indent = @min(e.depth * 2, side_w - 6);
-        const icon = if (e.is_dir)
+        const icon = if (e.is_parent)
+            (if (icons_unicode) "\u{f062}" else "^")
+        else if (e.is_dir)
             tree_mod.iconFor(e.name, true, t.isExpanded(e.path), icons_unicode)
         else
             tree_mod.iconFor(e.name, false, false, icons_unicode);
@@ -1420,6 +1426,10 @@ fn handleTreeInput(session: *Session, buf: []const u8, msg_buf: []u8, msg: *[]co
 fn openTreeSelection(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
     const t = &session.tree.?;
     const entry = t.selectedEntry() orelse return;
+    if (entry.is_parent) {
+        t.goUp() catch {};
+        return;
+    }
     if (entry.is_dir) {
         t.toggleDir(entry.path) catch {};
         return;

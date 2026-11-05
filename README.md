@@ -137,9 +137,10 @@ packaging.
   `\d \w \s \b`, `* + ?` with lazy variants). Backtracking is step-capped,
   and there are no backreferences or capture groups yet.
 - File tree sidebar (`Ctrl+B`): directories expand with Enter/`j`/`k` or a
-  click, files open in a tab. Icons are font-safe one-letter markers by
-  default; `icons = unicode` in `[editor]` switches to emoji glyphs for
-  terminals whose font has them.
+  click, files open in a tab. Icons are Nerd Font glyphs: install a patched
+  font (for example [Maple Mono NF](https://github.com/subframe7536/maple-font))
+  and pick it in your terminal. `icons = ascii` in `[editor]` falls back to
+  letter markers.
 - Mouse: click text to place the cursor, click a tab to switch to it, click
   picker rows (click again to accept), click the status-bar hint for help;
   the wheel moves one line per notch. Quick-edit mode is turned off so the
@@ -189,11 +190,11 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu |  96,320 |
-| x86_64-linux-gnu  |  106,248 |
+| aarch64-linux-gnu |  98,688 |
+| x86_64-linux-gnu  |  108,456 |
 | x86_64-macos      |  116,220 |
-| aarch64-macos     | 144,856 |
-| x86_64-windows    | 163,840 |
+| aarch64-macos     | 145,320 |
+| x86_64-windows    | 167,424 |
 
 ## Not yet
 
