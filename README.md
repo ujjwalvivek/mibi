@@ -203,11 +203,11 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu |  104,768 |
-| x86_64-linux-gnu  |  114,456 |
+| aarch64-linux-gnu |  105,760 |
+| x86_64-linux-gnu  |  115,672 |
 | x86_64-macos      |  124,412 |
-| aarch64-macos     | 146,024 |
-| x86_64-windows    | 173,568 |
+| aarch64-macos     | 146,104 |
+| x86_64-windows    | 175,104 |
 
 ## Not yet
 

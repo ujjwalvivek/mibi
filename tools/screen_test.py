@@ -837,6 +837,24 @@ def session_restores_tabs_and_unsaved_edits(m, path):
 
 
 @check
+def dragging_a_tab_reorders_it(m, path):
+    """Press on a tab, drag to the other one, release: the tabs swap."""
+    m.send("\x14")  # second tab
+    m.wait_quiet()
+    before = m.screen_text().splitlines()[0]
+    assert "notes.txt" in before and "No Name" in before, f"unexpected tabs: {before!r}"
+    # Press on the first tab, drag right over the second, release.
+    m.send("\x1b[<0;3;1M")
+    m.send("\x1b[<32;20;1M")
+    m.send("\x1b[<0;20;1m")
+    m.wait_quiet()
+    after = m.screen_text().splitlines()[0]
+    assert "No Name" in after, f"tab did not move: {after!r}"
+    assert after.index("No Name") < after.index("notes.txt"), f"tabs not swapped: {after!r}"
+    m.shot("27-tab-drag")
+
+
+@check
 def unicode_and_wide_cells(m, path):
     """A CJK character takes two cells and does not break the layout."""
     m.send("\x1b[F")  # End of the current line

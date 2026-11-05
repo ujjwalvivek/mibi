@@ -87,6 +87,7 @@ const ENABLE_QUICK_EDIT_MODE: DWORD = 0x0040;
     const FROM_LEFT_2ND_BUTTON_PRESSED: DWORD = 0x0004;
     const RIGHTMOST_BUTTON_PRESSED: DWORD = 0x0002;
     const MOUSE_WHEELED: DWORD = 0x0004;
+const MOUSE_MOVED: DWORD = 0x0001;
 
     const KEY_EVENT: u16 = 0x0001;
     const WINDOW_BUFFER_SIZE_EVENT: u16 = 0x0004;
@@ -130,13 +131,18 @@ const ENABLE_QUICK_EDIT_MODE: DWORD = 0x0040;
             const delta: i16 = @bitCast(@as(u16, @truncate(m.dwButtonState >> 16)));
             button = if (delta > 0) 64 else 65;
         } else if (m.dwButtonState & win.FROM_LEFT_1ST_BUTTON_PRESSED != 0) {
-            button = 0;
+            // Dragging with the button held is reported as motion (bit 32).
+            button = if (m.dwEventFlags & win.MOUSE_MOVED != 0) 32 else 0;
         } else if (m.dwButtonState & win.FROM_LEFT_2ND_BUTTON_PRESSED != 0) {
             button = 1;
         } else if (m.dwButtonState & win.RIGHTMOST_BUTTON_PRESSED != 0) {
             button = 2;
+        } else if (m.dwEventFlags & win.MOUSE_MOVED != 0) {
+            button = 35; // motion with nothing held: ignore in the editor
         } else {
-            return 0; // release, or motion we do not use
+            // Release: reported so a drag can finish.
+            const written = std.fmt.bufPrint(out, "\x1b[<0;{d};{d}m", .{ x, y }) catch return 0;
+            return written.len;
         }
         const written = std.fmt.bufPrint(out, "\x1b[<{d};{d};{d}M", .{ button, x, y }) catch return 0;
         return written.len;

@@ -122,6 +122,9 @@ const Session = struct {
     tab_count: usize = 0,
     /// Syntax registry, so UI paths (the tree) can pick a language.
     registry: ?*syntax.Registry = null,
+    /// Tab being dragged and where it would land.
+    drag_tab: ?usize = null,
+    drag_to: usize = 0,
     /// File tree sidebar; null when closed.
     tree: ?tree_mod.Tree = null,
     tree_focus: bool = false,
@@ -156,6 +159,17 @@ const Session = struct {
         errdefer ed.deinit();
         try self.docs.append(self.allocator, ed);
         self.active = self.docs.items.len - 1;
+    }
+
+    /// Move the tab at `from` to `to`, keeping the same tab active.
+    fn moveTab(self: *Session, from: usize, to: usize) void {
+        const n = self.docs.items.len;
+        if (from >= n or to >= n or from == to) return;
+        const doc = self.docs.orderedRemove(from);
+        self.docs.insert(self.allocator, to, doc) catch {
+            self.docs.append(self.allocator, doc) catch return;
+        };
+        self.active = to;
     }
 
     /// Close the active tab; the caller quits when the last one goes.
@@ -616,7 +630,7 @@ fn processInput(
                 if (j >= buf.len) return i; // incomplete
                 if (buf[i + 2] == '<') {
                     // SGR mouse: ESC [ < button ; x ; y M
-                    handleMouse(session, buf[i + 2 .. j], help, msg_buf, msg);
+                    handleMouse(session, buf[i + 2 .. j], buf[j], help, msg_buf, msg);
                 } else {
                     applyCsi(session, buf[i + 2 .. j], buf[j], view_rows, running, prompt, msg_buf, msg, help, true) catch |e| setMsg(msg_buf, msg, @errorName(e));
                 }
@@ -659,12 +673,47 @@ fn parseMouse(params: []const u8) [3]u16 {
 /// Mouse in the editor: click the tab bar to switch tabs, click the status-bar
 /// hint to toggle help, click text to place the cursor. The wheel moves one
 /// line per notch.
-fn handleMouse(session: *Session, params: []const u8, help: *bool, msg_buf: []u8, msg: *[]const u8) void {
+fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, msg_buf: []u8, msg: *[]const u8) void {
     const nums = parseMouse(params);
     const button = nums[0];
     const x = nums[1];
     const y = nums[2];
     const ed = session.current();
+
+    // Dragging a tab: press on the tab bar picks it up, motion updates the
+    // drop position, release reorders the tabs.
+    if (button == 0 and final == 'M' and y == 1) {
+        var i: usize = 0;
+        while (i < session.tab_count) : (i += 1) {
+            const span = session.tab_spans[i];
+            if (x >= span[0] and x < span[1]) {
+                session.active = i; // a plain click switches
+                session.drag_tab = i;
+                session.drag_to = i;
+                return;
+            }
+        }
+    }
+    if (session.drag_tab) |from| {
+        if (button == 32) { // motion while held
+            var to = from;
+            var i: usize = 0;
+            while (i < session.tab_count) : (i += 1) {
+                const span = session.tab_spans[i];
+                if (x >= span[0] and x < span[1]) {
+                    to = i;
+                    break;
+                }
+            }
+            session.drag_to = to;
+            return;
+        }
+        if (final == 'm') { // release
+            session.moveTab(from, session.drag_to);
+            session.drag_tab = null;
+            return;
+        }
+    }
     const size = term.size();
     if (button == 64 or button == 65) { // wheel up / down
         ed.movePage(if (button == 64) -1 else 1, 1, false);
@@ -2566,15 +2615,15 @@ test "a mouse click places the cursor and the wheel moves one line" {
     var msg: []const u8 = "";
 
     // Screen row 3 is the second text line; column 4 is after the "1 " gutter.
-    handleMouse(&d.session, "<0;4;3", &help, &mb, &msg);
+    handleMouse(&d.session, "<0;4;3", 'M', &help, &mb, &msg);
     const rc = d.ed().rowCol();
     try std.testing.expectEqual(@as(usize, 1), rc.row);
     try std.testing.expectEqual(@as(usize, 1), rc.col);
 
     // One wheel notch is one line.
-    handleMouse(&d.session, "<65;1;1", &help, &mb, &msg);
+    handleMouse(&d.session, "<65;1;1", 'M', &help, &mb, &msg);
     try std.testing.expectEqual(@as(usize, 2), d.ed().rowCol().row);
-    handleMouse(&d.session, "<64;1;1", &help, &mb, &msg);
+    handleMouse(&d.session, "<64;1;1", 'M', &help, &mb, &msg);
     try std.testing.expectEqual(@as(usize, 1), d.ed().rowCol().row);
 }
 
@@ -2613,6 +2662,17 @@ test "the file picker opens into a new tab without discarding the current one" {
     try std.testing.expectEqual(@as(usize, 2), d.session.count());
     try std.testing.expectEqualStrings("picked\n", d.session.current().text());
     try std.testing.expectEqualStrings(path, d.session.current().path.?);
+}
+
+test "tabs can be reordered" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    try d.send("\x14"); // Ctrl+T: second tab
+    try std.testing.expectEqual(@as(usize, 2), d.session.count());
+    d.session.moveTab(0, 1);
+    try std.testing.expectEqual(@as(usize, 1), d.session.active);
+    try std.testing.expectEqualStrings("one", d.session.current().text());
+    try std.testing.expectEqualStrings("", d.session.docs.items[0].text());
 }
 
 test "ctrl+t adds a tab and ctrl+w closes it" {
