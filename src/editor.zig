@@ -7,10 +7,14 @@ const Allocator = std.mem.Allocator;
 const os = @import("os.zig");
 const buffer = @import("buffer.zig");
 const Buffer = buffer.Buffer;
+const utf8 = @import("text.zig");
+const width = @import("width.zig");
 
 const MAX_UNDO = 512;
+const TAB_STOP = 4;
 
 pub const Range = struct { start: usize, end: usize };
+pub const RowCol = struct { row: usize, col: usize };
 
 pub const Editor = struct {
     allocator: Allocator,
@@ -27,6 +31,7 @@ pub const Editor = struct {
     /// True while a run of plain typing is being grouped into one undo step.
     grouping: bool = false,
     register: std.ArrayList(u8),
+    search: ?[]u8 = null,
     undo_stack: std.ArrayList(buffer.Snapshot),
     redo_stack: std.ArrayList(buffer.Snapshot),
 
@@ -43,6 +48,7 @@ pub const Editor = struct {
 
     pub fn deinit(self: *Editor) void {
         if (self.path) |p| self.allocator.free(p);
+        if (self.search) |s| self.allocator.free(s);
         self.register.deinit(self.allocator);
         for (self.undo_stack.items) |s| self.buf.freeSnapshot(s);
         for (self.redo_stack.items) |s| self.buf.freeSnapshot(s);
@@ -60,52 +66,43 @@ pub const Editor = struct {
     }
 
     pub fn lineCount(self: *Editor) usize {
-        const f = self.buf.flat();
-        var n: usize = 1;
-        for (f) |c| {
-            if (c == '\n') n += 1;
-        }
-        return n;
+        // The buffer always has at least one line; guard the degenerate
+        // out-of-memory case where the index could not be built.
+        return @max(1, self.buf.lineStarts().len);
     }
 
     pub fn rowStart(self: *Editor, row: usize) usize {
-        const f = self.buf.flat();
-        var r: usize = 0;
-        var i: usize = 0;
-        while (r < row and i < f.len) : (i += 1) {
-            if (f[i] == '\n') r += 1;
-        }
-        return i;
+        const starts = self.buf.lineStarts();
+        if (starts.len == 0) return 0;
+        return starts[@min(row, starts.len - 1)];
     }
 
     pub fn line(self: *Editor, row: usize) []const u8 {
+        const starts = self.buf.lineStarts();
         const f = self.buf.flat();
-        const start = self.rowStart(row);
-        var end = start;
-        while (end < f.len and f[end] != '\n') end += 1;
-        return f[start..end];
+        if (starts.len == 0) return f;
+        const i = @min(row, starts.len - 1);
+        const start = starts[i];
+        const end = if (i + 1 < starts.len) starts[i + 1] - 1 else f.len;
+        return f[start..@min(end, f.len)];
     }
 
-    pub fn rowCol(self: *Editor) struct { row: usize, col: usize } {
-        const f = self.buf.flat();
-        var row: usize = 0;
-        var ls: usize = 0;
-        var i: usize = 0;
-        while (i < self.cursor) : (i += 1) {
-            if (f[i] == '\n') {
-                row += 1;
-                ls = i + 1;
-            }
+    pub fn rowCol(self: *Editor) RowCol {
+        const starts = self.buf.lineStarts();
+        if (starts.len == 0) return .{ .row = 0, .col = self.cursor };
+        // Largest row whose start is <= cursor (binary search; starts[0] == 0).
+        var lo: usize = 0;
+        var hi: usize = starts.len;
+        while (lo + 1 < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (starts[mid] <= self.cursor) lo = mid else hi = mid;
         }
-        return .{ .row = row, .col = self.cursor - ls };
+        return .{ .row = lo, .col = self.cursor - starts[lo] };
     }
 
     fn offsetOfRowCol(self: *Editor, row: usize, col: usize) usize {
-        const f = self.buf.flat();
         const start = self.rowStart(row);
-        var end = start;
-        while (end < f.len and f[end] != '\n') end += 1;
-        return start + @min(col, end - start);
+        return start + @min(col, self.line(row).len);
     }
 
     fn clampCursor(self: *Editor) void {
@@ -401,6 +398,87 @@ pub const Editor = struct {
         self.dirty = true;
     }
 
+    // --- search / replace / goto ----------------------------------------
+
+    pub fn setSearch(self: *Editor, needle: []const u8) !void {
+        if (self.search) |s| self.allocator.free(s);
+        self.search = if (needle.len == 0) null else try self.allocator.dupe(u8, needle);
+    }
+
+    pub fn findFrom(self: *Editor, from: usize) ?usize {
+        const needle = self.search orelse return null;
+        if (needle.len == 0) return null;
+        const f = self.buf.flat();
+        if (from > f.len) return null;
+        return std.mem.indexOfPos(u8, f, from, needle);
+    }
+
+    /// Move to the next match (wrapping). No-op without a search term.
+    pub fn findNext(self: *Editor) void {
+        const needle = self.search orelse return;
+        if (needle.len == 0) return;
+        const f = self.buf.flat();
+        const start = @min(self.cursor + 1, f.len);
+        if (std.mem.indexOfPos(u8, f, start, needle)) |p| {
+            self.cursor = p;
+        } else if (std.mem.indexOfPos(u8, f, 0, needle)) |p| {
+            self.cursor = p;
+        }
+        self.sel_anchor = null;
+        self.pref_col = null;
+    }
+
+    /// Move to the previous match (wrapping). No-op without a search term.
+    pub fn findPrev(self: *Editor) void {
+        const needle = self.search orelse return;
+        if (needle.len == 0) return;
+        const f = self.buf.flat();
+        // A match must end at or before the cursor; when there is none, wrap to
+        // the last match in the document (the old scan stopped at the first
+        // match and so never wrapped).
+        const p = std.mem.lastIndexOf(u8, f[0..self.cursor], needle) orelse
+            std.mem.lastIndexOf(u8, f, needle) orelse return;
+        self.cursor = p;
+        self.sel_anchor = null;
+        self.pref_col = null;
+    }
+
+    pub fn gotoLineCol(self: *Editor, row: usize, col: usize) void {
+        const total = self.lineCount();
+        const r = if (row >= total) total - 1 else row;
+        self.cursor = self.offsetOfRowCol(r, col);
+        self.sel_anchor = null;
+        self.pref_col = null;
+        self.grouping = false;
+    }
+
+    /// Replace every occurrence of `needle` with `repl`; returns the count.
+    pub fn replaceAll(self: *Editor, needle: []const u8, repl: []const u8) !usize {
+        if (needle.len == 0) return 0;
+        var positions = std.ArrayList(usize).empty;
+        defer positions.deinit(self.allocator);
+        const f = self.buf.flat();
+        var i: usize = 0;
+        while (std.mem.indexOfPos(u8, f, i, needle)) |p| {
+            try positions.append(self.allocator, p);
+            i = p + needle.len;
+        }
+        if (positions.items.len == 0) return 0;
+        try self.beginEdit(false);
+        // Replace from the end so earlier offsets stay valid.
+        var k = positions.items.len;
+        while (k > 0) {
+            k -= 1;
+            const p = positions.items[k];
+            try self.buf.delete(p, needle.len);
+            try self.buf.insert(p, repl);
+        }
+        self.dirty = true;
+        self.cursor = positions.items[0];
+        self.sel_anchor = null;
+        return positions.items.len;
+    }
+
     // --- files -----------------------------------------------------------
 
     pub fn setPath(self: *Editor, path: []const u8) !void {
@@ -411,6 +489,15 @@ pub const Editor = struct {
     pub fn save(self: *Editor) !void {
         const p = self.path orelse return error.NoFileName;
         try os.writeFile(p, self.buf.flat());
+        self.dirty = false;
+    }
+
+    /// Write to `path` and adopt it as the buffer's name. The path is only
+    /// changed once the write has succeeded, so a failed Save-As leaves the
+    /// buffer pointing at its old (valid) file.
+    pub fn saveAs(self: *Editor, path: []const u8) !void {
+        try os.writeFile(path, self.buf.flat());
+        try self.setPath(path);
         self.dirty = false;
     }
 
@@ -433,10 +520,32 @@ pub const Editor = struct {
 
     pub fn scrollToCursor(self: *Editor, rows: usize, cols: usize) void {
         const rc = self.rowCol();
+        const dcol = self.cursorDisplayCol();
         if (rc.row < self.scroll_row) self.scroll_row = rc.row;
         if (rc.row >= self.scroll_row + rows) self.scroll_row = rc.row - rows + 1;
-        if (rc.col < self.scroll_col) self.scroll_col = rc.col;
-        if (rc.col >= self.scroll_col + cols) self.scroll_col = rc.col - cols + 1;
+        if (dcol < self.scroll_col) self.scroll_col = dcol;
+        if (dcol >= self.scroll_col + cols) self.scroll_col = dcol - cols + 1;
+    }
+
+    /// Display column of the cursor, accounting for tabs, wide (2-cell) and
+    /// zero-width codepoints.
+    pub fn cursorDisplayCol(self: *Editor) usize {
+        const rc = self.rowCol();
+        const ln = self.line(rc.row);
+        var dcol: usize = 0;
+        var i: usize = 0;
+        while (i < rc.col and i < ln.len) {
+            const cp = utf8.nextCp(ln, &i);
+            if (cp == '\t') {
+                dcol = (dcol / TAB_STOP + 1) * TAB_STOP;
+            } else if (cp == '\r') {
+                // A CR is never drawn (CRLF files), so it occupies no cell;
+                // counting it would put the cursor one column past the text.
+            } else {
+                dcol += width.cellWidth(cp);
+            }
+        }
+        return dcol;
     }
 };
 
@@ -525,4 +634,127 @@ test "cut and delete selection" {
     try e.cut();
     try std.testing.expectEqualStrings("aef", e.text());
     try std.testing.expectEqualStrings("bcd", e.registerText());
+}
+
+/// Every row must match a naive split of the text, and the offsets must line
+/// up with the cached line index.
+fn expectLinesMatch(e: *Editor) !void {
+    const f = e.text();
+    var it = std.mem.splitScalar(u8, f, '\n');
+    var row: usize = 0;
+    var offset: usize = 0;
+    while (it.next()) |expected| : (row += 1) {
+        try std.testing.expect(row < e.lineCount());
+        try std.testing.expectEqualStrings(expected, e.line(row));
+        try std.testing.expectEqual(offset, e.rowStart(row));
+        offset += expected.len + 1;
+    }
+    try std.testing.expectEqual(row, e.lineCount());
+}
+
+test "line access agrees with a naive scan after edits" {
+    var e = try Editor.init(std.testing.allocator, null, "alpha\nbeta\ngamma\ndelta");
+    defer e.deinit();
+    try expectLinesMatch(&e);
+
+    e.cursor = 2;
+    try e.insertText("\nnew"); // split a line
+    try expectLinesMatch(&e);
+    try e.insertText("\n\n\n"); // blank lines
+    try expectLinesMatch(&e);
+
+    e.cursor = 0;
+    try e.backspace(); // no-op at the start
+    try expectLinesMatch(&e);
+    e.cursor = e.buf.len();
+    try e.backspace();
+    try expectLinesMatch(&e);
+
+    try e.duplicateLine();
+    try expectLinesMatch(&e);
+
+    e.cursor = 0;
+    e.moveDown(false);
+    try e.cut(); // cut a whole line
+    try expectLinesMatch(&e);
+    try e.paste();
+    try expectLinesMatch(&e);
+
+    _ = try e.replaceAll("a", "AAA");
+    try expectLinesMatch(&e);
+    try e.undo();
+    try expectLinesMatch(&e);
+    try e.redo();
+    try expectLinesMatch(&e);
+
+    try e.insertText("\n"); // trailing newline: one more empty row
+    try expectLinesMatch(&e);
+}
+
+test "findPrev wraps to the last match" {
+    var e = try Editor.init(std.testing.allocator, null, "one two one two one");
+    defer e.deinit();
+    try e.setSearch("two");
+
+    e.cursor = 4; // first match: nothing before it, so wrap to the last one
+    e.findPrev();
+    try std.testing.expectEqual(@as(usize, 12), e.cursor);
+
+    e.findPrev();
+    try std.testing.expectEqual(@as(usize, 4), e.cursor);
+
+    e.cursor = 0;
+    e.findPrev(); // at the very start, wraps to the end
+    try std.testing.expectEqual(@as(usize, 12), e.cursor);
+}
+
+test "crlf does not offset the cursor" {
+    var e = try Editor.init(std.testing.allocator, null, "ab\r\ncd");
+    defer e.deinit();
+
+    e.cursor = 2; // after "ab", before the CR
+    try std.testing.expectEqual(@as(usize, 2), e.cursorDisplayCol());
+    e.cursor = 3; // after the CR, still end of the visible line
+    try std.testing.expectEqual(@as(usize, 2), e.cursorDisplayCol());
+    e.cursor = 4; // start of the next line
+    try std.testing.expectEqual(@as(usize, 0), e.cursorDisplayCol());
+}
+
+test "undo everything then redo everything restores both states" {
+    var e = try Editor.init(std.testing.allocator, null, "start\nhere");
+    defer e.deinit();
+    var prng = std.Random.DefaultPrng.init(0x5EED);
+    const rand = prng.random();
+
+    var step: usize = 0;
+    while (step < 60) : (step += 1) {
+        switch (rand.uintLessThan(u8, 8)) {
+            0 => try e.insertText("x"),
+            1 => try e.insertText("\n"),
+            2 => try e.backspace(),
+            3 => try e.deleteForward(),
+            4 => e.moveRight(false),
+            5 => e.moveDown(false),
+            6 => try e.duplicateLine(),
+            7 => try e.paste(),
+            else => unreachable,
+        }
+    }
+    try expectLinesMatch(&e);
+    const before = try std.testing.allocator.dupe(u8, e.text());
+    defer std.testing.allocator.free(before);
+
+    var n: usize = 0;
+    while (e.undo_stack.items.len > 0 and n < 1000) : (n += 1) {
+        try e.undo();
+        try expectLinesMatch(&e);
+    }
+    try std.testing.expectEqualStrings("start\nhere", e.text());
+
+    n = 0;
+    while (e.redo_stack.items.len > 0 and n < 1000) : (n += 1) {
+        try e.redo();
+        try expectLinesMatch(&e);
+    }
+    try std.testing.expectEqualStrings(before, e.text());
 }
