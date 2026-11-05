@@ -16,6 +16,7 @@ passed.
 import os
 import subprocess
 import sys
+import shutil
 import tempfile
 import threading
 import time
@@ -787,6 +788,43 @@ def regex_search_finds_patterns(m, path):
         proc.shot("25-regex")
     finally:
         proc.close()
+
+
+@check
+def session_restores_tabs_and_unsaved_edits(m, path):
+    """Quitting and restarting brings back the tabs, the unsaved text and the tree."""
+    work = os.path.join(SHOT_DIR, "work-session")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(os.path.join(work, "sub"))
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello\nworld")
+    with open(os.path.join(work, "sub", "inner.txt"), "w", encoding="utf-8") as f:
+        f.write("inner")
+
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        proc.send("\x02")  # open the tree
+        proc.wait_quiet()
+        proc.send("X")  # unsaved edit
+        proc.wait_quiet()
+        proc.send("\x11")  # quit
+        proc.wait_quiet()
+        proc.send("y")
+        proc.wait_quiet()
+    finally:
+        proc.close()
+
+    again = Mibi([], cwd=work)
+    try:
+        assert again.wait_for("Xhello", timeout=5), "unsaved edit was not restored"
+        again.wait_quiet()
+        text = again.screen_text()
+        assert "sub" in text, "file tree was not reopened"
+        again.shot("26-session")
+    finally:
+        again.close()
 
 
 @check

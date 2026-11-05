@@ -460,8 +460,16 @@ fn saveSession(session: *Session, exe_dir: ?[]const u8) void {
     var path_buf: [1024]u8 = undefined;
     var line_buf: [1024]u8 = undefined;
 
-    const header = std.fmt.bufPrint(&line_buf, "v1\nactive {d}\ncount {d}\n", .{ session.active, session.count() }) catch return;
+    const header = std.fmt.bufPrint(&line_buf, "v1\nactive {d}\ncount {d}\ntree {d}\n", .{
+        session.active,
+        session.count(),
+        @intFromBool(session.tree != null),
+    }) catch return;
     out.appendSlice(allocator, header) catch return;
+    if (session.tree) |*t| {
+        const root_line = std.fmt.bufPrint(&line_buf, "tree_root {s}\n", .{t.rootPath()}) catch "";
+        out.appendSlice(allocator, root_line) catch {};
+    }
     for (session.docs.items, 0..) |ed, i| {
         var buf_path: [1024]u8 = undefined;
         const bp = bufferPath(exe_dir, i, &buf_path);
@@ -492,12 +500,22 @@ fn loadSession(allocator: std.mem.Allocator, exe_dir: ?[]const u8, registry: *sy
     if (!std.mem.eql(u8, std.mem.trim(u8, magic, " \r"), "v1")) return false;
     var active: usize = 0;
     var loaded: usize = 0;
+    var tree_open = false;
+    var tree_root: [1024]u8 = undefined;
+    var tree_root_len: usize = 0;
     while (lines.next()) |raw| {
         const line = std.mem.trimEnd(u8, raw, " \r");
         if (std.mem.startsWith(u8, line, "active ")) {
             active = std.fmt.parseInt(usize, line["active ".len..], 10) catch 0;
         } else if (std.mem.startsWith(u8, line, "count ")) {
             // informational only
+        } else if (std.mem.startsWith(u8, line, "tree ")) {
+            tree_open = std.mem.eql(u8, line["tree ".len..], "1");
+        } else if (std.mem.startsWith(u8, line, "tree_root ")) {
+            const root = line["tree_root ".len..];
+            const n = @min(root.len, tree_root.len);
+            @memcpy(tree_root[0..n], root[0..n]);
+            tree_root_len = n;
         } else if (std.mem.startsWith(u8, line, "tab ")) {
             var fields = std.mem.splitScalar(u8, line["tab ".len..], '\t');
             const tab_path = fields.next() orelse continue;
@@ -536,6 +554,11 @@ fn loadSession(allocator: std.mem.Allocator, exe_dir: ?[]const u8, registry: *sy
     }
     if (loaded == 0) return false;
     session.active = @min(active, session.count() - 1);
+    if (tree_open) {
+        const root = if (tree_root_len > 0) tree_root[0..tree_root_len] else ".";
+        session.tree = tree_mod.Tree.init(allocator, root) catch null;
+        session.tree_focus = false;
+    }
     return true;
 }
 
