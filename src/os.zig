@@ -356,12 +356,12 @@ pub fn getEnvAlloc(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
 }
 
 /// A cheap "did this file change" stamp: modification time mixed with size.
-/// Zero when the file cannot be examined. Windows only for now (the idle
-/// refresh is a no-op elsewhere).
+/// Zero when the file cannot be examined, which callers treat as "unknown".
 pub fn fileStamp(path: []const u8) u64 {
-    // Windows only for now: std has no portable stat here yet, and the idle
-    // refresh simply does nothing when the stamp is unknown.
-    if (!is_windows) return 0;
+    return if (is_windows) fileStampWindows(path) else fileStampUnix(path);
+}
+
+fn fileStampWindows(path: []const u8) u64 {
     const wpath = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path) catch return 0;
     defer std.heap.page_allocator.free(wpath);
     var data: win.WIN32_FIND_DATAW = undefined;
@@ -371,6 +371,36 @@ pub fn fileStamp(path: []const u8) u64 {
     const written: u64 = (@as(u64, data.ftLastWriteTime.dwHighDateTime) << 32) | data.ftLastWriteTime.dwLowDateTime;
     const size: u64 = (@as(u64, data.nFileSizeHigh) << 32) | data.nFileSizeLow;
     return (written *% 31) ^ size;
+}
+
+/// The Unix half. Linux asks the kernel through `statx`, which needs no libc
+/// and no `struct stat` layout of its own; the BSDs (macOS included) go through
+/// libc's `fstatat`, whose `Stat` std already lays out correctly.
+fn fileStampUnix(path: []const u8) u64 {
+    const z = std.heap.page_allocator.dupeZ(u8, path) catch return 0;
+    defer std.heap.page_allocator.free(z);
+    // AT_FDCWD is -100 on Linux and on macOS, so one constant covers both.
+    const at_fdcwd: i32 = -100;
+    if (builtin.os.tag == .linux) {
+        var st: std.os.linux.Statx = std.mem.zeroes(std.os.linux.Statx);
+        const mask: std.os.linux.STATX = .{ .MTIME = true, .SIZE = true };
+        const rc: isize = @bitCast(std.os.linux.statx(at_fdcwd, z.ptr, 0, mask, &st));
+        if (rc < 0) return 0;
+        if (!st.mask.MTIME or !st.mask.SIZE) return 0;
+        const sec: u64 = @bitCast(st.mtime.sec);
+        const nsec: u64 = st.mtime.nsec;
+        return (sec *% 1_000_000_000 +% nsec) ^ st.size;
+    }
+    if (builtin.os.tag == .macos) {
+        var st: std.c.Stat = std.mem.zeroes(std.c.Stat);
+        if (std.c.fstatat(at_fdcwd, z.ptr, &st, 0) != 0) return 0;
+        const mt = st.mtime();
+        const sec: u64 = @bitCast(@as(i64, @intCast(mt.sec)));
+        const nsec: u64 = @intCast(@max(mt.nsec, 0));
+        const size: u64 = @bitCast(@as(i64, @intCast(st.size)));
+        return (sec *% 1_000_000_000 +% nsec) ^ size;
+    }
+    return 0;
 }
 
 /// Result of running a command: its exit status, and whether it had to be
@@ -806,4 +836,20 @@ fn listDirWindows(allocator: std.mem.Allocator, path: []const u8, out: *std.Arra
         }
         if (win.FindNextFileW(h, &fd) == 0) break;
     }
+}
+
+test "file stamp notices a rewrite and holds still otherwise" {
+    const allocator = std.testing.allocator;
+    const tmp = getEnvAlloc(allocator, if (is_windows) "TEMP" else "TMPDIR") catch return;
+    defer allocator.free(tmp);
+    const path = try std.fmt.allocPrint(allocator, "{s}/mibi-stamp-test.txt", .{tmp});
+    defer allocator.free(path);
+    try writeFile(path, "one");
+    const first = fileStamp(path);
+    try std.testing.expect(first != 0);
+    try std.testing.expectEqual(first, fileStamp(path));
+    try writeFile(path, "one, and two");
+    const second = fileStamp(path);
+    try std.testing.expect(second != 0);
+    try std.testing.expect(first != second);
 }

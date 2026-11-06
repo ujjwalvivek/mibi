@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+**Hot reload**
+
+- An idle tick every half second re-lists the file tree and re-stamps every
+  open file, so changes made by another tool appear on their own. Measured on
+  Windows with the editor's window in the background: a new tree entry and a
+  rewritten buffer both showed up within one tick, with no keystrokes.
+- Reloads are announced in the status bar (`reloaded notes.txt from disk`), so
+  a change that landed while the window was in the background is visible the
+  moment you look at it. A buffer with unsaved edits is never overwritten.
+- The editor writes nothing to the terminal while it is idle, and repaints
+  every cell (not a per-row diff) when it gains focus or picks up a background
+  change, so a terminal that deferred painting is corrected at once.
+- File stamps now work on every platform: `statx` on Linux, `fstatat` on
+  macOS (previously Windows only, so open files never reloaded elsewhere).
+
+**Formatting**
+
+- `F4` runs the per-language formatter configured in `[format]`
+  (`format_on_save` is opt-in). There is no built-in re-indent: a missing
+  command is reported in the status bar instead of guessing.
+
 ## v0.0.2
 
 Phase 4 of the plan: the editor now behaves like a real one, not a demo.

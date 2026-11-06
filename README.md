@@ -159,6 +159,15 @@ packaging.
   [assets/fonts/README.md](assets/fonts/README.md) for installing Maple Mono NF
   and `tools/install-font.ps1`; `icons = ascii` in `[editor]` falls back to
   letter markers.
+- Hot reload: a half-second idle tick re-lists the tree and re-stamps every
+  open file, so a file created or rewritten by another tool shows up without
+  touching the keyboard. A reload is announced in the status bar
+  (`reloaded notes.txt from disk`) and never overwrites a buffer with unsaved
+  edits. Nothing is written to the terminal while the editor is idle, and a
+  window that regains focus repaints every cell, so a terminal that held
+  painting back while it was in the background catches up at once. The file
+  stamp is `FindFirstFileW` on Windows and `statx` (Linux) / `fstatat`
+  (macOS) elsewhere.
 - Mouse: click text to place the cursor, click a tab to switch to it, click
   picker rows (click again to accept), click the status-bar hint for help;
   the wheel moves one line per notch. Over the tab bar the wheel scrolls the
@@ -229,11 +238,11 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu | 125,624 |
-| x86_64-linux-gnu  | 137,248 |
-| x86_64-macos      | 145,214 |
-| aarch64-macos     | 181,560 |
-| x86_64-windows    | 196,608 |
+| aarch64-linux-gnu | 142,728 |
+| x86_64-linux-gnu  | 156,288 |
+| x86_64-macos      | 166,138 |
+| aarch64-macos     | 200,616 |
+| x86_64-windows    | 214,016 |
 
 ## Changelog
 

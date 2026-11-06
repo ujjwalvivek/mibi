@@ -671,6 +671,15 @@ fn run(init: std.process.Init.Minimal) !void {
 
         const n = try term.readInput(&input);
         if (n == 0) {
+            // Focus changes are not input, but a terminal that was in the
+            // background may have painted nothing at all, so the picture it
+            // shows is stale. Repaint every cell instead of a per-row diff.
+            if (term.takeFocusChange()) {
+                zero_reads = 0;
+                dirtyAll(&screen);
+                needs_redraw = true;
+                continue;
+            }
             // A console resize wakes the read with no bytes: repaint at the new
             // size instead of counting it as end-of-input.
             if (term.takeResize()) {
@@ -681,7 +690,10 @@ fn run(init: std.process.Init.Minimal) !void {
             // again. This is what makes the tree and open files keep up.
             if (term.takeIdle()) {
                 zero_reads = 0;
-                if (refreshFromDisk(&session)) needs_redraw = true;
+                if (refreshFromDisk(&session, &msg_buf, &msg)) {
+                    dirtyAll(&screen);
+                    needs_redraw = true;
+                }
                 continue;
             }
             zero_reads += 1;
@@ -1321,11 +1333,28 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
 
 /// Housekeeping on an idle tick: the file tree follows the disk, and clean
 /// buffers reload when their file changes underneath us.
-fn refreshFromDisk(session: *Session) bool {
+/// Mark every cell as needing a repaint, so the next frame paints all of it.
+/// The sentinel is a cell no real frame produces (reverse + bold + underline on
+/// a NUL), so it never compares equal to what `draw` puts in the back buffer.
+fn dirtyAll(s: *render.Screen) void {
+    @memset(s.front, render.Cell{ .ch = 0, .attr = .{ .bold = true, .underline = true, .reverse = true } });
+}
+
+fn refreshFromDisk(session: *Session, msg_buf: []u8, msg: *[]const u8) bool {
     var changed = false;
-    if (session.tree) |*t| changed = t.refreshIfChanged();
+    if (session.tree) |*t| {
+        if (t.refreshIfChanged()) changed = true;
+    }
     for (session.docs.items) |ed| {
-        if (ed.reloadIfChanged()) changed = true;
+        if (ed.reloadIfChanged()) {
+            changed = true;
+            // Say so in the status line: a reload that happened while the
+            // window was in the background is then visible the moment the
+            // user looks back at it.
+            var line: [96]u8 = undefined;
+            const text = std.fmt.bufPrint(&line, "reloaded {s} from disk", .{baseName(ed.path orelse "")}) catch "reloaded from disk";
+            setMsg(msg_buf, msg, text);
+        }
     }
     return changed;
 }

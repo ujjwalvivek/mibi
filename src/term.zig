@@ -57,6 +57,7 @@ const win = if (is_windows) struct {
         Event: extern union {
             KeyEvent: KEY_EVENT_RECORD,
             MouseEvent: MOUSE_EVENT_RECORD,
+            FocusEvent: extern struct { bSetFocus: i32 },
         },
     };
 
@@ -96,7 +97,11 @@ const ENABLE_QUICK_EDIT_MODE: DWORD = 0x0040;
 const MOUSE_MOVED: DWORD = 0x0001;
 
     const KEY_EVENT: u16 = 0x0001;
+    const FOCUS_EVENT: u16 = 0x0010;
     const WINDOW_BUFFER_SIZE_EVENT: u16 = 0x0004;
+
+    /// Last focus state reported by the console: 1 focused, 0 not, -1 unknown.
+    var focus_state: i8 = -1;
     const RIGHT_ALT_PRESSED: u32 = 0x0001;
     const LEFT_ALT_PRESSED: u32 = 0x0002;
     const RIGHT_CTRL_PRESSED: u32 = 0x0004;
@@ -246,6 +251,16 @@ const MOUSE_MOVED: DWORD = 0x0001;
             }
             // A resize is not input, but it must wake the run loop so the
             // screen is repainted at the new size without waiting for a key.
+            if (rec.EventType == FOCUS_EVENT) {
+                const now_focused = rec.Event.FocusEvent.bSetFocus != 0;
+                const want: i8 = if (now_focused) 1 else 0;
+                if (want != focus_state) {
+                    focus_state = want;
+                    focus_changed = true;
+                }
+                if (n > 0) break;
+                return 0;
+            }
             if (rec.EventType == WINDOW_BUFFER_SIZE_EVENT) {
                 resized = true;
                 if (n > 0) break;
@@ -271,6 +286,22 @@ pub fn takeResize() bool {
     const r = resized;
     resized = false;
     return r;
+}
+
+/// Set when the console gained or lost focus (Windows only).
+var focus_changed = false;
+
+/// Last focus state: 1 focused, 0 not, -1 not reported yet (Windows only).
+pub fn focusState() i8 {
+    if (!is_windows) return -1;
+    return win.focus_state;
+}
+
+/// True once after the console gained or lost focus.
+pub fn takeFocusChange() bool {
+    const f = focus_changed;
+    focus_changed = false;
+    return f;
 }
 
 /// True when stdin and stdout are both an interactive terminal.

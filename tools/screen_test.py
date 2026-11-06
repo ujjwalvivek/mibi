@@ -1140,6 +1140,33 @@ def the_tree_follows_the_disk(m, path):
 
 
 @check
+def open_file_follows_the_disk(m, path):
+    """A file rewritten on disk while the editor sits idle is reloaded."""
+    work = os.path.join(SHOT_DIR, "work-hot-file")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    target = os.path.join(work, "live.txt")
+    with open(target, "w", encoding="utf-8") as f:
+        f.write("first version\n")
+    proc = Mibi(["live.txt"], cwd=work)
+    try:
+        assert proc.wait_for("first version"), "editor did not start"
+        proc.wait_quiet()
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("second version\n")
+        # No keystrokes: the idle tick has to notice by itself.
+        deadline = time.time() + 5
+        while time.time() < deadline and "second version" not in proc.screen_text():
+            time.sleep(0.1)
+        screen = proc.screen_text()
+        assert "second version" in screen, f"the buffer did not reload from disk:\n{screen}"
+        assert "reloaded live.txt" in screen, f"no reload notice in the status line:\n{screen}"
+        proc.shot("39-hot-file")
+    finally:
+        proc.close()
+
+
+@check
 def formatting_without_a_tool_reports_it(m, path):
     """F4 with no formatter configured says so instead of doing nothing."""
     m.send("\x1bOS")  # F4 (SS3 form)
