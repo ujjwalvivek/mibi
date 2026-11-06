@@ -70,6 +70,10 @@ const win = if (is_windows) struct {
     extern "kernel32" fn GetConsoleScreenBufferInfo(h: HANDLE, info: *CONSOLE_SCREEN_BUFFER_INFO) callconv(.winapi) BOOL;
     extern "kernel32" fn ReadConsoleInputW(h: HANDLE, buf: *INPUT_RECORD, len: DWORD, read: *DWORD) callconv(.winapi) BOOL;
     extern "kernel32" fn GetNumberOfConsoleInputEvents(h: HANDLE, n: *DWORD) callconv(.winapi) BOOL;
+    extern "kernel32" fn SetConsoleCtrlHandler(
+        handler: ?*const fn (u32) callconv(.winapi) BOOL,
+        add: BOOL,
+    ) callconv(.winapi) BOOL;
 
     const STD_INPUT_HANDLE: DWORD = @bitCast(@as(i32, -10));
     const STD_OUTPUT_HANDLE: DWORD = @bitCast(@as(i32, -11));
@@ -365,6 +369,25 @@ pub fn size() Size {
             .rows = @max(ws.row, 1),
         };
     }
+}
+
+var close_handler: ?*const fn () void = null;
+
+fn ctrlHandlerRoutine(event: u32) callconv(.winapi) i32 {
+    // 2 = CTRL_CLOSE_EVENT (the window's X), 5 = logoff, 6 = shutdown. The
+    // process is terminated without running its defers, so this is the only
+    // chance to save.
+    if (event == 2 or event == 5 or event == 6) {
+        if (close_handler) |h| h();
+    }
+    return 0;
+}
+
+/// Save state when the console window is closed from its X button.
+pub fn installCloseHandler(handler: *const fn () void) void {
+    if (!is_windows) return;
+    close_handler = handler;
+    _ = win.SetConsoleCtrlHandler(ctrlHandlerRoutine, 1);
 }
 
 /// Blocking read of one input chunk as ANSI bytes. Returns bytes read.

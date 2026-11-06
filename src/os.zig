@@ -59,6 +59,7 @@ const win = struct {
     extern "kernel32" fn GetFileAttributesW(lpFileName: [*:0]const u16) callconv(.winapi) DWORD;
     extern "kernel32" fn GetConsoleProcessList(lProcessList: [*]DWORD, dwProcessCount: DWORD) callconv(.winapi) DWORD;
     extern "kernel32" fn GetConsoleWindow() callconv(.winapi) ?*anyopaque;
+    extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
     extern "user32" fn MessageBoxW(hWnd: ?*anyopaque, lpText: [*:0]const u16, lpCaption: [*:0]const u16, uType: c_uint) callconv(.winapi) c_int;
     extern "user32" fn ShowWindow(hWnd: ?*anyopaque, nCmdShow: c_int) callconv(.winapi) c_int;
 
@@ -112,6 +113,15 @@ const win = struct {
 };
 
 /// Write all of `bytes` to `fd`. Returns the number of bytes written.
+/// Monotonic milliseconds (since boot on Windows, since an arbitrary point on
+/// Unix). Used for the autosave timer; `std.time` has no clock in Zig 0.16.
+pub fn ticksMs() u64 {
+    if (is_windows) return win.GetTickCount64();
+    var ts: std.posix.timespec = undefined;
+    if (std.posix.system.clock_gettime(std.posix.CLOCK.MONOTONIC, &ts) != 0) return 0;
+    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
+}
+
 pub fn write(fd: u32, bytes: []const u8) !usize {
     if (is_windows) {
         var n: u32 = 0;

@@ -153,7 +153,8 @@ packaging.
   expand `$0`..`$9` from the captured groups. Backtracking is step-capped and
   there are no backreferences yet.
 - File tree sidebar (`Ctrl+B`): directories expand with Enter/`j`/`k` or a
-  click, files open in a tab. Icons are Nerd Font glyphs: see
+  click, files open in a tab. The open folders and the selected entry are
+  restored with the session, so it comes back where you left it. Icons are Nerd Font glyphs: see
   [assets/fonts/README.md](assets/fonts/README.md) for installing Maple Mono NF
   and `tools/install-font.ps1`; `icons = ascii` in `[editor]` falls back to
   letter markers.
@@ -177,10 +178,12 @@ packaging.
   a `│`/`─` rule between panes, the rule glowing next to the focused
   pane. Each pane edits its own document with its own cursor, selection and
   scroll; `F6` cycles the focus and clicking inside a pane focuses it and puts
-  the cursor there. `Shift+F5` closes a pane and leaves its file open as a
-  tab, so a split can be undone without closing anything. Dragging a tab onto
-  a pane's left/right third (or top/bottom half) splits that pane with the tab,
-  with a box drawn where it would land. Closing a tab closes its pane, and the
+  the cursor there. `Shift+F5` / `Shift+F7` closes a pane and leaves its file
+  open as a tab, so a split can be undone without closing anything. Dragging a
+  tab onto a pane's left/right third (or top/bottom half) splits that pane with
+  the tab, and the target half is tinted while you drag. Splitting shows another
+  open file when there is one (an unused empty scratch tab is reused, so
+  `[No Name]` tabs do not pile up). Closing a tab closes its pane, and the
   layout is saved in the session file.
 - Multiple documents as tabs: file names only in the tab bar, a `+` button
   pinned to the right edge and a per-tab `x` to close (with a cell of padding

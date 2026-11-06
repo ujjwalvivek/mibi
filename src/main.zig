@@ -105,6 +105,15 @@ const Prompt = struct {
 /// allocated so the list can grow without invalidating live pointers.
 const UiRequest = enum { open_picker, theme_picker, command_palette };
 
+/// The live session, so the console close handler (which runs on its own
+/// thread) can save it when the window is closed with the X button.
+var g_session: ?*Session = null;
+var g_exe_dir: ?[]const u8 = null;
+
+fn saveSessionOnClose() void {
+    if (g_session) |s| saveSession(s, g_exe_dir);
+}
+
 const MAX_TABS = 32;
 
 /// Cells the pointer must travel over a tab before a click turns into a drag.
@@ -262,8 +271,19 @@ const Session = struct {
         self.syncActive();
     }
 
+    /// An open, empty, unsaved buffer that no pane is showing: splitting can
+    /// reuse it instead of piling up `[No Name]` tabs.
+    fn findScratch(self: *Session) ?usize {
+        for (self.docs.items, 0..) |ed, i| {
+            if (ed.path == null and !ed.dirty and ed.text().len == 0 and
+                self.panes.paneWithDoc(ed.id) == null) return i;
+        }
+        return null;
+    }
+
     /// Split the focused pane. The new pane shows the next tab that no other
-    /// pane is showing, or a fresh scratch buffer when there is nothing else.
+    /// pane is showing, reusing an empty scratch tab, and only adds a new
+    /// buffer when there is nothing at all left to show.
     fn splitFocused(self: *Session, dir: panes_mod.Dir) !void {
         if (self.docs.items.len > 1) {
             var k: usize = 1;
@@ -276,7 +296,11 @@ const Session = struct {
                 }
             }
         }
-        // Nothing else to show: the new pane starts on an empty buffer.
+        if (self.findScratch()) |i| {
+            if (!self.panes.split(dir, self.docs.items[i].id)) return;
+            self.active = i;
+            return;
+        }
         if (!self.panes.split(dir, 0)) return;
         try self.add(null, "", null); // add() points the focused pane at it
     }
@@ -359,7 +383,11 @@ const Session = struct {
                 const dir: panes_mod.Dir = if (zone.side == .left or zone.side == .right) .columns else .rows;
                 const first = zone.side == .left or zone.side == .top;
                 self.panes.focus = node;
-                self.add(null, "", null) catch return; // the scratch takes this pane
+                if (self.findScratch()) |i| {
+                    self.panes.setFocusedDoc(self.docs.items[i].id);
+                } else {
+                    self.add(null, "", null) catch return; // the scratch takes this pane
+                }
                 if (!self.panes.splitAt(node, dir, doc, first)) return;
                 self.active = tab;
                 return;
@@ -425,7 +453,7 @@ const Session = struct {
     fn findByPath(self: *Session, path: []const u8) ?usize {
         for (self.docs.items, 0..) |ed, i| {
             if (ed.path) |p| {
-                if (std.mem.eql(u8, p, path)) return i;
+                if (pathsEqual(p, path)) return i;
             }
         }
         return null;
@@ -517,7 +545,7 @@ fn run(init: std.process.Init.Minimal) !void {
         var already = false;
         for (session.docs.items, 0..) |doc, i| {
             if (doc.path) |doc_path| {
-                if (std.mem.eql(u8, doc_path, p)) {
+                if (pathsEqual(doc_path, p)) {
                     session.focusDoc(i);
                     already = true;
                     break;
@@ -544,6 +572,13 @@ fn run(init: std.process.Init.Minimal) !void {
     @memset(screen.front, render.Cell{ .ch = 0, .attr = .{ .bold = true, .underline = true, .reverse = true } });
 
     defer saveSession(&session, exe_dir);
+    // The X button terminates the process without unwinding, so save from the
+    // console control handler as well as from the normal exit path.
+    g_session = &session;
+    g_exe_dir = exe_dir;
+    term.installCloseHandler(saveSessionOnClose);
+    var last_save_ms = os.ticksMs();
+    var unsaved = false;
     var input: [256]u8 = undefined;
     var msg_buf: [96]u8 = undefined;
     var msg: []const u8 = "";
@@ -677,6 +712,15 @@ fn run(init: std.process.Init.Minimal) !void {
                 picker_mode = mode;
             }
         }
+        if (off > 0) unsaved = true;
+        // Autosave: a crash, a kill, or a console that never delivers the
+        // close event loses at most a couple of seconds.
+        const now_ms = os.ticksMs();
+        if (unsaved and now_ms - last_save_ms >= 2000) {
+            saveSession(&session, exe_dir);
+            last_save_ms = now_ms;
+            unsaved = false;
+        }
         // The tab bar's close button quits when it closes the last tab.
         if (session.quit_requested) {
             session.quit_requested = false;
@@ -726,6 +770,16 @@ fn saveSession(session: *Session, exe_dir: ?[]const u8) void {
     if (session.tree) |*t| {
         const root_line = std.fmt.bufPrint(&line_buf, "tree_root {s}\n", .{t.rootPath()}) catch "";
         out.appendSlice(allocator, root_line) catch {};
+        // Which folders were open and which entry was selected.
+        var sel_buf: [1024]u8 = undefined;
+        if (t.selectedPath(&sel_buf)) |sel| {
+            const sel_line = std.fmt.bufPrint(&line_buf, "tree_sel {s}\n", .{sel}) catch "";
+            out.appendSlice(allocator, sel_line) catch {};
+        }
+        for (t.expanded.items) |dir| {
+            const dir_line = std.fmt.bufPrint(&line_buf, "tree_exp {s}\n", .{dir}) catch continue;
+            out.appendSlice(allocator, dir_line) catch {};
+        }
     }
     // Split layout, preorder: `p <tab>` for a leaf, `s <dir> <ratio>` for a
     // split. Tab indices are remapped back to document ids on load.
@@ -777,6 +831,13 @@ fn loadSession(allocator: std.mem.Allocator, exe_dir: ?[]const u8, registry: *sy
     var tree_open = false;
     var tree_root: [1024]u8 = undefined;
     var tree_root_len: usize = 0;
+    var tree_sel: [1024]u8 = undefined;
+    var tree_sel_len: usize = 0;
+    var tree_expanded = std.ArrayList([]u8).empty;
+    defer {
+        for (tree_expanded.items) |p| allocator.free(p);
+        tree_expanded.deinit(allocator);
+    }
     var pane_enc = std.ArrayList(panes_mod.Encoded).empty;
     defer pane_enc.deinit(allocator);
     while (lines.next()) |raw| {
@@ -791,6 +852,17 @@ fn loadSession(allocator: std.mem.Allocator, exe_dir: ?[]const u8, registry: *sy
             const n = @min(root.len, tree_root.len);
             @memcpy(tree_root[0..n], root[0..n]);
             tree_root_len = n;
+        } else if (std.mem.startsWith(u8, line, "tree_sel ")) {
+            const sel = line["tree_sel ".len..];
+            const n = @min(sel.len, tree_sel.len);
+            @memcpy(tree_sel[0..n], sel[0..n]);
+            tree_sel_len = n;
+        } else if (std.mem.startsWith(u8, line, "tree_exp ")) {
+            const dir = line["tree_exp ".len..];
+            if (dir.len > 0) {
+                const copy = allocator.dupe(u8, dir) catch null;
+                if (copy) |c| tree_expanded.append(allocator, c) catch allocator.free(c);
+            }
         } else if (std.mem.startsWith(u8, line, "tree ")) {
             tree_open = std.mem.eql(u8, line["tree ".len..], "1");
         } else if (std.mem.startsWith(u8, line, "p ")) {
@@ -866,8 +938,14 @@ fn loadSession(allocator: std.mem.Allocator, exe_dir: ?[]const u8, registry: *sy
     }
     if (tree_open) {
         const root = if (tree_root_len > 0) tree_root[0..tree_root_len] else ".";
-        session.tree = tree_mod.Tree.init(allocator, root) catch null;
-        session.tree_focus = false;
+        if (tree_mod.Tree.init(allocator, root)) |t| {
+            session.tree = t;
+            // Re-open the folders that were open, then reload once.
+            for (tree_expanded.items) |dir| session.tree.?.expand(dir) catch {};
+            session.tree.?.reload() catch {};
+            if (tree_sel_len > 0) session.tree.?.selectPath(tree_sel[0..tree_sel_len]);
+            session.tree_focus = false;
+        } else |_| {}
     }
     return true;
 }
@@ -1208,26 +1286,25 @@ fn drawDropHint(s: *render.Screen, session: *Session, dz: DropZone, theme: confi
         .top => .{ .x = r.x, .y = r.y, .w = r.w, .h = (r.h + 1) / 2 },
         .bottom => .{ .x = r.x, .y = r.y + r.h / 2, .w = r.w, .h = r.h - r.h / 2 },
     };
-    if (rect.w < 2 or rect.h < 2) return;
-    // A one-cell box around the area the tab would land in.
-    const bg = theme.accent;
-    const fg = theme.background;
-    const right = rect.x + rect.w - 1;
-    const bottom = rect.y + rect.h - 1;
-    var x = rect.x;
-    while (x <= right) : (x += 1) {
-        s.put(@intCast(x), @intCast(rect.y), .{ .ch = '\u{2500}', .fg = fg, .bg = bg });
-        s.put(@intCast(x), @intCast(bottom), .{ .ch = '\u{2500}', .fg = fg, .bg = bg });
+    if (rect.w == 0 or rect.h == 0) return;
+    // Invert the area: the text keeps its own colour, only the background
+    // becomes the highlight colour, so the drop target reads at a glance.
+    const bg = theme.selection;
+    var y = rect.y;
+    while (y < rect.y + rect.h) : (y += 1) {
+        var x = rect.x;
+        while (x < rect.x + rect.w) : (x += 1) {
+            if (x >= s.cols or y >= s.rows) break;
+            const cur = s.back[y * s.cols + x];
+            s.put(@intCast(x), @intCast(y), .{
+                .ch = cur.ch,
+                .fg = cur.fg,
+                .bg = bg,
+                .cont = cur.cont,
+                .attr = cur.attr,
+            });
+        }
     }
-    var yy = rect.y;
-    while (yy <= bottom) : (yy += 1) {
-        s.put(@intCast(rect.x), @intCast(yy), .{ .ch = '\u{2502}', .fg = fg, .bg = bg });
-        s.put(@intCast(right), @intCast(yy), .{ .ch = '\u{2502}', .fg = fg, .bg = bg });
-    }
-    s.put(@intCast(rect.x), @intCast(rect.y), .{ .ch = '\u{250c}', .fg = fg, .bg = bg });
-    s.put(@intCast(right), @intCast(rect.y), .{ .ch = '\u{2510}', .fg = fg, .bg = bg });
-    s.put(@intCast(rect.x), @intCast(bottom), .{ .ch = '\u{2514}', .fg = fg, .bg = bg });
-    s.put(@intCast(right), @intCast(bottom), .{ .ch = '\u{2518}', .fg = fg, .bg = bg });
 }
 
 /// Rows available for document text: everything but the tab bar and status line.
@@ -2184,7 +2261,7 @@ fn openTreeSelection(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
     const path = t.selectedPath(&path_buf) orelse return;
     for (session.docs.items, 0..) |doc, i| {
         if (doc.path) |p| {
-            if (std.mem.eql(u8, p, path)) {
+            if (pathsEqual(p, path)) {
                 session.focusDoc(i);
                 session.tree_focus = false;
                 return;
@@ -2812,6 +2889,19 @@ fn drawHelp(s: *render.Screen, session: *Session, w: usize, h: usize, theme: con
 }
 
 /// The last component of a path ("src/main.zig" -> "main.zig").
+/// Paths compared the way a user means them: a leading "./" or ".\\" is the
+/// same as none, so the tree ("./notes.txt") and a command-line argument
+/// ("notes.txt") are one document, not two tabs.
+fn stripDotSlash(p: []const u8) []const u8 {
+    var s = p;
+    while (std.mem.startsWith(u8, s, "./") or std.mem.startsWith(u8, s, ".\\")) s = s[2..];
+    return s;
+}
+
+fn pathsEqual(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, stripDotSlash(a), stripDotSlash(b));
+}
+
 fn baseName(path: []const u8) []const u8 {
     var end = path.len;
     while (end > 0 and (path[end - 1] == '/' or path[end - 1] == '\\')) end -= 1;
@@ -3793,6 +3883,20 @@ test "ctrl+backslash splits the window into two panes" {
     try std.testing.expectEqual(@as(usize, 20), d.session.panes.rects[1].rect.x);
 }
 
+test "the console close handler writes the session" {
+    var d = try Drive.start("hello");
+    defer d.stop();
+    try d.send("X"); // unsaved edit
+    g_session = &d.session;
+    defer g_session = null;
+    defer os.deleteFile("mibi-session") catch {};
+    saveSessionOnClose();
+    const data = os.readFileAlloc(std.testing.allocator, "mibi-session", 1 << 20) catch return error.SkipZigTest;
+    defer std.testing.allocator.free(data);
+    try std.testing.expect(std.mem.indexOf(u8, data, "tab ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, data, "active 0") != null);
+}
+
 test "esc closes the help panel" {
     var d = try Drive.start("one");
     defer d.stop();
@@ -3903,6 +4007,17 @@ test "dragging a tab straight down into its own pane splits it" {
     const right = d.session.docIndex(d.session.panes.nodes[d.session.panes.rects[1].node].doc).?;
     try std.testing.expectEqualStrings("one\ntwo", d.session.docs.items[left].text());
     try std.testing.expectEqualStrings("", d.session.docs.items[right].text());
+}
+
+test "splitting shows an open file instead of adding a scratch tab" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    try d.send("\x14"); // a second tab
+    try std.testing.expectEqual(@as(usize, 2), d.session.count());
+    try d.send("\x1b[15~"); // F5
+    // The new pane shows the other file; no extra [No Name] tab is created.
+    try std.testing.expectEqual(@as(usize, 2), d.session.count());
+    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
 }
 
 test "F6 moves the focus between panes" {

@@ -188,6 +188,23 @@ pub const Tree = struct {
         try self.reload();
     }
 
+    /// Expand a directory (used to restore the sidebar from the session).
+    /// The caller reloads once after adding every saved path.
+    pub fn expand(self: *Tree, path: []const u8) !void {
+        if (path.len == 0 or self.isExpanded(path)) return;
+        try self.expanded.append(self.allocator, try self.allocator.dupe(u8, path));
+    }
+
+    /// Select the visible entry with this path, if there is one.
+    pub fn selectPath(self: *Tree, path: []const u8) void {
+        for (self.entries.items, 0..) |e, i| {
+            if (std.mem.eql(u8, e.path, path)) {
+                self.selected = i;
+                return;
+            }
+        }
+    }
+
     pub fn count(self: *const Tree) usize {
         return self.entries.items.len;
     }

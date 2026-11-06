@@ -816,6 +816,10 @@ def session_restores_tabs_and_unsaved_edits(m, path):
         proc.wait_quiet()
         proc.send("\x02")  # open the tree
         proc.wait_quiet()
+        proc.send("j")  # select the "sub" folder (folders sort first)
+        proc.wait_quiet()
+        proc.send("\r")  # expand it
+        proc.wait_quiet()
         proc.send("X")  # unsaved edit
         proc.wait_quiet()
         proc.send("\x11")  # quit
@@ -831,6 +835,8 @@ def session_restores_tabs_and_unsaved_edits(m, path):
         again.wait_quiet()
         text = again.screen_text()
         assert "sub" in text, "file tree was not reopened"
+        # The folder that was open is still open, and its file is listed.
+        assert "inner.txt" in text, f"the tree forgot its open folders:\n{text}"
         again.shot("26-session")
     finally:
         again.close()
@@ -1063,11 +1069,13 @@ def dragging_a_tab_onto_a_pane_splits_it(m, path):
     """Drag a tab onto the right third of a pane: it lands there as a split."""
     m.send("\x1b[15~")  # F5: two panes
     m.wait_quiet()
+    plain_bg = m.screen.bg_at(5, 65)
     m.send("\x1b[<0;3;1M")  # press the notes.txt tab
     m.send("\x1b[<32;72;12M")  # drag it over the right pane's right third
     m.wait_quiet()
     hint = m.screen_text()
-    assert "\u250c" in hint, f"no drop hint box while dragging:\n{hint}"
+    assert "\u250c" not in hint, f"the drop hint should be a tint, not a box:\n{hint}"
+    assert m.screen.bg_at(5, 65) != plain_bg, "the drop hint did not tint the area"
     m.shot("34-drop-hint")
     m.send("\x1b[<0;72;12m")  # release
     m.wait_quiet()
@@ -1089,7 +1097,7 @@ def dragging_a_tab_down_splits_the_pane(m, path):
     m.send("\x1b[<32;3;12M")  # straight down into the text area
     m.wait_quiet()
     hint = m.screen_text()
-    assert "\u250c" in hint, f"no drop hint box while dragging:\n{hint}"
+    assert "\u250c" not in hint, f"the drop hint should be a tint, not a box:\n{hint}"
     m.send("\x1b[<0;3;12m")  # release
     m.wait_quiet()
     screen = m.screen_text()
