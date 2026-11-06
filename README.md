@@ -5,10 +5,9 @@
 A tiny, modern terminal text editor. Non-modal, in the spirit of nano/micro,
 built in Zig with no third-party dependencies.
 
-Status: **Phase 3 in progress** - Phase 2 (open, edit, select, copy, undo,
-save) is complete and hardened, plus the Unicode width table,
-find/replace/go-to-line, a help panel, multiple documents in tabs and data-driven
-syntax highlighting.
+Status: **v0.0.3** - phases 0-5 are complete: piece-table editing, tabs,
+panes, search/replace, syntax highlighting, themes, an embedded terminal on
+`F8`, plus this release's selection fixes, terminal polish and panel surfaces.
 Cross-platform (Linux, macOS, Windows).
 
 ```
@@ -32,7 +31,7 @@ toolchain (0.16.0) is fetched into `tools/zig` on first use.
 
 ## Configuration
 
-`.build.ps1` seeds `zig-out\bin\mibi.ini` from `config/mibi.ini.example` the first
+`.\build.ps1` seeds `zig-out\bin\mibi.ini` from `config/mibi.ini.example` the first
 time it builds (later builds leave your edits alone). Copy it next to the binary
 or into the directory you run mibi from; it is optional and every key falls back
 to a default. Unknown keys are ignored.
@@ -48,14 +47,21 @@ background = #0e0e0e   ; unset keeps the terminal's own background
 text = #d8dee9
 keyword1 = #c678dd
 comment = #6a7382
+tree_bg = #14141c      ; sidebar surface
+panel_bg = #1a1a24     ; terminal panel surface
+tab_bar_bg = #22222e   ; tab strip surface
 
 [terminal]
-command = cmd.exe     ; the shell F8 runs (default: %COMSPEC% / $SHELL)
+command = cmd.exe     ; the shell F8 runs (default: pwsh, powershell, then cmd)
 height = 12           ; panel rows, title row included
+padding = 1           ; cells of horizontal padding inside the panel (0-4)
 ```
 
 The theme controls the whole palette: editor text, gutter, selection, tab bar,
 status line, help panel and the syntax classes. Colours are `#rrggbb` or `#rgb`.
+Surfaces have keys of their own - `tree_bg` (sidebar), `tab_bar_bg` (tab strip),
+`panel_bg` (terminal panel) and `bar_bg` (status line). Each has an explicit
+default shade, so the planes read apart even when a theme sets none of them.
 
 The current line is tinted with `line_hl` (derived from the background and
 text colours when a theme does not set it).
@@ -115,6 +121,7 @@ packaging.
 | Key                       | Action                                                                                      |
 | ------------------------- | ------------------------------------------------------------------------------------------- |
 | _type_                    | insert text                                                                                 |
+| _mouse_                   | click places the cursor, drag selects, wheel scrolls; right click pastes into the shell     |
 | `Enter`                   | new line                                                                                    |
 | `Tab`                     | insert 4 spaces                                                                             |
 | `Backspace` / `Delete`    | delete before / after the cursor                                                            |
@@ -144,6 +151,8 @@ packaging.
 | `F8`                      | embedded terminal: opens it, then hands the keyboard back and forth                         |
 | `Shift+F8`                | close the terminal panel                                                                    |
 | `Shift+PgUp` / `PgDn`     | scroll the terminal's scrollback (any key goes back to live)                                |
+| `Shift+Up` / `Down`       | scroll the terminal's scrollback a line (any key goes back to live)                         |
+| `Shift+Home` / `End`      | terminal scrollback: oldest line / back to live                                             |
 | `Ctrl+P`                  | command palette: every action, fuzzy-filtered                                               |
 | `Ctrl+?` / `F1`           | help panel (Esc closes it); hints at the status bar's right edge                            |
 | `Ctrl+Q`                  | quit (asks first if any tab has unsaved edits)                                              |
@@ -155,7 +164,10 @@ packaging.
 - Piece-table buffer: cheap edits, good on large files. A cached line index
   keeps row lookups a binary search, so drawing stays proportional to the
   visible rows rather than the file size.
-- Cursor with column memory; word movement; selection with a highlight.
+- Cursor with column memory; word movement; selection whose band is kept
+  visible on every theme (a `selection` colour too close to the background is
+  blended towards the text colour). Click-drag selects a run of text, a double
+  click selects the word, a triple click the line.
 - Clipboard register plus **OSC 52** so copy reaches the system clipboard.
 - Undo/redo with typing grouped into single steps.
 - Find (incremental), replace all, and go-to-line.
@@ -180,11 +192,12 @@ packaging.
   stamp is `FindFirstFileW` on Windows and `statx` (Linux) / `fstatat`
   (macOS) elsewhere.
 - Mouse: click text to place the cursor (a double click selects the word, a
-  triple click the whole line), click a tab to switch to it, click picker rows
-  (click again to accept), click the status-bar hint for help; the wheel moves
-  one line per notch. Over the tab bar the wheel scrolls the strip instead, and
-  over the terminal panel it scrolls the shell's scrollback. Quick-edit mode is
-  turned off so the console reports clicks to the editor.
+  triple click the whole line, a drag selects a run of text), click a tab to
+  switch to it, click picker rows (click again to accept), click the status-bar
+  hint for help; the wheel moves one line per notch. Over the tab bar the wheel
+  scrolls the strip instead, and over the terminal panel it scrolls the shell's
+  scrollback. Right click in the terminal panel pastes into the shell.
+  Quick-edit mode is turned off so the console reports clicks to the editor.
 - Configurable keybindings and a colour theme via `mibi.ini` (`[keys]` and
   `[theme]`), with the whole palette and every action bindable. The help
   panel renders the keys you actually bound.
@@ -220,7 +233,23 @@ packaging.
   quit that checks every tab.
 - File open/save; path prompts list the directory; Tab completes. A failed
   open or save reports the actual OS error rather than failing silently.
-- Embedded terminal (`F8`): a real shell in a pseudo terminal (ConPTY on Windows, `posix_openpt` + `fork` elsewhere) drawn in a panel under the panes, with its own VT parser (`src/vterm.zig`), 256-colour and true-colour SGR, a scrollback of 2000 lines (`Shift+PgUp`/`PgDn`, `Shift+Up`/`Down`, any key returns to live), the block cursor, and the shell's window kept in step with the panel. Keys go to the shell while the panel has focus; `F8` hands the keyboard back, `Shift+F8` closes it. Configure the shell with `[terminal] command` in `mibi.ini` (default `%COMSPEC%` on Windows, `$SHELL` elsewhere) and its height with `height`. The scrollback ring is allocated when the terminal opens (~2.5 MB at 80 columns, ~6 MB at 200). Selecting and copying inside the terminal is not there yet.
+- Embedded terminal (`F8`): a real shell in a pseudo terminal (ConPTY on
+  Windows, `posix_openpt` + `fork` elsewhere) drawn in a panel under the panes,
+  with its own VT parser (`src/vterm.zig`), 256-colour and true-colour SGR, a
+  scrollback of 2000 lines (wheel and `Shift+Up`/`Down` a line, `Shift+PgUp`/
+  `PgDn` a page, `Shift+Home`/`End` to the oldest line and back to live, any key
+  returns to live), and the shell's window kept in step with the panel. The
+  shell is `pwsh.exe`, then `powershell.exe`, then `cmd.exe` on Windows
+  (`$SHELL`, then `/bin/sh` elsewhere), each with `-NoLogo` and the user's
+  profile; `[terminal] command` overrides it, and `height` / `padding` size the
+  panel. The panel has a surface colour of its own, and its cursor is always
+  visible: a filled block while the shell shows it, hollow when the shell hides
+  it (the alt screen restores it on entry and exit). The title row names the
+  shell and shows `-N lines` while you are scrolled back. A drag inside the
+  panel selects and copies on release (the register plus OSC 52); right click
+  pastes, bracketed when the shell asked for it. `F8` hands the keyboard back
+  and `Shift+F8` closes the panel. The scrollback ring is allocated when the
+  terminal opens (~2.5 MB at 80 columns, ~6 MB at 200).
 - Cell-grid **diff renderer**: changed rows are rewritten in full.
 - Raw mode, alternate screen, resize handling, auto-wrap disabled, UTF-8
   console codepage set on Windows.
@@ -232,7 +261,11 @@ packaging.
 src/main.zig     entry, input decoding, prompts, tabs, drawing
 src/editor.zig   cursor, selection, editing, undo/redo, clipboard, search, files
 src/buffer.zig   piece table + cached line index
+src/panes.zig    split tree, per-pane documents
+src/tree.zig     file tree sidebar
+src/picker.zig   fuzzy file/theme/command pickers
 src/syntax.zig   data-driven highlighter (reads syntax.d/*.ini)
+src/regex.zig    Pike VM regex engine
 src/ini.zig      small INI reader
 src/config.zig   mibi.ini: settings, theme, key bindings
 src/keys.zig     key names, actions and the key map
@@ -249,20 +282,20 @@ src/width.zig    generated Unicode width table
 ## Size
 
 ReleaseSmall, stripped, cross-compiled. `.\build.ps1 size` rebuilds every
-target and fails if one grows past its budget (re-based after Phase 5, hard
+target and fails if one grows past its budget (re-based after v0.0.3, hard
 ceiling 1 MB); see `experiments/README.md` for the probe data.
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu | 161,184 |
-| x86_64-linux-gnu  | 176,920 |
-| x86_64-macos      | 186,979 |
-| aarch64-macos     | 219,560 |
-| x86_64-windows    | 236,032 |
+| aarch64-linux-gnu | 166,064 |
+| x86_64-linux-gnu  | 181,688 |
+| x86_64-macos      | 191,083 |
+| aarch64-macos     | 220,296 |
+| x86_64-windows    | 240,640 |
 
 ## Changelog
 
-See [docs/CHANGELOG.md](docs/CHANGELOG.md); the current release is **v0.0.2**.
+See [docs/CHANGELOG.md](docs/CHANGELOG.md); the current release is **v0.0.3**.
 
 ## Licence
 
@@ -314,5 +347,5 @@ it).
 
 ## Not yet
 
-LSP and completion, macros (dropped by decision), and selecting text inside the
-embedded terminal.
+LSP and completion, macros (dropped by decision), and the phase 6 polish:
+bracketed paste in the editor, matching brackets, soft wrap and atomic save.

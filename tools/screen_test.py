@@ -719,7 +719,7 @@ def terminal_takes_the_keyboard(m, path):
         # The shell's window follows the panel when the console is resized.
         proc.resize(30, 100)
         proc.wait_quiet()
-        assert "F8 back to the editor" in proc.screen_text(), "the panel vanished on resize"
+        assert "typed-in-terminal" in proc.screen_text(), "the panel vanished on resize"
         proc.resize(24, 80)
         proc.wait_quiet()
 
@@ -746,6 +746,124 @@ def terminal_takes_the_keyboard(m, path):
         assert "hello" in screen, "the editor is gone after closing the terminal"
         assert "typed-in-terminal" not in screen, f"the panel is still there:\n{screen}"
         proc.shot("41-terminal-keys")
+    finally:
+        proc.close()
+
+
+@check
+def drag_selects_text(m, path):
+    """Pressing and dragging over text selects it, and typing replaces it."""
+    work = os.path.join(SHOT_DIR, "work-drag")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "drag.txt"), "w", encoding="utf-8") as f:
+        f.write("alpha beta gamma\nsecond line\n")
+    proc = Mibi(["drag.txt"], cwd=work)
+    try:
+        assert proc.wait_for("alpha beta gamma"), "editor did not start"
+        proc.wait_quiet()
+        # "beta" starts at column 6 (screen column 9); drag to the end of the
+        # line (offset 16, screen column 19) and type over the selection.
+        proc.proc.write("\x1b[<0;9;2M")
+        proc.wait_quiet()
+        proc.proc.write("\x1b[<32;19;2M")
+        proc.wait_quiet()
+        proc.proc.write("\x1b[<0;19;2m")
+        proc.wait_quiet()
+        proc.send("Z")
+        proc.wait_quiet()
+        screen = proc.screen_text()
+        assert "alpha Z" in screen, f"drag select did not replace the range:\n{screen}"
+        assert "second line" in screen, f"drag select ate the next line:\n{screen}"
+        proc.shot("42-drag-select")
+    finally:
+        proc.close()
+
+
+@check
+def terminal_select_copies_and_pastes(m, path):
+    """Dragging in the terminal copies, and the register holds the text."""
+    work = os.path.join(SHOT_DIR, "work-term-copy")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
+        f.write("[terminal]\ncommand = cmd.exe\nheight = 10\n")
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello\nworld\n")
+
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        proc.send("\x1b[19~")  # F8
+        proc.wait_quiet()
+        proc.send("echo hello-from-pty\r")
+        assert proc.wait_for("hello-from-pty"), "the shell did not echo:\n" + proc.screen_text()
+        proc.wait_quiet()
+
+        lines = proc.screen_text().splitlines()
+        row = next(i for i, ln in enumerate(lines) if "hello-from-pty" in ln)
+        screen_row = row + 1
+        # Drag across the output row inside the panel: press, motion, release.
+        proc.proc.write(f"\x1b[<0;2;{screen_row}M")
+        proc.wait_quiet()
+        proc.proc.write(f"\x1b[<32;20;{screen_row}M")
+        proc.wait_quiet()
+        proc.proc.write(f"\x1b[<0;20;{screen_row}m")
+        proc.wait_quiet()
+        status = proc.screen_text().splitlines()[-1]
+        assert "copied" in status, f"no copy notice after the drag: {status!r}"
+
+        # Back to the editor and paste: the register must hold the shell text.
+        proc.send("\x1b[19~")
+        proc.wait_quiet()
+        proc.send("\x16")  # Ctrl+V
+        proc.wait_quiet()
+        lines = proc.screen_text().splitlines()
+        assert "hello-from-pty" in lines[1], f"the copy did not reach the register:\n" + "\n".join(lines)
+        proc.shot("43-terminal-copy")
+    finally:
+        proc.close()
+
+
+@check
+def terminal_scrollback_scrolls(m, path):
+    """The wheel and Shift+PgUp walk the terminal back; a key returns to live."""
+    work = os.path.join(SHOT_DIR, "work-term-scroll")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
+        f.write("[terminal]\ncommand = cmd.exe\nheight = 10\n")
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello\n")
+
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        proc.send("\x1b[19~")  # F8
+        proc.wait_quiet()
+        # Fill more lines than the panel holds, so there is a scrollback.
+        proc.send("for /l %i in (1,1,60) do @echo line%i\r")
+        assert proc.wait_for("line60"), "the shell produced no output:\n" + proc.screen_text()
+        proc.wait_quiet()
+        assert "line60" in proc.screen_text()
+
+        # The wheel over the panel walks back in time.
+        for _ in range(4):
+            proc.proc.write("\x1b[<64;6;18M")
+        proc.wait_quiet()
+        screen = proc.screen_text()
+        assert "lines" in screen, f"no scrollback indicator in the panel title:\n{screen}"
+        assert "line60" not in screen, f"the wheel did not scroll the terminal:\n{screen}"
+
+        # Shift+PgUp goes further back, Shift+End returns to live.
+        proc.send("\x1b[5;2~")
+        proc.wait_quiet()
+        proc.send("\x1b[1;2F")
+        proc.wait_quiet()
+        assert "line60" in proc.screen_text(), "Shift+End did not return to the live screen"
+        proc.shot("44-terminal-scroll")
     finally:
         proc.close()
 

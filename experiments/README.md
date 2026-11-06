@@ -32,29 +32,31 @@ boundary; never print via `std.debug` or `std.Io.Threaded`.
 
 ## mibi binary size by phase, cross-compiled
 
-| Target | Phase 1 (skeleton) | Phase 2 (editing) | Phase 4 (current) | Phase 5 (terminal) |
-| --- | ---: | ---: | ---: | ---: |
-| `x86_64-linux-gnu` | 8,960 | 26,168 | 153,640 | 176,920 |
-| `aarch64-linux-gnu` | 8,816 | 24,752 | 140,432 | 161,184 |
-| `x86_64-macos` | 16,994 | 33,922 | 161,931 | 186,979 |
-| `aarch64-macos` | 50,304 | 69,392 | 183,512 | 219,560 |
-| `x86_64-windows-gnu` | 50,176 | 71,680 | 211,456 | 236,032 |
-| `x86_64-windows` | 55,808 | 69,632 | 211,456 | 236,032 |
+| Target | Phase 1 (skeleton) | Phase 2 (editing) | Phase 4 (ox-lite) | Phase 5 (terminal) | v0.0.3 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `x86_64-linux-gnu` | 8,960 | 26,168 | 153,640 | 176,920 | 181,688 |
+| `aarch64-linux-gnu` | 8,816 | 24,752 | 140,432 | 161,184 | 166,064 |
+| `x86_64-macos` | 16,994 | 33,922 | 161,931 | 186,979 | 191,083 |
+| `aarch64-macos` | 50,304 | 69,392 | 183,512 | 219,560 | 220,296 |
+| `x86_64-windows-gnu` | 50,176 | 71,680 | 211,456 | 236,032 | 240,640 |
+| `x86_64-windows` | 55,808 | 69,632 | 211,456 | 236,032 | 240,640 |
 
 The hardening pass (cached line index, UTF-8 `putStr`, file-safety guards,
 richer error reporting) cost ~1.5-2 KB per target. The embedded terminal (phase
 5: ConPTY/`posix_openpt`, the 1,766-line VT parser and the panel) cost **22,560
 bytes on Windows** (213,472 -> 236,032), well inside its +150 KB phase gate: a
 pty is a kernel object, so the price is the parser and the scrollback code, not
-the platform layer. Current numbers are explicit `-Dtarget=` builds (baseline
-CPU); a native build with host CPU features is smaller. `tools/check-size.ps1`
-(`.\build.ps1 size`) rebuilds all six targets and fails if one exceeds its
-budget, so a size trap cannot return unnoticed.
+the platform layer. The v0.0.3 polish (selection fixes, terminal UX, panel
+surfaces) cost **4,608 bytes on Windows** (236,032 -> 240,640) and 736-4,880
+bytes across the six targets. Current numbers are explicit `-Dtarget=` builds
+(baseline CPU); a native build with host CPU features is smaller.
+`tools/check-size.ps1` (`.\build.ps1 size`) rebuilds all six targets and fails
+if one exceeds its budget, so a size trap cannot return unnoticed.
 
 **Sorting is expensive.** `std.mem.sort` instantiated for a second element type
 cost ~17 KB on Linux: pdqsort is generic, so every `[]u8` comparator type gets
 its own copy. Sorting 50 directory names with an insertion sort instead dropped
-the binary from 81,080 to 118,984 bytes. Watch for the same effect with other
+the binary from 118,984 to 81,080 bytes. Watch for the same effect with other
 generic `std` helpers.
 
 For comparison, kibi's Rust binary is ~437-446 KB uncompressed and ox's is

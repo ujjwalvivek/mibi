@@ -19,6 +19,14 @@ pub const Theme = struct {
     text: Color = rgb(0xd8, 0xde, 0xe9),
     gutter: Color = rgb(0x5c, 0x63, 0x70),
     selection: Color = rgb(0x33, 0x45, 0x66),
+    /// Each surface gets its own band so the layout reads at a glance: the
+    /// sidebar sits below the editor, the terminal panel a shade above the
+    /// sidebar, then the tab strip, then the status line. The default theme is
+    /// dark, so "below the editor" means a little darker than the usual
+    /// terminal background and the bands climb back up from there.
+    tree_bg: Color = rgb(0x14, 0x14, 0x1c),
+    panel_bg: Color = rgb(0x1a, 0x1a, 0x24),
+    tab_bar_bg: Color = rgb(0x22, 0x22, 0x2e),
     bar_bg: Color = rgb(0x28, 0x28, 0x38),
     accent: Color = rgb(0x8b, 0xd4, 0x50),
     hint_bg: Color = rgb(0x1e, 0x1e, 0x2a),
@@ -84,12 +92,16 @@ pub const Config = struct {
     format_count: usize = 0,
     format_on_save: bool = false,
     /// `[terminal]`: the shell the embedded terminal runs (empty = the
-    /// platform default) and the panel height in rows.
+    /// platform default), the panel height in rows, and the inner padding in
+    /// columns.
     terminal_command: [256]u8 = [_]u8{0} ** 256,
     terminal_command_len: usize = 0,
     terminal_height: usize = 12,
+    terminal_padding: usize = 1,
 
-    /// The shell configured for the embedded terminal, or null for the default.
+    /// The shell configured for the embedded terminal, or null for the default
+    /// (on Windows: pwsh.exe, then powershell.exe, then cmd.exe, each with the
+    /// user's profile; elsewhere: $SHELL, then /bin/sh).
     pub fn terminalCommand(self: *const Config) ?[]const u8 {
         if (self.terminal_command_len == 0) return null;
         return self.terminal_command[0..self.terminal_command_len];
@@ -237,6 +249,11 @@ pub fn apply(config: *Config, text: []const u8) void {
             } else if (std.mem.eql(u8, entry.key, "height")) {
                 const n = std.fmt.parseInt(usize, std.mem.trim(u8, entry.value, " \t"), 10) catch continue;
                 config.terminal_height = @min(@max(n, 3), 60);
+            } else if (std.mem.eql(u8, entry.key, "padding")) {
+                // 0 = flush against the panel edge, 4 = the widest gutter that
+                // still leaves room for text in a small panel.
+                const n = std.fmt.parseInt(usize, std.mem.trim(u8, entry.value, " \t"), 10) catch continue;
+                config.terminal_padding = @min(n, 4);
             }
             continue;
         }
@@ -468,6 +485,41 @@ test "defaults are the shipped look" {
     try std.testing.expect(config.line_numbers);
     try std.testing.expect(config.syntax);
     try std.testing.expectEqual(rgb(0xd8, 0xde, 0xe9), config.theme.text);
+    try std.testing.expectEqual(@as(usize, 1), config.terminal_padding);
+    // The panel surfaces each have their own shade: sidebar below the editor,
+    // terminal panel above it, tab strip above that, status line last.
+    const t = config.theme;
+    try std.testing.expect(!std.meta.eql(t.tree_bg, t.panel_bg));
+    try std.testing.expect(!std.meta.eql(t.panel_bg, t.tab_bar_bg));
+    try std.testing.expect(!std.meta.eql(t.tab_bar_bg, t.bar_bg));
+    try std.testing.expect(t.tree_bg.rgb.r < t.panel_bg.rgb.r);
+    try std.testing.expect(t.panel_bg.rgb.r < t.tab_bar_bg.rgb.r);
+    try std.testing.expect(t.tab_bar_bg.rgb.r < t.bar_bg.rgb.r);
+}
+
+test "parses the panel surface colours and terminal padding" {
+    var config = Config{};
+    apply(&config,
+        \\[theme]
+        \\tree_bg = #101010
+        \\panel_bg = #202020
+        \\tab_bar_bg = #303030
+        \\
+        \\[terminal]
+        \\padding = 3
+    );
+    try std.testing.expectEqual(rgb(0x10, 0x10, 0x10), config.theme.tree_bg);
+    try std.testing.expectEqual(rgb(0x20, 0x20, 0x20), config.theme.panel_bg);
+    try std.testing.expectEqual(rgb(0x30, 0x30, 0x30), config.theme.tab_bar_bg);
+    // bar_bg is still the status line and keeps its default.
+    try std.testing.expectEqual(rgb(0x28, 0x28, 0x38), config.theme.bar_bg);
+    try std.testing.expectEqual(@as(usize, 3), config.terminal_padding);
+
+    // Clamped to 0..4: a silly value must not shrink the grid to nothing.
+    apply(&config, "[terminal]\npadding = 99\n");
+    try std.testing.expectEqual(@as(usize, 4), config.terminal_padding);
+    apply(&config, "[terminal]\npadding = 0\n");
+    try std.testing.expectEqual(@as(usize, 0), config.terminal_padding);
 }
 
 test "parses colours in #rrggbb and #rgb" {

@@ -17,6 +17,12 @@ const MAX_UNDO = 512;
 pub const Range = struct { start: usize, end: usize };
 pub const RowCol = struct { row: usize, col: usize };
 
+/// One undo/redo step: the buffer state to restore plus the cursor position
+/// that belongs with it. For an edit that consumed a selection, the recorded
+/// cursor is the *end* of the selection, so undoing the edit leaves the cursor
+/// after the reinserted text instead of at its start.
+const EditStep = struct { snap: buffer.Snapshot, cursor: usize };
+
 /// Append `repl` to `out`, expanding `$0`..`$9` with the captured text.
 fn appendExpanded(
     allocator: std.mem.Allocator,
@@ -92,8 +98,8 @@ pub const Editor = struct {
     /// Cached syntax state at the start of each line, grown lazily. Entries
     /// from an edited row down are dropped so block comments re-lex.
     syntax_states: std.ArrayList(syntax.State),
-    undo_stack: std.ArrayList(buffer.Snapshot),
-    redo_stack: std.ArrayList(buffer.Snapshot),
+    undo_stack: std.ArrayList(EditStep),
+    redo_stack: std.ArrayList(EditStep),
 
     pub fn init(allocator: Allocator, path: ?[]const u8, data: []const u8) !Editor {
         return .{
@@ -105,8 +111,8 @@ pub const Editor = struct {
             .register = std.ArrayList(u8).empty,
             .lang = null,
             .syntax_states = std.ArrayList(syntax.State).empty,
-            .undo_stack = std.ArrayList(buffer.Snapshot).empty,
-            .redo_stack = std.ArrayList(buffer.Snapshot).empty,
+            .undo_stack = std.ArrayList(EditStep).empty,
+            .redo_stack = std.ArrayList(EditStep).empty,
         };
     }
 
@@ -117,8 +123,8 @@ pub const Editor = struct {
         if (self.search) |s| self.allocator.free(s);
         self.register.deinit(self.allocator);
         self.syntax_states.deinit(self.allocator);
-        for (self.undo_stack.items) |s| self.buf.freeSnapshot(s);
-        for (self.redo_stack.items) |s| self.buf.freeSnapshot(s);
+        for (self.undo_stack.items) |s| self.buf.freeSnapshot(s.snap);
+        for (self.redo_stack.items) |s| self.buf.freeSnapshot(s.snap);
         self.undo_stack.deinit(self.allocator);
         self.redo_stack.deinit(self.allocator);
         self.buf.deinit();
@@ -232,6 +238,11 @@ pub const Editor = struct {
 
     // --- selection -------------------------------------------------------
 
+    /// The selected range, always ordered so `start <= end` (and therefore
+    /// `start` is the smaller offset). `sel_anchor` may be either side of the
+    /// cursor — drag-select sets it after the cursor when dragging backwards —
+    /// so callers may rely on the order and never need to compare the two
+    /// themselves. Returns null when there is no selection.
     pub fn selectionRange(self: *Editor) ?Range {
         const a = self.sel_anchor orelse return null;
         if (a == self.cursor) return null;
@@ -331,20 +342,53 @@ pub const Editor = struct {
         return std.ascii.isAlphanumeric(c) or c == '_';
     }
 
-    /// Double click: select the run of word characters at `at`. Punctuation
-    /// selects its own run, and a click in the gap right after a word still
-    /// selects that word, because that is where the pointer usually lands.
+    /// Whitespace separates words and is never selected on its own.
+    fn isSpaceChar(c: u8) bool {
+        return std.ascii.isWhitespace(c);
+    }
+
+    /// Double click: select the run under the pointer. Word characters
+    /// (`[A-Za-z0-9_]`) select their run, punctuation selects its own run, and a
+    /// click in the gap right after a word still selects that word, because
+    /// that is where the pointer usually lands. Whitespace that is not such a
+    /// gap selects nothing: the run of spaces is never worth a selection. A
+    /// click past the end of the buffer (the gutter right of the last line)
+    /// counts as a click on the last character, and an empty buffer is a no-op.
     pub fn selectWordAt(self: *Editor, at: usize) void {
         const f = self.buf.flat();
-        if (f.len == 0) return;
-        var i = if (at >= f.len) f.len - 1 else at;
-        if (!isWordChar(f[i]) and i > 0 and isWordChar(f[i - 1])) i -= 1;
-        const wordish = isWordChar(f[i]);
-        var start = i;
-        while (start > 0 and isWordChar(f[start - 1]) == wordish) start -= 1;
-        var end = i;
-        while (end < f.len and isWordChar(f[end]) == wordish) end += 1;
-        if (end <= start) return; // whitespace: nothing worth selecting
+        if (f.len == 0) {
+            // Nothing to select, and nothing stale to keep either.
+            self.sel_anchor = null;
+            return;
+        }
+        // Clamp: `at` may point past the end (or at a huge value) when the
+        // pointer is over the gutter.
+        const i = @min(at, f.len - 1);
+        var start: usize = undefined;
+        var end: usize = undefined;
+        if (isWordChar(f[i])) {
+            start = i;
+            while (start > 0 and isWordChar(f[start - 1])) start -= 1;
+            end = i;
+            while (end < f.len and isWordChar(f[end])) end += 1;
+        } else if (!isSpaceChar(f[i])) {
+            // Punctuation: select the whole run, so "->" or "!!!" comes as one
+            // word and a click anywhere in it selects all of it.
+            start = i;
+            while (start > 0 and !isWordChar(f[start - 1]) and !isSpaceChar(f[start - 1])) start -= 1;
+            end = i;
+            while (end < f.len and !isWordChar(f[end]) and !isSpaceChar(f[end])) end += 1;
+        } else if (i > 0 and isWordChar(f[i - 1])) {
+            // The gap right after a word: the word before the pointer wins.
+            start = i - 1;
+            while (start > 0 and isWordChar(f[start - 1])) start -= 1;
+            end = i;
+        } else {
+            // Whitespace that is not a word gap: no selection (and drop any
+            // stale one instead of leaving the previous word highlighted).
+            self.sel_anchor = null;
+            return;
+        }
         self.sel_anchor = start;
         self.cursor = end;
         self.pref_col = null;
@@ -352,12 +396,35 @@ pub const Editor = struct {
     }
 
     /// Triple click: select the whole line at `at`, without its newline, so
-    /// typing over it keeps the line break.
+    /// typing over it keeps the line break. The whole line is selected wherever
+    /// the click lands (middle of the line, on the newline, or past the end of
+    /// the text in the trailing gutter). An empty line has nothing to select:
+    /// it drops any old selection and parks the cursor on that line instead.
     pub fn selectLineAt(self: *Editor, at: usize) void {
-        const row = self.rowColAt(at).row;
+        const f = self.buf.flat();
+        if (f.len == 0) {
+            self.sel_anchor = null;
+            self.cursor = 0;
+            self.pref_col = null;
+            self.clearCursors();
+            return;
+        }
+        // `at` may be past the end (a click in the gutter): rowColAt clamps it
+        // to the last line, which is the line the pointer is over.
+        const row = self.rowColAt(@min(at, f.len)).row;
         const start = self.rowStart(row);
-        const len = self.line(row).len;
-        if (len == 0) return;
+        const ln = self.line(row);
+        // A CRLF line ends with "\r\n": the CR is part of the line break, not
+        // of the text, so it must not be selected.
+        const len = if (ln.len > 0 and ln[ln.len - 1] == '\r') ln.len - 1 else ln.len;
+        if (len == 0) {
+            // Empty line: no selection, and no stale one from a previous click.
+            self.sel_anchor = null;
+            self.cursor = start;
+            self.pref_col = null;
+            self.clearCursors();
+            return;
+        }
         self.sel_anchor = start;
         self.cursor = start + len;
         self.pref_col = null;
@@ -428,13 +495,22 @@ pub const Editor = struct {
 
     fn beginEdit(self: *Editor, is_type: bool) !void {
         if (is_type and self.grouping) return;
+        // Where the cursor belongs once this step is undone. An edit that eats a
+        // selection must bring the cursor back after the restored text, so
+        // record the far edge of the selection: the cursor itself can sit at
+        // the near edge when the selection was made backwards (dragging left),
+        // and undo would then drop it before the reinserted text.
+        const restore = if (self.selectionRange()) |r| r.end else self.cursor;
         const snap = try self.buf.snapshot();
-        try self.undo_stack.append(self.allocator, snap);
+        self.undo_stack.append(self.allocator, .{ .snap = snap, .cursor = restore }) catch |e| {
+            self.buf.freeSnapshot(snap);
+            return e;
+        };
         if (self.undo_stack.items.len > MAX_UNDO) {
             const old = self.undo_stack.orderedRemove(0);
-            self.buf.freeSnapshot(old);
+            self.buf.freeSnapshot(old.snap);
         }
-        for (self.redo_stack.items) |s| self.buf.freeSnapshot(s);
+        for (self.redo_stack.items) |s| self.buf.freeSnapshot(s.snap);
         self.redo_stack.clearRetainingCapacity();
         self.grouping = is_type;
     }
@@ -781,10 +857,18 @@ pub const Editor = struct {
 
     pub fn undo(self: *Editor) !void {
         if (self.undo_stack.items.len == 0) return;
-        const snap = self.undo_stack.pop().?;
-        try self.redo_stack.append(self.allocator, try self.buf.snapshot());
-        try self.buf.restore(snap);
-        self.buf.freeSnapshot(snap);
+        const step = self.undo_stack.pop().?;
+        const snap = try self.buf.snapshot();
+        self.redo_stack.append(self.allocator, .{ .snap = snap, .cursor = self.cursor }) catch |e| {
+            self.buf.freeSnapshot(snap);
+            return e;
+        };
+        self.buf.restore(step.snap) catch |e| {
+            self.buf.freeSnapshot(step.snap);
+            return e;
+        };
+        self.buf.freeSnapshot(step.snap);
+        self.cursor = step.cursor;
         self.grouping = false;
         self.pref_col = null;
         self.sel_anchor = null;
@@ -795,10 +879,18 @@ pub const Editor = struct {
 
     pub fn redo(self: *Editor) !void {
         if (self.redo_stack.items.len == 0) return;
-        const snap = self.redo_stack.pop().?;
-        try self.undo_stack.append(self.allocator, try self.buf.snapshot());
-        try self.buf.restore(snap);
-        self.buf.freeSnapshot(snap);
+        const step = self.redo_stack.pop().?;
+        const snap = try self.buf.snapshot();
+        self.undo_stack.append(self.allocator, .{ .snap = snap, .cursor = self.cursor }) catch |e| {
+            self.buf.freeSnapshot(snap);
+            return e;
+        };
+        self.buf.restore(step.snap) catch |e| {
+            self.buf.freeSnapshot(step.snap);
+            return e;
+        };
+        self.buf.freeSnapshot(step.snap);
+        self.cursor = step.cursor;
         self.grouping = false;
         self.pref_col = null;
         self.sel_anchor = null;
@@ -989,9 +1081,9 @@ pub const Editor = struct {
 
     /// Replace the whole document (e.g. after opening another file).
     pub fn replaceContents(self: *Editor, data: []const u8) !void {
-        for (self.undo_stack.items) |s| self.buf.freeSnapshot(s);
+        for (self.undo_stack.items) |s| self.buf.freeSnapshot(s.snap);
         self.undo_stack.clearRetainingCapacity();
-        for (self.redo_stack.items) |s| self.buf.freeSnapshot(s);
+        for (self.redo_stack.items) |s| self.buf.freeSnapshot(s.snap);
         self.redo_stack.clearRetainingCapacity();
         self.buf.deinit();
         self.buf = try Buffer.init(self.allocator, data);
@@ -1291,4 +1383,296 @@ test "triple click selects the whole line but not its newline" {
     try std.testing.expectEqual(@as(usize, 16), e.cursor);
     try e.insertText("Y");
     try std.testing.expectEqualStrings("Y\nsecond", e.text());
+}
+
+// --- undo puts the cursor back after the restored text ----------------------
+
+test "undo after deleting a word selection leaves the cursor after the word" {
+    var e = try Editor.init(std.testing.allocator, null, "alpha beta gamma");
+    defer e.deinit();
+
+    e.selectWordAt(6); // "beta"
+    try e.deleteSelection();
+    try std.testing.expectEqualStrings("alpha  gamma", e.text());
+    try std.testing.expectEqual(@as(usize, 6), e.cursor);
+
+    try e.undo();
+    try std.testing.expectEqualStrings("alpha beta gamma", e.text());
+    // End of the restored "beta", not its start.
+    try std.testing.expectEqual(@as(usize, 10), e.cursor);
+    try std.testing.expectEqual(@as(usize, 10), e.rowColAt(e.cursor).col);
+}
+
+test "undo after typing over a selection leaves the cursor after the text" {
+    var e = try Editor.init(std.testing.allocator, null, "alpha beta gamma");
+    defer e.deinit();
+
+    e.selectWordAt(6); // "beta"
+    try e.insertText("X");
+    try std.testing.expectEqualStrings("alpha X gamma", e.text());
+
+    try e.undo();
+    try std.testing.expectEqualStrings("alpha beta gamma", e.text());
+    try std.testing.expectEqual(@as(usize, 10), e.cursor);
+}
+
+test "undo after deleting a backwards selection leaves the cursor at the end" {
+    var e = try Editor.init(std.testing.allocator, null, "alpha beta gamma");
+    defer e.deinit();
+
+    // Drag-select right to left: the anchor is after the cursor.
+    e.sel_anchor = 10;
+    e.cursor = 6;
+    try e.deleteSelection();
+    try std.testing.expectEqualStrings("alpha  gamma", e.text());
+    try std.testing.expectEqual(@as(usize, 6), e.cursor);
+
+    try e.undo();
+    try std.testing.expectEqualStrings("alpha beta gamma", e.text());
+    try std.testing.expectEqual(@as(usize, 10), e.cursor);
+}
+
+test "undo of a backspace leaves the cursor after the restored character" {
+    var e = try Editor.init(std.testing.allocator, null, "abc");
+    defer e.deinit();
+
+    e.cursor = 3;
+    try e.backspace();
+    try std.testing.expectEqualStrings("ab", e.text());
+    try e.undo();
+    try std.testing.expectEqualStrings("abc", e.text());
+    try std.testing.expectEqual(@as(usize, 3), e.cursor);
+}
+
+test "redo puts the cursor back where the edit left it" {
+    var e = try Editor.init(std.testing.allocator, null, "alpha beta");
+    defer e.deinit();
+
+    e.selectWordAt(6); // "beta"
+    try e.deleteSelection();
+    try std.testing.expectEqual(@as(usize, 6), e.cursor);
+
+    try e.undo();
+    try std.testing.expectEqual(@as(usize, 10), e.cursor);
+    try e.redo();
+    try std.testing.expectEqualStrings("alpha ", e.text());
+    try std.testing.expectEqual(@as(usize, 6), e.cursor);
+}
+
+test "typing runs stay one undo step and undo returns to the run start" {
+    var e = try Editor.init(std.testing.allocator, null, "ab");
+    defer e.deinit();
+
+    e.cursor = 2;
+    try e.insertText("c");
+    try e.insertText("d");
+    try e.insertText("e");
+    // A run of plain typing is still grouped into a single step.
+    try std.testing.expectEqual(@as(usize, 1), e.undo_stack.items.len);
+    try std.testing.expectEqualStrings("abcde", e.text());
+
+    try e.undo();
+    try std.testing.expectEqualStrings("ab", e.text());
+    try std.testing.expectEqual(@as(usize, 2), e.cursor);
+    try std.testing.expectEqual(@as(usize, 0), e.undo_stack.items.len);
+}
+
+// --- line selection ---------------------------------------------------------
+
+test "triple click in the middle of a line selects the whole line" {
+    var e = try Editor.init(std.testing.allocator, null, "alpha beta\ngamma");
+    defer e.deinit();
+
+    e.selectLineAt(3); // middle of "alpha beta"
+    const r = e.selectionRange().?;
+    try std.testing.expectEqual(@as(usize, 0), r.start);
+    try std.testing.expectEqual(@as(usize, 10), r.end);
+    try std.testing.expectEqualStrings("alpha beta", e.text()[r.start..r.end]);
+
+    // Typing replaces the line content but keeps the line break.
+    try e.insertText("Z");
+    try std.testing.expectEqualStrings("Z\ngamma", e.text());
+}
+
+test "triple click at the end of a line selects that line, not the next" {
+    var e = try Editor.init(std.testing.allocator, null, "ab\nlongerline\ncd");
+    defer e.deinit();
+
+    // Exactly on the newline: still the first line, without the newline.
+    e.selectLineAt(2);
+    const r = e.selectionRange().?;
+    try std.testing.expectEqual(@as(usize, 0), r.start);
+    try std.testing.expectEqual(@as(usize, 2), r.end);
+
+    // Past the end of the text (trailing gutter): the last line.
+    e.selectLineAt(e.buf.len() + 40);
+    const r2 = e.selectionRange().?;
+    try std.testing.expectEqual(@as(usize, 14), r2.start);
+    try std.testing.expectEqual(@as(usize, 16), r2.end);
+}
+
+test "triple click on an empty line selects nothing" {
+    var e = try Editor.init(std.testing.allocator, null, "a\n\nb");
+    defer e.deinit();
+
+    e.selectLineAt(0); // select "a" first
+    try std.testing.expect(e.hasSelection());
+
+    e.selectLineAt(2); // the empty line: no selection, not a stale one
+    try std.testing.expectEqual(@as(?usize, null), e.sel_anchor);
+    try std.testing.expect(!e.hasSelection());
+    try std.testing.expectEqual(@as(usize, 2), e.cursor);
+
+    // Typing on the empty line inserts instead of eating the previous line.
+    try e.insertText("x");
+    try std.testing.expectEqualStrings("a\nx\nb", e.text());
+}
+
+test "triple click on the last line without a trailing newline" {
+    var e = try Editor.init(std.testing.allocator, null, "one\ntwo");
+    defer e.deinit();
+
+    e.selectLineAt(6);
+    const r = e.selectionRange().?;
+    try std.testing.expectEqual(@as(usize, 4), r.start);
+    try std.testing.expectEqual(@as(usize, 7), r.end);
+    try std.testing.expectEqualStrings("two", e.text()[r.start..r.end]);
+
+    try e.insertText("Z");
+    try std.testing.expectEqualStrings("one\nZ", e.text());
+}
+
+test "triple click on a crlf line excludes the line break" {
+    var e = try Editor.init(std.testing.allocator, null, "ab\r\ncd");
+    defer e.deinit();
+
+    e.selectLineAt(1); // middle of "ab\r"
+    const r = e.selectionRange().?;
+    try std.testing.expectEqual(@as(usize, 0), r.start);
+    try std.testing.expectEqual(@as(usize, 2), r.end);
+}
+
+test "triple click on an empty buffer is safe" {
+    var e = try Editor.init(std.testing.allocator, null, "");
+    defer e.deinit();
+
+    e.selectLineAt(0);
+    try std.testing.expectEqual(@as(?usize, null), e.sel_anchor);
+    try std.testing.expectEqual(@as(usize, 0), e.cursor);
+    e.selectLineAt(9999);
+    try std.testing.expect(!e.hasSelection());
+}
+
+// --- word selection ---------------------------------------------------------
+
+test "double click selects a run of word characters" {
+    var e = try Editor.init(std.testing.allocator, null, "foo_bar123 baz");
+    defer e.deinit();
+
+    // Digits and underscores belong to the word, like letters.
+    e.selectWordAt(1);
+    try std.testing.expectEqual(@as(?usize, 0), e.sel_anchor);
+    try std.testing.expectEqual(@as(usize, 10), e.cursor);
+    try std.testing.expectEqualStrings("foo_bar123", e.text()[0..10]);
+
+    e.selectWordAt(12); // "baz"
+    try std.testing.expectEqual(@as(?usize, 11), e.sel_anchor);
+    try std.testing.expectEqual(@as(usize, 14), e.cursor);
+}
+
+test "double click on punctuation selects its run" {
+    var e = try Editor.init(std.testing.allocator, null, "foo->bar!! baz");
+    defer e.deinit();
+
+    e.selectWordAt(4); // the '>' in "->"
+    try std.testing.expectEqual(@as(?usize, 3), e.sel_anchor);
+    try std.testing.expectEqual(@as(usize, 5), e.cursor);
+    try std.testing.expectEqualStrings("->", e.text()[3..5]);
+
+    e.selectWordAt(9); // a '!' in the "!!" run
+    try std.testing.expectEqual(@as(?usize, 8), e.sel_anchor);
+    try std.testing.expectEqual(@as(usize, 10), e.cursor);
+}
+
+test "double click in the gap after a word selects the word" {
+    var e = try Editor.init(std.testing.allocator, null, "alpha beta");
+    defer e.deinit();
+
+    e.selectWordAt(5); // the space between the words
+    try std.testing.expectEqual(@as(?usize, 0), e.sel_anchor);
+    try std.testing.expectEqual(@as(usize, 5), e.cursor);
+
+    e.selectWordAt(10); // past the end of the buffer: still "beta"
+    try std.testing.expectEqual(@as(?usize, 6), e.sel_anchor);
+    try std.testing.expectEqual(@as(usize, 10), e.cursor);
+}
+
+test "double click past the end after a trailing newline selects the word" {
+    var e = try Editor.init(std.testing.allocator, null, "word\n");
+    defer e.deinit();
+
+    e.selectWordAt(9999);
+    try std.testing.expectEqual(@as(?usize, 0), e.sel_anchor);
+    try std.testing.expectEqual(@as(usize, 4), e.cursor);
+}
+
+test "double click on whitespace selects nothing" {
+    var e = try Editor.init(std.testing.allocator, null, "alpha  beta\n  x");
+    defer e.deinit();
+
+    e.selectWordAt(0); // a real selection first
+    try std.testing.expect(e.hasSelection());
+
+    e.selectWordAt(6); // the second space of the run: no word before the gap
+    try std.testing.expectEqual(@as(?usize, null), e.sel_anchor);
+    try std.testing.expect(!e.hasSelection());
+
+    e.selectWordAt(12); // indentation at the start of the second line
+    try std.testing.expect(!e.hasSelection());
+}
+
+test "double click on trailing spaces past the end selects nothing" {
+    var e = try Editor.init(std.testing.allocator, null, "abc   ");
+    defer e.deinit();
+
+    e.selectWordAt(9999);
+    try std.testing.expectEqual(@as(?usize, null), e.sel_anchor);
+    try std.testing.expect(!e.hasSelection());
+}
+
+test "double click clamps on an empty buffer" {
+    var e = try Editor.init(std.testing.allocator, null, "");
+    defer e.deinit();
+
+    e.selectWordAt(0);
+    try std.testing.expectEqual(@as(?usize, null), e.sel_anchor);
+    e.selectWordAt(9999);
+    try std.testing.expectEqual(@as(?usize, null), e.sel_anchor);
+    try std.testing.expectEqual(@as(usize, 0), e.cursor);
+}
+
+// --- the renderer/drag-select contract --------------------------------------
+
+test "selectionRange is ordered whichever side the anchor is on" {
+    var e = try Editor.init(std.testing.allocator, null, "hello world");
+    defer e.deinit();
+
+    // Forward selection (anchor before the cursor).
+    e.sel_anchor = 2;
+    e.cursor = 7;
+    var r = e.selectionRange().?;
+    try std.testing.expectEqual(@as(usize, 2), r.start);
+    try std.testing.expectEqual(@as(usize, 7), r.end);
+
+    // Backwards drag: main.zig sets the anchor after the cursor.
+    e.sel_anchor = 7;
+    e.cursor = 2;
+    r = e.selectionRange().?;
+    try std.testing.expectEqual(@as(usize, 2), r.start);
+    try std.testing.expectEqual(@as(usize, 7), r.end);
+
+    // A zero-width range is not a selection.
+    e.sel_anchor = 3;
+    e.cursor = 3;
+    try std.testing.expect(e.selectionRange() == null);
 }

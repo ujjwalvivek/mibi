@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.0.3 - 2026-11-06
 
 **Embedded terminal (phase 5)**
 
@@ -15,11 +15,47 @@
 - The shell's window follows the panel, so resizing the console or the panel
   resizes the child too. `[terminal] command` picks the shell, `height` the
   panel size.
-- Selecting text inside the terminal is not implemented yet.
 
-**Mouse**
+**Selection**
 
-- Double click selects the word under the pointer, triple click the whole line.
+- Double click selects the word under the pointer, triple click the whole line,
+  and click-drag now selects a run of text instead of only placing the cursor.
+- The selection band is kept visible on every theme: when a theme's `selection`
+  colour sits too close to the background it is blended towards the text colour,
+  so a selection never disappears into the tint.
+- Undo after deleting a selection leaves the cursor after the restored text,
+  and redo puts it back where the edit left it; typing is still grouped into one
+  undo step.
+
+**Terminal UX**
+
+- The shell is picked in order: `pwsh.exe`, then `powershell.exe`, then
+  `cmd.exe`, each with `-NoLogo` and the user's profile (never `-NoProfile`), so
+  aliases and the prompt work; the first that spawns wins (PowerShell 7.6.9 on
+  this machine). `[terminal] command` still overrides it, and Unix falls back
+  from `$SHELL` to `/bin/sh`.
+- The panel has a surface colour of its own and `[terminal] padding` cells of
+  horizontal padding, and its cursor is always visible: a filled block while the
+  shell shows it, a hollow one when the shell has hidden it. Entering and
+  leaving the alt screen restores cursor visibility, so a full-screen program
+  cannot leave the prompt cursorless.
+- Scrollback now works in both directions: the sign in `Terminal.scroll` was
+  inverted, so a wheel-up from the live screen clamped to zero. The wheel and
+  `Shift+Up`/`Down` scroll a line, `Shift+PgUp`/`PgDn` a page, `Shift+Home` jumps
+  to the oldest line and `Shift+End` returns to live; any key goes back to live.
+- The title row names the shell and shows `-N lines` while you are scrolled
+  back, and `F8` no longer writes to the status line.
+- A drag inside the panel selects and copies on release (the register plus
+  OSC 52, with a `copied N chars` note); right click pastes, bracketed when the
+  shell asked for it.
+
+**Surfaces**
+
+- The sidebar, tab strip, status line and terminal panel each draw their own
+  background shade: `[theme] tree_bg` (#14141c, sidebar), `tab_bar_bg` (#22222e,
+  strip), `panel_bg` (#1a1a24, terminal panel) and the existing `bar_bg`
+  (#282838, status line). Each default is an explicit shade, so the planes read
+  apart.
 
 **Hot reload**
 
@@ -41,6 +77,11 @@
 - `F4` runs the per-language formatter configured in `[format]`
   (`format_on_save` is opt-in). There is no built-in re-indent: a missing
   command is reported in the status bar instead of guessing.
+
+**Release**
+
+- 202 unit tests and 48 screen checks pass, and the size gate is green on all
+  six targets (166,064 to 240,640 bytes).
 
 ## v0.0.2
 

@@ -39,7 +39,14 @@ pub const Cell = struct {
     attr: Attr = .{},
 };
 
-pub const Cursor = struct { x: u16, y: u16, visible: bool = true };
+pub const Cursor = struct {
+    x: u16,
+    y: u16,
+    /// The last `?25` mode: true when the shell wants the cursor shown. A
+    /// hidden cursor still has a live position, so a renderer can draw a
+    /// hollow or underlined cursor instead of dropping it.
+    visible: bool = true,
+};
 
 pub const MouseMode = enum { off, click, drag };
 
@@ -114,6 +121,11 @@ pub const Vt = struct {
 
     saved: SavedCursor = .{ .x = 0, .y = 0, .fg = .default, .bg = .default, .attr = .{} },
     alt_saved: SavedCursor = .{ .x = 0, .y = 0, .fg = .default, .bg = .default, .attr = .{} },
+    /// Cursor visibility seen when the alternate screen was entered. `?25` is
+    /// a terminal-wide mode, so a full-screen program that hides the cursor
+    /// must not leave the shell's main screen without one: leaving the
+    /// alternate screen puts the flag back the way it was.
+    alt_visible: bool = true,
 
     title_buf: [max_title]u8 = [_]u8{0} ** max_title,
     title_len: usize = 0,
@@ -290,8 +302,10 @@ pub const Vt = struct {
         return self.nrows;
     }
 
-    /// The live cursor, even while the scrollback view is offset (the
-    /// renderer hides it when `viewOffset` is not zero).
+    /// The live cursor, even while the scrollback view is offset (the renderer
+    /// hides it when `viewOffset` is not zero). `visible` is the last `?25`
+    /// mode; a shell that hid the cursor still reports its live position, so
+    /// the caller can draw a hollow cursor rather than none.
     pub fn cursor(self: *const Vt) Cursor {
         return self.cur;
     }
@@ -319,16 +333,47 @@ pub const Vt = struct {
         return self.reply_buf[0..n];
     }
 
+    /// Number of lines held in the scrollback ring (lines, not cells).
     pub fn scrollbackLen(self: *const Vt) usize {
         return self.sb_len;
     }
 
+    /// How many lines above the live screen the view is parked. 0 = live.
     pub fn viewOffset(self: *const Vt) usize {
         return self.view;
     }
 
+    /// True when the view shows the live screen (no scrollback offset).
+    pub fn atLive(self: *const Vt) bool {
+        return self.view == 0;
+    }
+
+    /// Park the view `offset` lines above the live screen. Clamped to the
+    /// scrollback, so a caller cannot scroll into empty space.
     pub fn setViewOffset(self: *Vt, offset: usize) void {
         self.view = @min(offset, self.sb_len);
+    }
+
+    /// Scroll the view by `delta` lines, wheel style: negative goes back in
+    /// time (up), positive returns toward the live screen (down). The offset is
+    /// clamped, so a big delta simply parks at one end.
+    ///
+    /// `view` counts lines *above* the live screen, so going back in time has
+    /// to grow it - the sign of `delta` is inverted here on purpose.
+    pub fn scrollBy(self: *Vt, delta: isize) void {
+        const cur: i128 = @intCast(self.view);
+        const want = cur - @as(i128, delta);
+        if (want <= 0) {
+            self.view = 0;
+            return;
+        }
+        const cap: i128 = @intCast(self.sb_len);
+        self.view = @intCast(@min(want, cap));
+    }
+
+    /// Jump back to the live screen.
+    pub fn scrollToLive(self: *Vt) void {
+        self.view = 0;
     }
 
     // --- parser ---------------------------------------------------------
@@ -1077,8 +1122,12 @@ pub const Vt = struct {
         if (on == self.alt_active) return;
         if (on) {
             // 1049 semantics: remember where the main cursor was, clear the
-            // alternate screen and home the cursor.
+            // alternate screen and home the cursor. Cursor visibility is not
+            // part of the saved cursor in xterm, but a TUI that hides it must
+            // not hide the shell's prompt afterwards, so it is remembered
+            // separately and put back on the way out.
             self.alt_saved = .{ .x = self.cur.x, .y = self.cur.y, .fg = self.fg, .bg = self.bg, .attr = self.attr };
+            self.alt_visible = self.cur.visible;
             std.mem.swap([]Cell, &self.cells, &self.other);
             self.alt_active = true;
             @memset(self.cells, Cell{});
@@ -1091,6 +1140,7 @@ pub const Vt = struct {
             self.alt_active = false;
             self.cur.x = @min(self.alt_saved.x, self.ncols - 1);
             self.cur.y = @min(self.alt_saved.y, self.nrows - 1);
+            self.cur.visible = self.alt_visible;
             self.fg = self.alt_saved.fg;
             self.bg = self.alt_saved.bg;
             self.attr = self.alt_saved.attr;
@@ -1109,6 +1159,7 @@ pub const Vt = struct {
         self.bracketed_paste = false;
         self.mouse = .off;
         self.cur = .{ .x = 0, .y = 0 };
+        self.alt_visible = true;
         self.pending_wrap = false;
         self.scroll_top = 0;
         self.scroll_bottom = self.nrows - 1;
@@ -1593,21 +1644,99 @@ test "scrollback ring keeps the newest 2000 lines" {
     try testing.expectEqual(@as(usize, 2000), v.scrollbackLen());
 }
 
-test "view offset shows scrollback above the live screen" {
+test "the scrollback view composes above the live screen" {
+    var v = try Vt.init(testing.allocator, 4, 10);
+    defer v.deinit();
+    // Twenty numbered lines on a ten-row screen: lines 0..10 have scrolled
+    // off (the last LF pushes one more off), 11..19 are live.
+    var i: usize = 0;
+    while (i < 20) : (i += 1) {
+        var buf: [8]u8 = undefined;
+        v.feed(try std.fmt.bufPrint(&buf, "{d}\r\n", .{i}));
+    }
+    // scrollbackLen counts lines, not cells: 11 lines of 4 cells each.
+    try testing.expectEqual(@as(usize, 11), v.scrollbackLen());
+    try expectRow(&v, 0, "11"); // live screen starts here
+    try testing.expectEqual(@as(usize, 0), v.viewOffset());
+
+    v.setViewOffset(3);
+    // The third-from-last scrolled-off line sits on the top row...
+    try expectRow(&v, 0, "8");
+    try expectRow(&v, 1, "9");
+    try expectRow(&v, 2, "10");
+    // ...and the live screen begins right below the three scrollback rows.
+    try expectRow(&v, 3, "11");
+    try expectRow(&v, 9, "17");
+    // The cursor stays live even while the view is parked in the past.
+    try testing.expectEqual(@as(u16, 9), v.cursor().y);
+
+    // Clamped: the view can never point past the ring.
+    v.setViewOffset(99);
+    try testing.expectEqual(v.scrollbackLen(), v.viewOffset());
+    try expectRow(&v, 0, "0"); // the oldest line
+
+    v.setViewOffset(0);
+    try testing.expect(v.atLive());
+    try expectRow(&v, 0, "11");
+}
+
+test "scrollBy moves the view wheel-style and clamps at both ends" {
     var v = try Vt.init(testing.allocator, 3, 2);
     defer v.deinit();
     v.feed("a\r\nb\r\nc");
     try testing.expectEqual(@as(usize, 1), v.scrollbackLen());
-    v.setViewOffset(1);
+
+    // Negative is back in time, so it grows the offset.
+    v.scrollBy(-1);
+    try testing.expectEqual(@as(usize, 1), v.viewOffset());
+    v.scrollBy(-1);
+    try testing.expectEqual(@as(usize, 1), v.viewOffset()); // clamped at the oldest line
+    v.scrollBy(-1000);
     try testing.expectEqual(@as(usize, 1), v.viewOffset());
     try expectRow(&v, 0, "a");
-    try expectRow(&v, 1, "b");
-    v.setViewOffset(99);
-    try testing.expectEqual(@as(usize, 1), v.viewOffset());
-    v.setViewOffset(0);
+
+    // Positive returns toward the live screen, and never overshoots it.
+    v.scrollBy(1);
+    try testing.expectEqual(@as(usize, 0), v.viewOffset());
+    v.scrollBy(1000);
+    try testing.expectEqual(@as(usize, 0), v.viewOffset());
+    try testing.expect(v.atLive());
+
+    v.scrollBy(-2);
+    try testing.expect(!v.atLive());
+    v.scrollToLive();
+    try testing.expect(v.atLive());
     try expectRow(&v, 0, "b");
-    try expectRow(&v, 1, "c");
-    try testing.expectEqual(@as(u16, 1), v.cursor().y);
+}
+
+test "cursor visibility tracks ?25 and the alternate screen restores it" {
+    var v = try Vt.init(testing.allocator, 6, 3);
+    defer v.deinit();
+    try testing.expect(v.cursor().visible); // shown by default
+    v.feed("\x1b[?25l");
+    try testing.expect(!v.cursor().visible);
+    v.feed("\x1b[?25h");
+    try testing.expect(v.cursor().visible);
+
+    // Park the main cursor, then run a "full-screen program": it hides the
+    // cursor on the alternate screen and leaves without showing it again.
+    v.feed("\x1b[2;3H");
+    const before = v.cursor();
+    v.feed("\x1b[?1049h");
+    v.feed("\x1b[?25l");
+    try testing.expect(!v.cursor().visible);
+    v.feed("\x1b[?1049l");
+    // Leaving restores both the saved position and the visibility.
+    try testing.expect(v.cursor().visible);
+    try testing.expectEqual(before.x, v.cursor().x);
+    try testing.expectEqual(before.y, v.cursor().y);
+
+    // A cursor hidden before entering stays hidden after leaving.
+    v.feed("\x1b[?25l");
+    v.feed("\x1b[?1049h\x1b[?1049l");
+    try testing.expect(!v.cursor().visible);
+    v.feed("\x1b[?25h");
+    try testing.expect(v.cursor().visible);
 }
 
 test "resize grow keeps content and pads blanks" {

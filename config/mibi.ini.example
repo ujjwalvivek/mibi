@@ -21,12 +21,15 @@ syntax = true
 ; text = #d8dee9
 ; gutter = #5c6370
 ; selection = #334566
-; bar_bg = #282838
+; bar_bg = #282838      ; status line
 ; accent = #8bd450
 ; hint_bg = #1e1e2a
 ; hint_fg = #8892a4
 ; tab_bg = #1e1e2a
 ; tab_active_bg = #334566
+; tab_bar_bg = #22222e  ; tab strip background
+; tree_bg = #14141c     ; file tree sidebar
+; panel_bg = #1a1a24    ; terminal panel, including its default-background cells
 ; help_bg = #1a1a24
 ; comment = #6a7382
 ; keyword1 = #c678dd
@@ -35,10 +38,13 @@ syntax = true
 ; number = #d19a66
 [terminal]
 ; The shell the embedded terminal runs (F8). Empty means the platform default:
-; %COMSPEC% on Windows, $SHELL elsewhere.
+; PowerShell 7, then Windows PowerShell, then cmd on Windows; $SHELL elsewhere.
+; Each is started with the user's profile.
 ; command = cmd.exe
 ; Panel height in rows, title row included (3-60).
 ; height = 12
+; Cells of horizontal padding inside the panel, left and right (0-4).
+; padding = 1
 
 [keys]
 ; Bind an action to a key. Modifiers: ctrl, alt, shift.

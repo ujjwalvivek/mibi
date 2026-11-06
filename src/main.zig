@@ -26,7 +26,7 @@ const regex = @import("regex.zig");
 const config_mod = @import("config.zig");
 const keys = @import("keys.zig");
 
-pub const version = "0.0.2";
+pub const version = "0.0.3";
 
 const MAX_FILE = 64 * 1024 * 1024;
 
@@ -162,10 +162,18 @@ const Session = struct {
     click_x: u16 = 0,
     click_y: u16 = 0,
     click_count: u8 = 0,
+    /// Text drag: a press on text sets an anchor, motion extends the selection.
+    press_text: bool = false,
+    drag_anchor: usize = 0,
     /// The embedded terminal, once it has been opened, and whether the keyboard
     /// goes to it instead of the editor.
     terminal: ?terminal_mod.Terminal = null,
     terminal_focus: bool = false,
+    /// Terminal selection, in content cells (0,0 = first content row/column).
+    /// A drag inside the panel selects, and releasing copies.
+    term_sel_anchor: ?[2]u16 = null,
+    term_sel_head: ?[2]u16 = null,
+    term_press: bool = false,
     /// Where a tab being dragged would land if dropped on a pane.
     drop_zone: ?DropZone = null,
     /// Tab under the pointer (shows its path in the status line).
@@ -760,8 +768,12 @@ fn run(init: std.process.Init.Minimal) !void {
             if (session.quit_requested) break;
             const chunk = pending[off..pending_len];
             // The terminal owns the keyboard while it has focus: its keys go
-            // to the shell, not to the editor.
-            if (session.terminal_focus and session.terminal != null and prompt == null and picker_state == null) {
+            // to the shell, not to the editor. Mouse reports are the exception:
+            // they belong to the mouse handler, which routes clicks inside the
+            // panel back to the terminal (select, paste, scroll).
+            if (session.terminal_focus and session.terminal != null and prompt == null and
+                picker_state == null and !isMouseReport(chunk))
+            {
                 const used = handleTerminalInput(&session, chunk, &msg_buf, &msg);
                 if (used == 0) break; // a partial escape sequence: wait for more
                 off += used;
@@ -1282,22 +1294,68 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
         }
     }
     const size = term.size();
-    // The terminal panel owns its rows: a click focuses it, the wheel scrolls
-    // the shell's scrollback, and neither disturbs the editor behind it.
+    // The terminal panel owns its rows: a click focuses it and starts a
+    // selection, dragging extends it and releasing copies, right click pastes,
+    // the wheel scrolls the scrollback. None of it disturbs the editor.
     if (session.terminal != null) {
         const g = terminalRect(session, size.cols, size.rows);
         const row = if (y > 0) @as(usize, y) - 1 else 0;
-        if (g.h > 0 and row >= g.y and row + 1 < @as(usize, size.rows)) {
-            if (button == 64 or button == 65) {
+        const in_panel = g.h > 0 and row >= g.y and row + 1 < @as(usize, size.rows);
+        if (in_panel) {
+            if (button == 64 or button == 65) { // wheel: scroll the scrollback
                 if (session.terminal) |*t| t.scroll(if (button == 64) -1 else 1);
+                session.term_sel_anchor = null;
+                session.term_sel_head = null;
                 return;
             }
-            if (button == 0 and final == 'M') {
+            if (button == 2 and final == 'M') { // right click: paste
                 session.terminal_focus = true;
+                terminalPaste(session);
+                return;
+            }
+            if (button == 0 and final == 'M') { // press: focus, start selecting
+                session.terminal_focus = true;
+                session.term_press = true;
+                if (terminalCellAt(session, size.cols, size.rows, x, y)) |cell| {
+                    session.term_sel_anchor = cell;
+                    session.term_sel_head = cell;
+                }
+                return;
+            }
+            if (button == 32 and session.term_press) { // drag: extend
+                if (terminalCellAt(session, size.cols, size.rows, x, y)) |cell| {
+                    session.term_sel_head = cell;
+                }
+                return;
+            }
+            if (final == 'm' and session.term_press) { // release: copy
+                session.term_press = false;
+                terminalCopy(session, msg_buf, msg);
                 return;
             }
             if (button == 35 or button == 32) return;
         }
+    }
+    // Dragging with the button held extends a text selection.
+    if (button == 32 and session.press_text) {
+        if (y < 2 or y >= size.rows) return;
+        const node = paneUnder(session, x, y) orelse return;
+        if (node != session.panes.focus) return;
+        const rect = session.panes.rectOf(node) orelse return;
+        const gutter: usize = if (session.config.line_numbers) digits(ed.lineCount()) + 1 else 0;
+        const px = if (x > 0) @as(usize, x) - 1 else 0;
+        const py = @as(usize, y) - 1;
+        const row = ed.scroll_row + (py - rect.y);
+        const col = if (px >= rect.x + gutter) px - rect.x - gutter + ed.scroll_col else 0;
+        const anchor = session.drag_anchor;
+        ed.gotoLineCol(row, col);
+        ed.sel_anchor = anchor;
+        return;
+    }
+    // Releasing the button ends the drag (and keeps the selection).
+    if (final == 'm' and session.press_text) {
+        session.press_text = false;
+        return;
     }
     if (button == 64 or button == 65) { // wheel up / down
         // Over the tab bar the wheel scrolls the strip instead of the text.
@@ -1398,6 +1456,10 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
     const row = target.scroll_row + (sy - rect.y);
     const col = if (sx >= rect.x + gutter) sx - rect.x - gutter + target.scroll_col else 0;
     target.gotoLineCol(row, col);
+    // A press on text starts a potential drag selection from where the cursor
+    // landed; a plain click leaves anchor == cursor, which is no selection.
+    session.press_text = true;
+    session.drag_anchor = target.cursor;
     // Click counting: the same cell within CLICK_MS is a double click, a third
     // is a triple. Anywhere else, or after a pause, starts over at one.
     const now = os.ticksMs();
@@ -1463,12 +1525,9 @@ fn terminalRect(session: *Session, cols: u16, rows: u16) TermRect {
 /// F8: start the shell the first time, then hand the keyboard back and forth.
 fn toggleTerminal(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
     if (session.terminal != null) {
+        // No status message: the panel title already shows where the keyboard
+        // is, and the status line is for the editor's own news.
         session.terminal_focus = !session.terminal_focus;
-        if (session.terminal_focus) {
-            setMsg(msg_buf, msg, "F8: back to the editor  Shift+F8: close");
-        } else {
-            setMsg(msg_buf, msg, "terminal runs on: F8 goes back to it");
-        }
         return;
     }
     const sz = term.size();
@@ -1487,7 +1546,6 @@ fn toggleTerminal(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
         return;
     };
     session.terminal_focus = true;
-    setMsg(msg_buf, msg, "F8: back to the editor  Shift+F8: close");
 }
 
 /// Shift+F8: stop the shell and drop the panel.
@@ -1498,6 +1556,15 @@ fn closeTerminal(session: *Session) void {
         session.terminal = null;
     }
     session.terminal_focus = false;
+    session.term_sel_anchor = null;
+    session.term_sel_head = null;
+    session.term_press = false;
+}
+
+/// True for an SGR mouse report (`ESC [ < b ; x ; y M`), which the mouse
+/// handler owns even while the terminal has the keyboard.
+fn isMouseReport(chunk: []const u8) bool {
+    return chunk.len >= 3 and chunk[0] == 0x1b and chunk[1] == '[' and chunk[2] == '<';
 }
 
 const TermAct = enum { back, close, page_up, page_down, line_up, line_down, top, live };
@@ -1561,35 +1628,53 @@ fn handleTerminalInput(session: *Session, chunk: []const u8, msg_buf: []u8, msg:
 fn drawTerminal(s: *render.Screen, session: *Session, t: *terminal_mod.Terminal, cols: u16, rows: u16, theme: config_mod.Theme) void {
     const g = terminalRect(session, cols, rows);
     if (g.h == 0 or g.w == 0) return;
-    // Title row. Shells often set the title to their full path, so show the
-    // last component; anything else ("vim notes.txt") is left alone.
+    const pad: usize = @min(session.config.terminal_padding, g.w / 4);
+    const content_rows = g.h - 1;
+    const inner_w = if (g.w > pad * 2) g.w - pad * 2 else g.w;
+    const inner_x = g.x + pad;
+
+    // The panel is its own surface: fill it first so the padding reads as part
+    // of the panel instead of as editor background.
+    var yy: usize = 0;
+    while (yy < g.h) : (yy += 1) {
+        var xx: usize = 0;
+        while (xx < g.w) : (xx += 1) s.put(@intCast(g.x + xx), @intCast(g.y + yy), .{ .ch = ' ', .bg = theme.panel_bg });
+    }
+
+    // Title row: the shell's name, and how far back the scrollback view is.
+    // Shells often set the title to their full path, so show the last part.
     var code_buf: [32]u8 = undefined;
+    var title_buf: [220]u8 = undefined;
     const reported = t.titleText();
     const name = if (reported.len > 0) baseName(reported) else "terminal";
     const state: []const u8 = if (t.exit_code) |code| blk: {
         if (code == 0) break :blk "  exited";
         break :blk std.fmt.bufPrint(&code_buf, "  exited ({d})", .{code}) catch "  exited";
-    } else if (session.terminal_focus) "  F8 back to the editor  Shift+F8 closes" else "  F8 to type here";
-    var line_buf: [220]u8 = undefined;
-    const head = std.fmt.bufPrint(&line_buf, " {s}{s}", .{ name, state }) catch " terminal";
+    } else if (t.view != 0) blk: {
+        break :blk std.fmt.bufPrint(&code_buf, "  -{d} lines", .{t.view}) catch "";
+    } else "";
+    const head = std.fmt.bufPrint(&title_buf, " {s}{s}", .{ name, state }) catch " terminal";
     var x: usize = 0;
     while (x < g.w) : (x += 1) {
         const ch: u21 = if (x < head.len) head[x] else ' ';
-        s.put(@intCast(g.x + x), @intCast(g.y), .{ .ch = ch, .fg = theme.hint_fg, .bg = theme.bar_bg, .attr = .{ .bold = true } });
+        const fg = if (session.terminal_focus) theme.accent else theme.hint_fg;
+        s.put(@intCast(g.x + x), @intCast(g.y), .{ .ch = ch, .fg = fg, .bg = theme.tab_bar_bg, .attr = .{ .bold = true } });
     }
-    // Content: the grid, offset by the scrollback view.
-    const content_rows = g.h - 1;
+
+    // Content: the grid, offset by the scrollback view, inside the padding.
+    const sel = terminalSelection(session);
     var r: usize = 0;
     while (r < content_rows) : (r += 1) {
         const cells = t.vt.line(@intCast(r));
         x = 0;
-        while (x < g.w and x < cells.len) : (x += 1) {
+        while (x < inner_w and x < cells.len) : (x += 1) {
             const c = cells[x];
             if (c.ch == 0) continue; // second half of a wide glyph
-            s.put(@intCast(g.x + x), @intCast(g.y + 1 + r), .{
+            const selected = if (sel) |sr| terminalCellSelected(sr, x, r) else false;
+            s.put(@intCast(inner_x + x), @intCast(g.y + 1 + r), .{
                 .ch = c.ch,
                 .fg = mapColor(c.fg, theme.text),
-                .bg = mapColor(c.bg, theme.background),
+                .bg = if (selected) selectionColor(theme) else mapColor(c.bg, theme.panel_bg),
                 .attr = .{
                     .bold = c.attr.bold,
                     .underline = c.attr.underline,
@@ -1601,25 +1686,120 @@ fn drawTerminal(s: *render.Screen, session: *Session, t: *terminal_mod.Terminal,
             });
         }
     }
-    // Block cursor, only on the live screen.
+
+    // The cursor is always visible: a filled block when the shell shows it, a
+    // hollow (underlined) cell when the shell hid it, which is what most
+    // terminals do and what makes a hidden-cursor prompt obvious.
     if (t.view == 0) {
         const cur = t.vt.cursor();
-        if (cur.visible and cur.x < g.w and cur.y < content_rows) {
+        if (cur.x < inner_w and cur.y < content_rows) {
             const cells = t.vt.line(cur.y);
             const under: render.Cell = if (cur.x < cells.len) .{
                 .ch = if (cells[cur.x].ch == 0) ' ' else cells[cur.x].ch,
                 .fg = mapColor(cells[cur.x].fg, theme.text),
-                .bg = mapColor(cells[cur.x].bg, theme.background),
+                .bg = mapColor(cells[cur.x].bg, theme.panel_bg),
             } else .{ .ch = ' ' };
-            s.put(@intCast(g.x + cur.x), @intCast(g.y + 1 + cur.y), .{
-                .ch = under.ch,
-                .fg = under.bg,
-                .bg = under.fg,
-                .attr = .{ .reverse = true },
-            });
+            if (cur.visible) {
+                s.put(@intCast(inner_x + cur.x), @intCast(g.y + 1 + cur.y), .{
+                    .ch = under.ch,
+                    .fg = under.bg,
+                    .bg = under.fg,
+                    .attr = .{ .reverse = true },
+                });
+            } else {
+                s.put(@intCast(inner_x + cur.x), @intCast(g.y + 1 + cur.y), .{
+                    .ch = under.ch,
+                    .fg = under.fg,
+                    .bg = under.bg,
+                    .attr = .{ .underline = true },
+                });
+            }
         }
     }
 }
+
+/// The terminal selection in content coordinates: [x0, y0] to [x1, y1], with
+/// the rows in order (the drag may have gone backwards).
+const TermSelection = struct { x0: u16, y0: u16, x1: u16, y1: u16 };
+
+fn terminalSelection(session: *Session) ?TermSelection {
+    const a = session.term_sel_anchor orelse return null;
+    const h = session.term_sel_head orelse return null;
+    const forward = h[1] > a[1] or (h[1] == a[1] and h[0] >= a[0]);
+    if (forward) return .{ .x0 = a[0], .y0 = a[1], .x1 = h[0], .y1 = h[1] };
+    return .{ .x0 = h[0], .y0 = h[1], .x1 = a[0], .y1 = a[1] };
+}
+
+fn terminalCellSelected(sel: TermSelection, x: usize, y: usize) bool {
+    if (y < sel.y0 or y > sel.y1) return false;
+    const xx: u16 = @intCast(x);
+    if (sel.y0 == sel.y1) return xx >= sel.x0 and xx <= sel.x1;
+    if (y == sel.y0) return xx >= sel.x0;
+    if (y == sel.y1) return xx <= sel.x1;
+    return true;
+}
+
+/// Copy the selected terminal cells into the register and the system clipboard.
+/// Rows are trimmed at the end so a selection of screen cells copies like text.
+fn terminalCopy(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
+    const sel = terminalSelection(session) orelse return;
+    const t = if (session.terminal) |*tp| tp else return;
+    const ed = session.current();
+    ed.register.clearRetainingCapacity();
+    var y: usize = sel.y0;
+    while (y <= sel.y1) : (y += 1) {
+        const cells = t.vt.line(@intCast(y));
+        var start: usize = 0;
+        var end: usize = @min(cells.len, @as(usize, 65535));
+        if (y == sel.y0) start = @min(sel.x0, end);
+        if (y == sel.y1) end = @min(@as(usize, sel.x1) + 1, end);
+        // Trailing blanks are screen, not text.
+        while (end > start and (cells[end - 1].ch == ' ' or cells[end - 1].ch == 0)) end -= 1;
+        var i: usize = start;
+        while (i < end) : (i += 1) {
+            const cp = cells[i].ch;
+            if (cp == 0) continue;
+            var buf: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(cp, &buf) catch continue;
+            ed.register.appendSlice(session.allocator, buf[0..n]) catch return;
+        }
+        if (y < sel.y1) ed.register.append(session.allocator, '\n') catch return;
+    }
+    if (ed.register.items.len == 0) return;
+    sendOsc52(ed.register.items) catch {};
+    var line: [64]u8 = undefined;
+    const text = std.fmt.bufPrint(&line, "copied {d} chars", .{ed.register.items.len}) catch "copied";
+    setMsg(msg_buf, msg, text);
+}
+
+/// Right click in the panel: paste the register into the shell, wrapped in
+/// bracketed-paste markers when the shell asked for them.
+fn terminalPaste(session: *Session) void {
+    const t = if (session.terminal) |*tp| tp else return;
+    const text = session.current().register.items;
+    if (text.len == 0) return;
+    var buf: [4096]u8 = undefined;
+    t.sendKeys(t.pasteBytes(text, &buf));
+}
+
+/// Screen cell -> terminal content cell, or null when the pointer is outside the
+/// panel's content area.
+fn terminalCellAt(session: *Session, cols: u16, rows: u16, x: u16, y: u16) ?[2]u16 {
+    if (session.terminal == null) return null;
+    const g = terminalRect(session, cols, rows);
+    if (g.h < 2 or g.w == 0) return null;
+    const pad: usize = @min(session.config.terminal_padding, g.w / 4);
+    if (y == 0) return null;
+    const row = @as(usize, y) - 1;
+    const col = if (x > 0) @as(usize, x) - 1 else 0;
+    const content_top = g.y + 1;
+    if (row < content_top or row >= g.y + g.h) return null;
+    const inner_w = if (g.w > pad * 2) g.w - pad * 2 else g.w;
+    if (col < g.x + pad or col >= g.x + pad + inner_w) return null;
+    return .{ @intCast(col - g.x - pad), @intCast(row - content_top) };
+}
+
+
 
 /// Terminal colours are the terminal host's palette, so indexed and RGB values
 /// pass straight through; only "default" needs a theme colour.
@@ -2524,6 +2704,48 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
 /// Draw one pane's document inside `r`. Only the focused pane draws the block
 /// cursor and the current-line tint, so the focus is visible even when the
 /// panes are narrow.
+/// The selection must never disappear into the surface behind it. Some themes
+/// pick a selection colour almost equal to the background (and the current-line
+/// tint then hides it completely), so when the contrast is too low, blend the
+/// background toward the text colour until the band is visible.
+fn selectionColor(theme: config_mod.Theme) render.Color {
+    const sel = theme.selection;
+    const bg = switch (theme.background) {
+        .rgb => |c| c,
+        else => return sel, // the terminal's own background: trust the theme
+    };
+    const s = switch (sel) {
+        .rgb => |c| c,
+        else => return sel,
+    };
+    const distance = channelDistance(s, bg);
+    if (distance >= 60) return sel;
+    const fg = switch (theme.text) {
+        .rgb => |c| c,
+        else => return .{ .rgb = .{ .r = 0x44, .g = 0x55, .b = 0x77 } },
+    };
+    // A quarter of the way to the text colour: clearly a band, still a
+    // background rather than a block of bright cells.
+    return .{ .rgb = .{
+        .r = mix(bg.r, fg.r, 25),
+        .g = mix(bg.g, fg.g, 25),
+        .b = mix(bg.b, fg.b, 25),
+    } };
+}
+
+fn channelDistance(a: anytype, b: anytype) u32 {
+    const dr = if (a.r > b.r) a.r - b.r else b.r - a.r;
+    const dg = if (a.g > b.g) a.g - b.g else b.g - a.g;
+    const db = if (a.b > b.b) a.b - b.b else b.b - a.b;
+    return @as(u32, dr) + @as(u32, dg) + @as(u32, db);
+}
+
+fn mix(a: u8, b: u8, percent: u32) u8 {
+    const av: u32 = a;
+    const bv: u32 = b;
+    return @intCast((av * (100 - percent) + bv * percent) / 100);
+}
+
 fn drawPane(s: *render.Screen, session: *Session, ed: *Editor, r: panes_mod.Rect, node: u8, focused: bool) void {
     if (r.w == 0 or r.h == 0) return;
     const theme = session.config.theme;
@@ -2542,7 +2764,7 @@ fn drawPane(s: *render.Screen, session: *Session, ed: *Editor, r: panes_mod.Rect
     const right = r.x + r.w;
     const gutter_fg = theme.gutter;
     const text_fg = theme.text;
-    const sel_bg = theme.selection;
+    const sel_bg = selectionColor(theme);
     const sel = ed.selectionRange();
     const rc = ed.rowCol();
     const line_bg = theme.lineHighlight();
@@ -2699,10 +2921,10 @@ fn drawTree(s: *render.Screen, t: *tree_mod.Tree, focused: bool, h: usize, theme
     const rows = h - 2;
     t.ensureVisible(rows);
 
-    // The sidebar is a bar like the tab strip and the status line, so it takes
-    // the bar background: darker than the editor, visibly its own surface.
-    const bg = theme.bar_bg;
-    const sel_bg = theme.selection;
+    // Each surface has its own shade, so the sidebar, the tab strip, the status
+    // line and the terminal panel read as different planes of one theme.
+    const bg = theme.tree_bg;
+    const sel_bg = selectionColor(theme);
     var y: usize = 1;
     while (y < h - 1) : (y += 1) {
         var x: usize = 0;
@@ -2964,7 +3186,7 @@ fn snapScrollUp(session: *Session, target: usize) usize {
 
 fn drawTabBar(s: *render.Screen, session: *Session, w: usize, text_fg: render.Color, dim_fg: render.Color) void {
     const theme = session.config.theme;
-    const bar_bg = theme.tab_bg;
+    const bar_bg = theme.tab_bar_bg;
     const active_bg = theme.tab_active_bg;
     session.tab_count = 0;
     session.new_tab_x = 0xFFFF;
