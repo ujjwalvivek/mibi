@@ -617,12 +617,14 @@ fn run(init: std.process.Init.Minimal) !void {
     var pending: [1024]u8 = undefined;
     var pending_len: usize = 0;
 
+    var needs_redraw = true;
     while (running) {
         const now = term.size();
         if (now.cols != screen.cols or now.rows != screen.rows) {
             try screen.resize(now.cols, now.rows);
             @memset(screen.front, render.Cell{ .ch = 0, .attr = .{ .bold = true, .underline = true, .reverse = true } });
             try term.write("\x1b[2J");
+            needs_redraw = true;
         }
 
         // Keep the view on the cursor; when the view scrolls, repaint the whole
@@ -660,9 +662,12 @@ fn run(init: std.process.Init.Minimal) !void {
             }
         }
 
-        draw(&screen, &session, msg, prompt, help);
-        if (picker_state) |*pk| drawPicker(&screen, pk, picker_mode, session.config.theme);
-        try screen.render();
+        if (needs_redraw) {
+            draw(&screen, &session, msg, prompt, help);
+            if (picker_state) |*pk| drawPicker(&screen, pk, picker_mode, session.config.theme);
+            try screen.render();
+            needs_redraw = false;
+        }
 
         const n = try term.readInput(&input);
         if (n == 0) {
@@ -676,7 +681,7 @@ fn run(init: std.process.Init.Minimal) !void {
             // again. This is what makes the tree and open files keep up.
             if (term.takeIdle()) {
                 zero_reads = 0;
-                refreshFromDisk(&session);
+                if (refreshFromDisk(&session)) needs_redraw = true;
                 continue;
             }
             zero_reads += 1;
@@ -691,6 +696,7 @@ fn run(init: std.process.Init.Minimal) !void {
         pending_len += n;
 
         msg = "";
+        needs_redraw = true;
         const view_rows = viewRows(screen.rows);
         // Consume whole tokens. A prompt can close in the middle of a chunk
         // (Enter), after which the remaining bytes are ordinary editing input.
@@ -1315,9 +1321,13 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
 
 /// Housekeeping on an idle tick: the file tree follows the disk, and clean
 /// buffers reload when their file changes underneath us.
-fn refreshFromDisk(session: *Session) void {
-    if (session.tree) |*t| t.refreshIfChanged();
-    for (session.docs.items) |ed| ed.reloadIfChanged();
+fn refreshFromDisk(session: *Session) bool {
+    var changed = false;
+    if (session.tree) |*t| changed = t.refreshIfChanged();
+    for (session.docs.items) |ed| {
+        if (ed.reloadIfChanged()) changed = true;
+    }
+    return changed;
 }
 
 /// Split a configured command into argv, replacing `{file}` with the path so

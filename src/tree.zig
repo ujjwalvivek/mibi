@@ -211,21 +211,22 @@ pub const Tree = struct {
 
     /// Re-read the directories this tree shows when the listing changed, and
     /// keep the selected entry selected. Cheap enough to run twice a second.
-    pub fn refreshIfChanged(self: *Tree) void {
+    pub fn refreshIfChanged(self: *Tree) bool {
         var sig: u64 = 0xcbf29ce484222325;
         var names = std.ArrayList([]u8).empty;
         defer {
             for (names.items) |n| self.allocator.free(n);
             names.deinit(self.allocator);
         }
-        if (!self.stampDirs(&sig, &names)) return; // listing unavailable
-        if (sig == self.listing_sig) return;
+        if (!self.stampDirs(&sig, &names)) return false; // listing unavailable
+        if (sig == self.listing_sig) return false;
         self.listing_sig = sig;
         var sel_buf: [MAX_PATH * 2]u8 = undefined;
         var sel_len: usize = 0;
         if (self.selectedPath(&sel_buf)) |p| sel_len = @min(p.len, sel_buf.len);
-        self.reload() catch return;
+        self.reload() catch return false;
         if (sel_len > 0) self.selectPath(sel_buf[0..sel_len]);
+        return true;
     }
 
     fn stampDirs(self: *Tree, sig: *u64, names: *std.ArrayList([]u8)) bool {

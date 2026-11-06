@@ -647,21 +647,22 @@ pub const Editor = struct {
 
     /// Re-read the file when it changed on disk underneath us. Only clean
     /// buffers are reloaded: unsaved edits are never thrown away.
-    pub fn reloadIfChanged(self: *Editor) void {
-        const path = self.path orelse return;
-        if (self.dirty) return;
+    pub fn reloadIfChanged(self: *Editor) bool {
+        const path = self.path orelse return false;
+        if (self.dirty) return false;
         const now = os.fileStamp(path);
-        if (now == 0 or now == self.stamp) return;
-        const data = os.readFileAlloc(self.allocator, path, 16 * 1024 * 1024) catch return;
+        if (now == 0 or now == self.stamp) return false;
+        const data = os.readFileAlloc(self.allocator, path, 16 * 1024 * 1024) catch return false;
         defer self.allocator.free(data);
         self.stamp = now;
-        if (std.mem.eql(u8, data, self.text())) return;
+        if (std.mem.eql(u8, data, self.text())) return false;
         self.buf.deinit();
-        self.buf = buffer.Buffer.init(self.allocator, data) catch return;
+        self.buf = buffer.Buffer.init(self.allocator, data) catch return false;
         if (self.cursor > self.buf.len()) self.cursor = self.buf.len();
         self.sel_anchor = null;
         self.clearCursors();
         self.invalidateSyntax(0);
+        return true;
     }
 
     /// Replace the whole buffer as one undo step (used by the formatter),

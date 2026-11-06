@@ -359,6 +359,8 @@ pub fn getEnvAlloc(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
 /// Zero when the file cannot be examined. Windows only for now (the idle
 /// refresh is a no-op elsewhere).
 pub fn fileStamp(path: []const u8) u64 {
+    // Windows only for now: std has no portable stat here yet, and the idle
+    // refresh simply does nothing when the stamp is unknown.
     if (!is_windows) return 0;
     const wpath = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path) catch return 0;
     defer std.heap.page_allocator.free(wpath);
