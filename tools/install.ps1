@@ -24,8 +24,11 @@ foreach ($dir in 'syntax.d', 'themes') {
     $from = Join-Path $src $dir
     if (-not (Test-Path $from)) { continue }
     $to = Join-Path $Target $dir
+    # Replace the contents, not the directory: `Copy-Item $from $to -Recurse`
+    # with an existing $to nests a second copy inside it (syntax.d\syntax.d).
     Remove-Item $to -Recurse -Force -ErrorAction SilentlyContinue
-    Copy-Item $from $to -Recurse -Force
+    New-Item -ItemType Directory -Force $to | Out-Null
+    Copy-Item (Join-Path $from '*') $to -Recurse -Force
 }
 
 # Keep the user's config: only seed it the first time.
