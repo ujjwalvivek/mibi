@@ -129,7 +129,7 @@ packaging.
 | `Ctrl+T` / `Ctrl+W`       | new tab / close tab (closing the last one quits)      |
 | `Ctrl+PgUp` / `Ctrl+PgDn` | previous / next tab                                   |
 | `F5` / `F7`               | split the pane side by side / stacked                 |
-| `Shift+F5`                | close the focused pane (its file stays open as a tab)  |
+| `Shift+F5` / `Shift+F7`   | close the focused pane (its file stays open as a tab)  |
 | `F6` / `Shift+F6`         | next / previous pane (or click a pane)                |
 | `F2`                      | theme picker (arrows preview live, Enter keeps and saves, Esc restores) |
 | `Ctrl+P`                  | command palette: every action, fuzzy-filtered |

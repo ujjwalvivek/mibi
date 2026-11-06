@@ -1066,8 +1066,9 @@ def dragging_a_tab_onto_a_pane_splits_it(m, path):
     m.send("\x1b[<0;3;1M")  # press the notes.txt tab
     m.send("\x1b[<32;72;12M")  # drag it over the right pane's right third
     m.wait_quiet()
-    hint = m.screen_text()
-    assert "\u250c" in hint, f"no drop hint while dragging:\n{hint}"
+    hint = m.screen_text().splitlines()
+    # A single accent line marks where the new divider will land.
+    assert hint[5][60] == "\u2502", f"no drop hint line while dragging:\n" + "\n".join(hint)
     m.shot("34-drop-hint")
     m.send("\x1b[<0;72;12m")  # release
     m.wait_quiet()

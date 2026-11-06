@@ -982,6 +982,12 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
     const y = nums[2];
     const ed = session.current();
 
+    // A press always starts fresh: a release that never arrived must not leave
+    // a drag chip or a drop hint behind.
+    if (button == 0 and final == 'M') {
+        session.drag_tab = null;
+        session.drop_zone = null;
+    }
     // Tab bar: the "x" closes a tab, "+" opens one, the arrows scroll the
     // strip, the label switches (and starts a drag).
     if (button == 0 and final == 'M' and y == 1) {
@@ -1190,24 +1196,39 @@ fn drawDropHint(s: *render.Screen, session: *Session, dz: DropZone, theme: confi
         .bottom => .{ .x = r.x, .y = r.y + r.h / 2, .w = r.w, .h = r.h - r.h / 2 },
     };
     if (rect.w < 2 or rect.h < 2) return;
-    const bg = theme.accent;
-    const fg = theme.background;
-    const right = rect.x + rect.w - 1;
-    const bottom = rect.y + rect.h - 1;
-    var x = rect.x;
-    while (x <= right) : (x += 1) {
-        s.put(@intCast(x), @intCast(rect.y), .{ .ch = '\u{2500}', .fg = fg, .bg = bg });
-        s.put(@intCast(x), @intCast(bottom), .{ .ch = '\u{2500}', .fg = fg, .bg = bg });
+    // One cell wide: the line where the new divider will land, no box.
+    const fg = theme.accent;
+    const bg = theme.background;
+    switch (dz.side) {
+        .left => {
+            const x = rect.x + rect.w;
+            var y = rect.y;
+            while (y < rect.y + rect.h) : (y += 1) {
+                s.put(@intCast(x), @intCast(y), .{ .ch = '\u{2502}', .fg = fg, .bg = bg, .attr = .{ .bold = true } });
+            }
+        },
+        .right => {
+            const x = rect.x;
+            var y = rect.y;
+            while (y < rect.y + rect.h) : (y += 1) {
+                s.put(@intCast(x), @intCast(y), .{ .ch = '\u{2502}', .fg = fg, .bg = bg, .attr = .{ .bold = true } });
+            }
+        },
+        .top => {
+            const y = rect.y + rect.h;
+            var x = rect.x;
+            while (x < rect.x + rect.w) : (x += 1) {
+                s.put(@intCast(x), @intCast(y), .{ .ch = '\u{2500}', .fg = fg, .bg = bg, .attr = .{ .bold = true } });
+            }
+        },
+        .bottom => {
+            const y = rect.y;
+            var x = rect.x;
+            while (x < rect.x + rect.w) : (x += 1) {
+                s.put(@intCast(x), @intCast(y), .{ .ch = '\u{2500}', .fg = fg, .bg = bg, .attr = .{ .bold = true } });
+            }
+        },
     }
-    var yy = rect.y;
-    while (yy <= bottom) : (yy += 1) {
-        s.put(@intCast(rect.x), @intCast(yy), .{ .ch = '\u{2502}', .fg = fg, .bg = bg });
-        s.put(@intCast(right), @intCast(yy), .{ .ch = '\u{2502}', .fg = fg, .bg = bg });
-    }
-    s.put(@intCast(rect.x), @intCast(rect.y), .{ .ch = '\u{250c}', .fg = fg, .bg = bg });
-    s.put(@intCast(right), @intCast(rect.y), .{ .ch = '\u{2510}', .fg = fg, .bg = bg });
-    s.put(@intCast(rect.x), @intCast(bottom), .{ .ch = '\u{2514}', .fg = fg, .bg = bg });
-    s.put(@intCast(right), @intCast(bottom), .{ .ch = '\u{2518}', .fg = fg, .bg = bg });
 }
 
 /// Rows available for document text: everything but the tab bar and status line.
@@ -1266,7 +1287,7 @@ fn defaultKeyFor(action: keys.Action, shift: bool) DefaultKey {
         .next_tab => .{ .csi = .{ .params = "6;5", .final = '~' } },
         .prev_tab => .{ .csi = .{ .params = "5;5", .final = '~' } },
         .split_columns => .{ .csi = .{ .params = "15", .final = '~' } }, // F5
-        .close_pane => .{ .csi = .{ .params = "15;2", .final = '~' } }, // Shift+F5
+        .close_pane => .{ .csi = .{ .params = if (shift) "18;2" else "15;2", .final = '~' } }, // Shift+F5 / Shift+F7
         .split_rows => .{ .csi = .{ .params = "18", .final = '~' } }, // F7
         .next_pane => .{ .csi = .{ .params = "17", .final = '~' } }, // F6
         .prev_pane => .{ .csi = .{ .params = if (shift) "17;2" else "17;5", .final = '~' } },
@@ -1712,7 +1733,7 @@ fn applyCsi(
             6 => if (ctrl) session.cycle(1) else ed.movePage(1, view_rows, shift),
             15 => if (shift) session.closePane() else try session.splitFocused(.columns), // F5 / Shift+F5
             17 => session.cyclePane(if (shift) -1 else 1), // F6 / Shift+F6
-            18 => try session.splitFocused(.rows), // F7
+            18 => if (shift) session.closePane() else try session.splitFocused(.rows), // F7 / Shift+F7
             else => {},
         },
         else => {},
@@ -1832,6 +1853,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
         const idx = session.docIndex(session.panes.nodes[pr.node].doc) orelse continue;
         drawPane(s, session, session.docs.items[idx], pr.rect, pr.node == session.panes.focus);
     }
+    if (session.drag_tab == null) session.drop_zone = null;
     if (session.drop_zone) |dz| drawDropHint(s, session, dz, theme);
     // Separators; the ones beside the focused pane glow in the accent colour.
     const focus_rect = session.panes.rectOf(session.panes.focus);
