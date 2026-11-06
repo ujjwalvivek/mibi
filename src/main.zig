@@ -141,6 +141,7 @@ const Session = struct {
     /// Tab pressed on but not yet dragged: a click switches, a drag reorders.
     press_tab: ?usize = null,
     press_x: u16 = 0,
+    press_y: u16 = 0,
     /// Where a tab being dragged would land if dropped on a pane.
     drop_zone: ?DropZone = null,
     /// Tab under the pointer (shows its path in the status line).
@@ -351,7 +352,15 @@ const Session = struct {
         // lands in the new split, rather than being shown twice.
         if (self.panes.paneWithDoc(doc)) |node| {
             if (node == zone.node) {
+                // Dropping a tab on the pane it is already in still splits:
+                // the other half gets a scratch buffer, so the file lands on
+                // the side you dropped it.
+                if (self.panes.live >= panes_mod.MAX_PANES) return;
+                const dir: panes_mod.Dir = if (zone.side == .left or zone.side == .right) .columns else .rows;
+                const first = zone.side == .left or zone.side == .top;
                 self.panes.focus = node;
+                self.add(null, "", null) catch return; // the scratch takes this pane
+                if (!self.panes.splitAt(node, dir, doc, first)) return;
                 self.active = tab;
                 return;
             }
@@ -1020,6 +1029,7 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
                 // so clicking a tab never flashes the drag chip.
                 session.press_tab = i;
                 session.press_x = x;
+                session.press_y = y;
                 session.drag_to = i;
                 return;
             }
@@ -1028,8 +1038,11 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
     if (session.press_tab) |from| {
         if (button == 32) { // motion while held
             if (session.drag_tab == null) {
-                const moved = if (x > session.press_x) x - session.press_x else session.press_x - x;
-                if (moved < DRAG_THRESHOLD) return; // still a click
+                const dx = if (x > session.press_x) x - session.press_x else session.press_x - x;
+                const dy = if (y > session.press_y) y - session.press_y else session.press_y - y;
+                // Either axis counts: dragging straight down from the tab bar
+                // into a pane is a drag too, not just a sideways one.
+                if (@max(dx, dy) < DRAG_THRESHOLD) return; // still a click
                 session.drag_tab = from;
             }
             session.drag_x = x;
@@ -1196,39 +1209,25 @@ fn drawDropHint(s: *render.Screen, session: *Session, dz: DropZone, theme: confi
         .bottom => .{ .x = r.x, .y = r.y + r.h / 2, .w = r.w, .h = r.h - r.h / 2 },
     };
     if (rect.w < 2 or rect.h < 2) return;
-    // One cell wide: the line where the new divider will land, no box.
-    const fg = theme.accent;
-    const bg = theme.background;
-    switch (dz.side) {
-        .left => {
-            const x = rect.x + rect.w;
-            var y = rect.y;
-            while (y < rect.y + rect.h) : (y += 1) {
-                s.put(@intCast(x), @intCast(y), .{ .ch = '\u{2502}', .fg = fg, .bg = bg, .attr = .{ .bold = true } });
-            }
-        },
-        .right => {
-            const x = rect.x;
-            var y = rect.y;
-            while (y < rect.y + rect.h) : (y += 1) {
-                s.put(@intCast(x), @intCast(y), .{ .ch = '\u{2502}', .fg = fg, .bg = bg, .attr = .{ .bold = true } });
-            }
-        },
-        .top => {
-            const y = rect.y + rect.h;
-            var x = rect.x;
-            while (x < rect.x + rect.w) : (x += 1) {
-                s.put(@intCast(x), @intCast(y), .{ .ch = '\u{2500}', .fg = fg, .bg = bg, .attr = .{ .bold = true } });
-            }
-        },
-        .bottom => {
-            const y = rect.y;
-            var x = rect.x;
-            while (x < rect.x + rect.w) : (x += 1) {
-                s.put(@intCast(x), @intCast(y), .{ .ch = '\u{2500}', .fg = fg, .bg = bg, .attr = .{ .bold = true } });
-            }
-        },
+    // A one-cell box around the area the tab would land in.
+    const bg = theme.accent;
+    const fg = theme.background;
+    const right = rect.x + rect.w - 1;
+    const bottom = rect.y + rect.h - 1;
+    var x = rect.x;
+    while (x <= right) : (x += 1) {
+        s.put(@intCast(x), @intCast(rect.y), .{ .ch = '\u{2500}', .fg = fg, .bg = bg });
+        s.put(@intCast(x), @intCast(bottom), .{ .ch = '\u{2500}', .fg = fg, .bg = bg });
     }
+    var yy = rect.y;
+    while (yy <= bottom) : (yy += 1) {
+        s.put(@intCast(rect.x), @intCast(yy), .{ .ch = '\u{2502}', .fg = fg, .bg = bg });
+        s.put(@intCast(right), @intCast(yy), .{ .ch = '\u{2502}', .fg = fg, .bg = bg });
+    }
+    s.put(@intCast(rect.x), @intCast(rect.y), .{ .ch = '\u{250c}', .fg = fg, .bg = bg });
+    s.put(@intCast(right), @intCast(rect.y), .{ .ch = '\u{2510}', .fg = fg, .bg = bg });
+    s.put(@intCast(rect.x), @intCast(bottom), .{ .ch = '\u{2514}', .fg = fg, .bg = bg });
+    s.put(@intCast(right), @intCast(bottom), .{ .ch = '\u{2518}', .fg = fg, .bg = bg });
 }
 
 /// Rows available for document text: everything but the tab bar and status line.
@@ -3875,6 +3874,35 @@ test "dragging a tab onto another pane splits it" {
     draw(&s, &d.session, "", null, false);
     try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
     try std.testing.expectEqual(@as(usize, 2), d.session.panes.sep_count + 1);
+}
+
+test "dragging a tab straight down into its own pane splits it" {
+    var d = try Drive.start("one\ntwo");
+    defer d.stop();
+    var s = try render.Screen.init(std.testing.allocator, 40, 10);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+
+    var help = false;
+    var pr: ?Prompt = null;
+    var mb: [64]u8 = undefined;
+    var msg: []const u8 = "";
+    // Press the tab, then move straight down into the text area: the drag must
+    // promote on the vertical axis too.
+    handleMouse(&d.session, "<0;3;1", 'M', &help, &pr, &mb, &msg);
+    handleMouse(&d.session, "<32;3;6", 'M', &help, &pr, &mb, &msg);
+    try std.testing.expect(d.session.drag_tab != null);
+    try std.testing.expect(d.session.drop_zone != null);
+    handleMouse(&d.session, "<0;3;6", 'm', &help, &pr, &mb, &msg);
+    draw(&s, &d.session, "", null, false);
+
+    // One pane became two, with the file on the left and a scratch on the right.
+    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
+    try std.testing.expectEqual(@as(usize, 1), d.session.panes.sep_count);
+    const left = d.session.docIndex(d.session.panes.nodes[d.session.panes.rects[0].node].doc).?;
+    const right = d.session.docIndex(d.session.panes.nodes[d.session.panes.rects[1].node].doc).?;
+    try std.testing.expectEqualStrings("one\ntwo", d.session.docs.items[left].text());
+    try std.testing.expectEqualStrings("", d.session.docs.items[right].text());
 }
 
 test "F6 moves the focus between panes" {

@@ -1066,9 +1066,8 @@ def dragging_a_tab_onto_a_pane_splits_it(m, path):
     m.send("\x1b[<0;3;1M")  # press the notes.txt tab
     m.send("\x1b[<32;72;12M")  # drag it over the right pane's right third
     m.wait_quiet()
-    hint = m.screen_text().splitlines()
-    # A single accent line marks where the new divider will land.
-    assert hint[5][60] == "\u2502", f"no drop hint line while dragging:\n" + "\n".join(hint)
+    hint = m.screen_text()
+    assert "\u250c" in hint, f"no drop hint box while dragging:\n{hint}"
     m.shot("34-drop-hint")
     m.send("\x1b[<0;72;12m")  # release
     m.wait_quiet()
@@ -1080,6 +1079,22 @@ def dragging_a_tab_onto_a_pane_splits_it(m, path):
     right = "\n".join(row[sep + 1:] for row in lines[1:-1])
     assert "hello" in right, f"the dropped tab is not in the right pane:\n{right!r}"
     m.shot("35-drag-split")
+
+
+@check
+def dragging_a_tab_down_splits_the_pane(m, path):
+    """Press a tab and drag straight down: the drag promotes and the pane splits."""
+    m.wait_quiet()
+    m.send("\x1b[<0;3;1M")  # press the tab
+    m.send("\x1b[<32;3;12M")  # straight down into the text area
+    m.wait_quiet()
+    hint = m.screen_text()
+    assert "\u250c" in hint, f"no drop hint box while dragging:\n{hint}"
+    m.send("\x1b[<0;3;12m")  # release
+    m.wait_quiet()
+    screen = m.screen_text()
+    assert "\u2502" in screen, f"the vertical drag did not split the pane:\n{screen}"
+    m.shot("36-drag-down")
 
 
 @check
