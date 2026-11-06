@@ -56,6 +56,7 @@ const help_rows = [_]HelpRow{
     .{ .actions = &.{ .next_tab, .prev_tab }, .desc = "next / previous tab" },
     .{ .actions = &.{ .split_columns, .close_pane, .next_pane }, .desc = "split / unsplit / next" },
     .{ .literal = "ctrl+alt+up/down", .desc = "add a cursor above / below" },
+    .{ .actions = &.{.format}, .desc = "format with the configured tool" },
     .{ .actions = &.{.help}, .desc = "toggle this help" },
     .{ .actions = &.{.quit}, .desc = "quit (asks if unsaved)" },
     .{ .literal = "click / wheel", .desc = "cursor, tabs, pickers / scroll" },
@@ -1250,6 +1251,9 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
     }
 
     if (button != 0) return; // primary button only
+    // A click is a press. The matching release arrives as its own event and
+    // must not act again, or one click toggles a folder twice.
+    if (final != 'M') return;
 
     // File tree: click a row to select it, click again to open or expand.
     if (session.tree) |*t| {
@@ -1298,6 +1302,91 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
     const row = target.scroll_row + (sy - rect.y);
     const col = if (sx >= rect.x + gutter) sx - rect.x - gutter + target.scroll_col else 0;
     target.gotoLineCol(row, col);
+}
+
+/// Split a configured command into argv, replacing `{file}` with the path so
+/// tools can pick a parser. Arguments are stored in `buf`.
+fn buildArgv(cmd: []const u8, file: []const u8, out: *[16][]const u8, buf: []u8) usize {
+    var n: usize = 0;
+    var b: usize = 0;
+    var i: usize = 0;
+    while (i < cmd.len and n < out.len) {
+        while (i < cmd.len and (cmd[i] == ' ' or cmd[i] == '\t')) i += 1;
+        if (i >= cmd.len) break;
+        const start = b;
+        while (i < cmd.len and cmd[i] != ' ' and cmd[i] != '\t') {
+            if (cmd[i] == '{' and i + 6 <= cmd.len and std.mem.eql(u8, cmd[i .. i + 6], "{file}")) {
+                for (file) |c| {
+                    if (b < buf.len) {
+                        buf[b] = c;
+                        b += 1;
+                    }
+                }
+                i += 6;
+            } else {
+                if (b < buf.len) {
+                    buf[b] = cmd[i];
+                    b += 1;
+                }
+                i += 1;
+            }
+        }
+        out[n] = buf[start..b];
+        n += 1;
+    }
+    return n;
+}
+
+/// Run the formatter configured for this file and replace the buffer with what
+/// it prints. Every failure is reported in the status line rather than being
+/// silent.
+fn formatBuffer(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
+    const ed = session.current();
+    const path = ed.path orelse {
+        setMsg(msg_buf, msg, "Save the file first: no formatter for an untitled buffer");
+        return;
+    };
+    const cmd = session.config.formatCommandFor(path) orelse {
+        setMsg(msg_buf, msg, "No formatter configured for this file type");
+        return;
+    };
+    var argv_buf: [16][]const u8 = undefined;
+    var text_buf: [1024]u8 = undefined;
+    const argc = buildArgv(cmd, path, &argv_buf, &text_buf);
+    if (argc == 0) {
+        setMsg(msg_buf, msg, "Formatter command is empty");
+        return;
+    }
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(session.allocator);
+    const state_dir = g_session_dir orelse ".";
+    const res = os.runCommand(session.allocator, state_dir, argv_buf[0..argc], ed.text(), &out, 10_000) catch |e| {
+        var why: [96]u8 = undefined;
+        const line = std.fmt.bufPrint(&why, "Could not start the formatter ({s})", .{@errorName(e)}) catch "Could not start the formatter";
+        setMsg(msg_buf, msg, line);
+        return;
+    };
+    if (res.timed_out) {
+        setMsg(msg_buf, msg, "Formatter timed out");
+        return;
+    }
+    if (res.exit_code != 0) {
+        setMsg(msg_buf, msg, "Formatter failed");
+        return;
+    }
+    if (out.items.len == 0) {
+        setMsg(msg_buf, msg, "Formatter produced no output");
+        return;
+    }
+    if (std.mem.eql(u8, out.items, ed.text())) {
+        setMsg(msg_buf, msg, "Already formatted");
+        return;
+    }
+    ed.replaceText(out.items) catch {
+        setMsg(msg_buf, msg, "Could not apply the formatted text");
+        return;
+    };
+    setMsg(msg_buf, msg, "Formatted");
 }
 
 /// The pane under a 1-based screen cell, if any.
@@ -1412,6 +1501,7 @@ fn defaultKeyFor(action: keys.Action, shift: bool) DefaultKey {
         .prev_tab => .{ .csi = .{ .params = "5;5", .final = '~' } },
         .split_columns => .{ .csi = .{ .params = "15", .final = '~' } }, // F5
         .close_pane => .{ .csi = .{ .params = if (shift) "18;2" else "15;2", .final = '~' } }, // Shift+F5 / Shift+F7
+        .format => .{ .csi = .{ .params = "14", .final = '~' } }, // F4
         .add_cursor_below => .{ .csi = .{ .params = "1;7", .final = 'B' } }, // Ctrl+Alt+Down
         .add_cursor_above => .{ .csi = .{ .params = "1;7", .final = 'A' } }, // Ctrl+Alt+Up
         .split_rows => .{ .csi = .{ .params = "18", .final = '~' } }, // F7
@@ -1531,6 +1621,7 @@ fn applyByte(
     }
     const ed = session.current();
     if (b == 0x13) { // Ctrl+S: save, or ask for a name
+        if (session.config.format_on_save and ed.path != null) formatBuffer(session, msg_buf, msg);
         if (ed.path == null) {
             prompt.* = .{ .kind = .save_as };
         } else ed.save() catch |e| {
@@ -1870,6 +1961,7 @@ fn applyCsi(
             11 => help.* = !help.*, // F1
             5 => if (ctrl) session.cycle(-1) else ed.movePage(-1, view_rows, shift),
             6 => if (ctrl) session.cycle(1) else ed.movePage(1, view_rows, shift),
+            14 => formatBuffer(session, msg_buf, msg), // F4: format
             15 => if (shift) session.closePane() else try session.splitFocused(.columns), // F5 / Shift+F5
             17 => session.cyclePane(if (shift) -1 else 1), // F6 / Shift+F6
             18 => if (shift) session.closePane() else try session.splitFocused(.rows), // F7 / Shift+F7
@@ -4029,6 +4121,41 @@ test "backspace deletes at every cursor" {
     try d.send("\x1b[C"); // both cursors one cell right
     try d.send("\x7f"); // and one backspace each
     try std.testing.expectEqualStrings("a\nb", d.session.current().text());
+}
+
+test "F4 runs the configured formatter and replaces the buffer" {
+    const path = "mibi-format-test.txt";
+    defer os.deleteFile(path) catch {};
+    try os.writeFile(path, "b\na\n");
+    var d = try Drive.start("");
+    defer d.stop();
+    try openViaPicker(&d.session, std.testing.allocator, ".", path);
+
+    // `findstr /n` numbers the lines: a deterministic stand-in for a formatter
+    // that really runs a child process and really replaces the buffer.
+    const cmd = if (os.is_windows) "cmd.exe /c findstr /n ." else "cat -n";
+    var rule = &d.session.config.format_rules[0];
+    @memcpy(rule.ext[0..3], "txt");
+    rule.ext_len = 3;
+    @memcpy(rule.cmd[0..cmd.len], cmd);
+    rule.cmd_len = cmd.len;
+    d.session.config.format_count = 1;
+
+    try d.send("\x1b[14~"); // F4
+    const text = d.session.current().text();
+    try std.testing.expect(std.mem.indexOf(u8, text, "1:b") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "2:a") != null);
+    try std.testing.expect(d.session.current().dirty);
+    try std.testing.expect(std.mem.indexOf(u8, d.msg, "Formatted") != null);
+}
+
+test "formatting without a configured tool says so" {
+    var d = try Drive.start("x");
+    defer d.stop();
+    try d.send("\x1b[14~"); // F4, no path and no rule
+    try std.testing.expect(std.mem.indexOf(u8, d.msg, "formatter") != null);
+    // Nothing was changed.
+    try std.testing.expectEqualStrings("x", d.session.current().text());
 }
 
 test "esc closes the help panel" {

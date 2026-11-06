@@ -641,6 +641,20 @@ pub const Editor = struct {
         self.invalidateSyntax(self.rowCol().row);
     }
 
+    /// Replace the whole buffer as one undo step (used by the formatter),
+    /// keeping the cursor inside the new text.
+    pub fn replaceText(self: *Editor, bytes: []const u8) !void {
+        try self.beginEdit(false);
+        try self.buf.delete(0, self.buf.len());
+        try self.buf.insert(0, bytes);
+        if (self.cursor > self.buf.len()) self.cursor = self.buf.len();
+        self.sel_anchor = null;
+        self.clearCursors();
+        self.dirty = true;
+        self.pref_col = null;
+        self.invalidateSyntax(0);
+    }
+
     pub fn deleteSelection(self: *Editor) !void {
         const r = self.selectionRange() orelse return;
         try self.beginEdit(false);

@@ -50,6 +50,7 @@ pub const Action = enum {
     split_rows,
     close_pane,
     add_cursor_below,
+    format,
     add_cursor_above,
     next_pane,
     prev_pane,

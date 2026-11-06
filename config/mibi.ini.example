@@ -43,3 +43,23 @@ syntax = true
 ; ctrl+n = new_tab
 ; f2 = save
 ; ctrl+shift+left = move_word_left
+; Formatting: one command per file extension. mibi runs it with the buffer on
+; stdin and replaces the buffer with what it prints, so any formatter works.
+; `{file}` is replaced by the file's path (tools use it to pick a parser).
+; F4 formats now; on_save = true also formats before every save.
+; A missing tool, a non-zero exit, empty output or a 10 s timeout is reported
+; in the status line and the buffer is left untouched.
+[format]
+; on_save = false
+; js   = prettier --stdin-filepath {file}
+; ts   = prettier --stdin-filepath {file}
+; json = prettier --stdin-filepath {file}
+; md   = prettier --stdin-filepath {file}
+; css  = biome format --stdin-file-path {file}
+; zig  = zig fmt --stdin
+; py   = black -q -
+; go   = gofmt
+; rs   = rustfmt
+; c    = clang-format
+; sh   = shfmt
+; toml = taplo fmt -

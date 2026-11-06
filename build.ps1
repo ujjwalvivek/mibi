@@ -30,7 +30,7 @@ $env:ZIG_GLOBAL_CACHE_DIR = Join-Path $Root '.zig-cache-global'
 # editor reads `mibi.ini` from its own directory (or the working directory);
 # once created it is yours to edit and later builds leave it alone.
 $ini = Join-Path $Root 'zig-out\bin\mibi.ini'
-$ini_example = Join-Path $Root 'mibi.ini.example'
+$ini_example = Join-Path $Root 'config\mibi.ini.example'
 if ((Test-Path $ini_example) -and -not (Test-Path $ini)) {
     New-Item -ItemType Directory -Force (Split-Path $ini) | Out-Null
     Copy-Item $ini_example $ini

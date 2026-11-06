@@ -32,7 +32,7 @@ toolchain (0.16.0) is fetched into `tools/zig` on first use.
 
 ## Configuration
 
-`.build.ps1` seeds `zig-out\bin\mibi.ini` from `mibi.ini.example` the first
+`.build.ps1` seeds `zig-out\bin\mibi.ini` from `config/mibi.ini.example` the first
 time it builds (later builds leave your edits alone). Copy it next to the binary
 or into the directory you run mibi from; it is optional and every key falls back
 to a default. Unknown keys are ignored.
@@ -243,6 +243,28 @@ See [docs/CHANGELOG.md](docs/CHANGELOG.md); the current release is **v0.0.2**.
 
 MIT - see [LICENSE](LICENSE). The installer copies the licence next to the
 binary, so an installed mibi always carries it.
+
+## Formatting
+
+`F4` runs the formatter configured for the file's extension. mibi pipes the
+buffer to the command on stdin and replaces the buffer with what it prints, so
+any tool works - Prettier, Biome, `zig fmt`, `black`, `gofmt`, `rustfmt`,
+`clang-format`, `shfmt`, `taplo`, `dprint`, whatever you have:
+
+```ini
+[format]
+on_save = false
+zig  = zig fmt --stdin
+py   = black -q -
+js   = prettier --stdin-filepath {file}
+css  = biome format --stdin-file-path {file}
+```
+
+`{file}` becomes the file's path so tools can pick a parser. The edit is one
+undo step and keeps the cursor. Failures are reported, never silent: no
+formatter for the type, the tool missing, a non-zero exit, empty output or a
+10 second timeout all leave the buffer untouched and say so in the status line.
+`on_save = true` formats before every save.
 
 ## Session state
 

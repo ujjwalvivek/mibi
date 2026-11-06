@@ -61,6 +61,54 @@ const win = struct {
     extern "kernel32" fn GetConsoleWindow() callconv(.winapi) ?*anyopaque;
     extern "kernel32" fn CreateDirectoryW(lpPathName: [*:0]const u16, lpSecurityAttributes: ?*anyopaque) callconv(.winapi) c_int;
     extern "kernel32" fn GetCurrentDirectoryW(nBufferLength: DWORD, lpBuffer: [*]u16) callconv(.winapi) DWORD;
+    extern "kernel32" fn CreateProcessW(
+        lpApplicationName: ?[*:0]const u16,
+        lpCommandLine: [*:0]u16,
+        lpProcessAttributes: ?*anyopaque,
+        lpThreadAttributes: ?*anyopaque,
+        bInheritHandles: c_int,
+        dwCreationFlags: DWORD,
+        lpEnvironment: ?*anyopaque,
+        lpCurrentDirectory: ?[*:0]const u16,
+        lpStartupInfo: *STARTUPINFOW,
+        lpProcessInformation: *PROCESS_INFORMATION,
+    ) callconv(.winapi) c_int;
+    extern "kernel32" fn WaitForSingleObject(hHandle: HANDLE, dwMilliseconds: DWORD) callconv(.winapi) DWORD;
+    extern "kernel32" fn GetExitCodeProcess(hProcess: HANDLE, lpExitCode: *DWORD) callconv(.winapi) c_int;
+    extern "kernel32" fn TerminateProcess(hProcess: HANDLE, uExitCode: c_uint) callconv(.winapi) c_int;
+    extern "kernel32" fn SetHandleInformation(hObject: HANDLE, dwMask: DWORD, dwFlags: DWORD) callconv(.winapi) c_int;
+
+    const STARTUPINFOW = extern struct {
+        cb: DWORD = 0,
+        lpReserved: ?[*:0]u16 = null,
+        lpDesktop: ?[*:0]u16 = null,
+        lpTitle: ?[*:0]u16 = null,
+        dwX: DWORD = 0,
+        dwY: DWORD = 0,
+        dwXSize: DWORD = 0,
+        dwYSize: DWORD = 0,
+        dwXCountChars: DWORD = 0,
+        dwYCountChars: DWORD = 0,
+        dwFillAttribute: DWORD = 0,
+        dwFlags: DWORD = 0,
+        wShowWindow: u16 = 0,
+        cbReserved2: u16 = 0,
+        lpReserved2: ?[*]u8 = null,
+        hStdInput: HANDLE = INVALID_HANDLE_VALUE,
+        hStdOutput: HANDLE = INVALID_HANDLE_VALUE,
+        hStdError: HANDLE = INVALID_HANDLE_VALUE,
+    };
+
+    const PROCESS_INFORMATION = extern struct {
+        hProcess: HANDLE = INVALID_HANDLE_VALUE,
+        hThread: HANDLE = INVALID_HANDLE_VALUE,
+        dwProcessId: DWORD = 0,
+        dwThreadId: DWORD = 0,
+    };
+
+    const STARTF_USESTDHANDLES: DWORD = 0x00000100;
+    const WAIT_OBJECT_0: DWORD = 0;
+    const WAIT_TIMEOUT: DWORD = 0x00000102;
     extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
     extern "user32" fn MessageBoxW(hWnd: ?*anyopaque, lpText: [*:0]const u16, lpCaption: [*:0]const u16, uType: c_uint) callconv(.winapi) c_int;
     extern "user32" fn ShowWindow(hWnd: ?*anyopaque, nCmdShow: c_int) callconv(.winapi) c_int;
@@ -307,6 +355,185 @@ pub fn getEnvAlloc(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     return allocator.dupe(u8, v[0..n]);
 }
 
+/// Result of running a command: its exit status, and whether it had to be
+/// killed for running too long.
+pub const RunResult = struct {
+    exit_code: i32 = -1,
+    timed_out: bool = false,
+};
+
+/// Run `argv` with `input` as its standard input, writing what it prints to
+/// `out`. Standard input and output are files rather than pipes, so a chatty
+/// formatter can never deadlock us and no threads are needed.
+pub fn runCommand(
+    allocator: std.mem.Allocator,
+    state_dir: []const u8,
+    argv: []const []const u8,
+    input: []const u8,
+    out: *std.ArrayList(u8),
+    timeout_ms: u32,
+) !RunResult {
+    if (argv.len == 0) return error.InvalidCommand;
+    const tmp = try std.fmt.allocPrint(allocator, "{s}/tmp", .{state_dir});
+    defer allocator.free(tmp);
+    try makeDirAll(tmp);
+    const in_path = try std.fmt.allocPrint(allocator, "{s}/cmd-in.txt", .{tmp});
+    defer allocator.free(in_path);
+    const out_path = try std.fmt.allocPrint(allocator, "{s}/cmd-out.txt", .{tmp});
+    defer allocator.free(out_path);
+    try writeFile(in_path, input);
+    deleteFile(out_path) catch {};
+    // Empty output means "the tool wrote nothing"; the caller treats that as
+    // "no change".
+    writeFile(out_path, "") catch {};
+
+    var result = RunResult{};
+    if (is_windows) {
+        result = try runWindows(allocator, argv, in_path, out_path, timeout_ms);
+    } else {
+        result = try runUnix(allocator, argv, in_path, out_path, timeout_ms);
+    }
+    if (readFileAlloc(allocator, out_path, 64 * 1024 * 1024)) |data| {
+        defer allocator.free(data);
+        try out.appendSlice(allocator, data);
+    } else |_| {}
+    return result;
+}
+
+fn runWindows(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    in_path: []const u8,
+    out_path: []const u8,
+    timeout_ms: u32,
+) !RunResult {
+    const in_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, in_path);
+    defer allocator.free(in_w);
+    const out_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, out_path);
+    defer allocator.free(out_w);
+
+    const h_in = win.CreateFileW(in_w.ptr, win.GENERIC_READ, 1, null, win.OPEN_EXISTING, win.FILE_ATTRIBUTE_NORMAL, null);
+    if (h_in == win.INVALID_HANDLE_VALUE) return error.OpenFailed;
+    defer _ = win.CloseHandle(h_in);
+    const h_out = win.CreateFileW(out_w.ptr, 0x40000000, 1, null, win.CREATE_ALWAYS, win.FILE_ATTRIBUTE_NORMAL, null);
+    if (h_out == win.INVALID_HANDLE_VALUE) return error.OpenFailed;
+    defer _ = win.CloseHandle(h_out);
+    _ = win.SetHandleInformation(h_in, 1, 1);
+    _ = win.SetHandleInformation(h_out, 1, 1);
+
+    // Command line: quote every argument that needs it.
+    var cmd = std.ArrayList(u8).empty;
+    defer cmd.deinit(allocator);
+    for (argv, 0..) |arg, i| {
+        if (i > 0) try cmd.append(allocator, ' ');
+        try appendQuoted(&cmd, allocator, arg);
+    }
+    const cmd_z = try std.unicode.utf8ToUtf16LeAllocZ(allocator, cmd.items);
+    defer allocator.free(cmd_z);
+
+    var si = win.STARTUPINFOW{ .cb = @sizeOf(win.STARTUPINFOW), .dwFlags = win.STARTF_USESTDHANDLES, .hStdInput = h_in, .hStdOutput = h_out, .hStdError = h_out };
+    var pi = win.PROCESS_INFORMATION{};
+    const ok = win.CreateProcessW(null, cmd_z.ptr, null, null, 1, 0, null, null, &si, &pi);
+    if (ok == 0) return error.SpawnFailed;
+    defer _ = win.CloseHandle(pi.hThread);
+    defer _ = win.CloseHandle(pi.hProcess);
+
+    var result = RunResult{};
+    const wait = win.WaitForSingleObject(pi.hProcess, timeout_ms);
+    if (wait == win.WAIT_TIMEOUT) {
+        _ = win.TerminateProcess(pi.hProcess, 1);
+        _ = win.WaitForSingleObject(pi.hProcess, 2000);
+        result.timed_out = true;
+    }
+    var code: win.DWORD = 0;
+    if (win.GetExitCodeProcess(pi.hProcess, &code) != 0) result.exit_code = @intCast(code);
+    return result;
+}
+
+fn runUnix(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    in_path: []const u8,
+    out_path: []const u8,
+    timeout_ms: u32,
+) !RunResult {
+    const in_z = try allocator.dupeZ(u8, in_path);
+    defer allocator.free(in_z);
+    const out_z = try allocator.dupeZ(u8, out_path);
+    defer allocator.free(out_z);
+    // argv as a null-terminated vector.
+    var vec = std.ArrayList(?[*:0]const u8).empty;
+    defer vec.deinit(allocator);
+    var owned = std.ArrayList([:0]u8).empty;
+    defer {
+        for (owned.items) |z| allocator.free(z);
+        owned.deinit(allocator);
+    }
+    for (argv) |a| {
+        const z = try allocator.dupeZ(u8, a);
+        try owned.append(allocator, z);
+        try vec.append(allocator, z.ptr);
+    }
+    try vec.append(allocator, null);
+
+    const pid = std.c.fork();
+    if (pid < 0) return error.SpawnFailed;
+    if (pid == 0) {
+        // Child: redirect and exec.
+        const fd_in = std.c.open(in_z.ptr, .{ .ACCMODE = .RDONLY }, @as(c_uint, 0));
+        if (fd_in >= 0) {
+            _ = std.c.dup2(fd_in, 0);
+            _ = std.c.close(fd_in);
+        }
+        const fd_out = std.c.open(out_z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c_uint, 0o644));
+        if (fd_out >= 0) {
+            _ = std.c.dup2(fd_out, 1);
+            _ = std.c.dup2(fd_out, 2);
+            _ = std.c.close(fd_out);
+        }
+        _ = std.c.execv(vec.items[0].?, @ptrCast(vec.items.ptr));
+        std.c._exit(127);
+    }
+
+    var result = RunResult{};
+    var status: c_int = 0;
+    const deadline: u64 = @as(u64, timeout_ms);
+    var waited: u64 = 0;
+    while (true) {
+        const r = std.c.waitpid(pid, &status, 1); // WNOHANG
+        if (r == pid) {
+            result.exit_code = if (std.c.W.IFEXITED(status)) @intCast(std.c.W.EXITSTATUS(status)) else -1;
+            return result;
+        }
+        if (waited >= deadline) {
+            _ = std.c.kill(pid, 9);
+            _ = std.c.waitpid(pid, &status, 0);
+            result.timed_out = true;
+            return result;
+        }
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+        waited += 10;
+    }
+}
+
+/// Quote one argument for the Windows command line.
+fn appendQuoted(list: *std.ArrayList(u8), allocator: std.mem.Allocator, arg: []const u8) !void {
+    var needs = arg.len == 0;
+    for (arg) |c| {
+        if (c == ' ' or c == '\t' or c == '"') needs = true;
+    }
+    if (!needs) {
+        try list.appendSlice(allocator, arg);
+        return;
+    }
+    try list.append(allocator, '"');
+    for (arg) |c| {
+        if (c == '"') try list.append(allocator, '\\');
+        try list.append(allocator, c);
+    }
+    try list.append(allocator, '"');
+}
+
 /// Create `path` and any missing parents (a no-op when it already exists).
 pub fn makeDirAll(path: []const u8) !void {
     if (path.len == 0) return;
@@ -331,13 +558,16 @@ pub fn makeDirAll(path: []const u8) !void {
 pub fn dataDirAlloc(allocator: std.mem.Allocator) ![]u8 {
     if (is_windows) {
         if (getEnvAlloc(allocator, "LOCALAPPDATA")) |v| {
+            defer allocator.free(v);
             return std.fmt.allocPrint(allocator, "{s}/Mibi", .{v});
         } else |_| {}
     }
     if (getEnvAlloc(allocator, "XDG_STATE_HOME")) |v| {
+        defer allocator.free(v);
         return std.fmt.allocPrint(allocator, "{s}/Mibi", .{v});
     } else |_| {}
     if (getEnvAlloc(allocator, "HOME")) |v| {
+        defer allocator.free(v);
         return std.fmt.allocPrint(allocator, "{s}/.local/state/Mibi", .{v});
     } else |_| {}
     return allocator.dupe(u8, ".");

@@ -31,7 +31,7 @@ foreach ($dir in 'syntax.d', 'themes') {
 # Keep the user's config: only seed it the first time.
 $ini = Join-Path $Target 'mibi.ini'
 if (-not (Test-Path $ini)) {
-    Copy-Item (Join-Path $Root 'mibi.ini.example') $ini -Force
+    Copy-Item (Join-Path $Root 'config\mibi.ini.example') $ini -Force
 }
 
 # Launcher: run inside the mibi profile so the terminal uses the Nerd Font.

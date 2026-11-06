@@ -20,6 +20,7 @@ experiments/out/
 
 # Runtime and test scratch
 mibi.ini
+config/mibi.ini
 mibi-session
 mibi-session-buf-*.txt
 mibi-input.log

@@ -78,6 +78,37 @@ pub const Config = struct {
     source_len: usize = 0,
     /// Set when the saved theme name has no matching themes/<name>.ini.
     theme_missing: bool = false,
+    /// `[format]`: one command per file extension, and whether to run it on
+    /// every save.
+    format_rules: [16]FormatRule = [_]FormatRule{.{}} ** 16,
+    format_count: usize = 0,
+    format_on_save: bool = false,
+
+    pub const FormatRule = struct {
+        ext: [16]u8 = [_]u8{0} ** 16,
+        ext_len: usize = 0,
+        cmd: [256]u8 = [_]u8{0} ** 256,
+        cmd_len: usize = 0,
+
+        pub fn extension(self: *const FormatRule) []const u8 {
+            return self.ext[0..self.ext_len];
+        }
+
+        pub fn command(self: *const FormatRule) []const u8 {
+            return self.cmd[0..self.cmd_len];
+        }
+    };
+
+    /// The formatter command configured for this path's extension, if any.
+    pub fn formatCommandFor(self: *const Config, path: ?[]const u8) ?[]const u8 {
+        const p = path orelse return null;
+        const ext = extensionOf(p);
+        if (ext.len == 0) return null;
+        for (self.format_rules[0..self.format_count]) |*r| {
+            if (std.ascii.eqlIgnoreCase(r.extension(), ext)) return r.command();
+        }
+        return null;
+    }
 
     pub fn themeName(self: *const Config) []const u8 {
         return self.theme_name[0..self.theme_name_len];
@@ -143,6 +174,17 @@ fn setThemeColor(theme: *Theme, key: []const u8, value: []const u8) void {
     }
 }
 
+/// The extension of a path, without the dot ("" when there is none).
+pub fn extensionOf(path: []const u8) []const u8 {
+    var i = path.len;
+    while (i > 0) : (i -= 1) {
+        const c = path[i - 1];
+        if (c == '/' or c == '\\') return "";
+        if (c == '.') return path[i..];
+    }
+    return "";
+}
+
 /// Apply an INI document to `config`. Sections are optional: a bare
 /// `key = value` is treated as `[editor]`.
 pub fn apply(config: *Config, text: []const u8) void {
@@ -154,6 +196,25 @@ pub fn apply(config: *Config, text: []const u8) void {
         }
         if (std.mem.eql(u8, entry.section, "keys")) {
             if (keys.actionFromName(entry.value)) |action| config.keys.add(entry.key, action);
+            continue;
+        }
+        if (std.mem.eql(u8, entry.section, "format")) {
+            if (std.mem.eql(u8, entry.key, "on_save")) {
+                if (parseBool(entry.value)) |b| config.format_on_save = b;
+            } else if (config.format_count < config.format_rules.len) {
+                const r = &config.format_rules[config.format_count];
+                var key = std.mem.trim(u8, entry.key, " \t");
+                if (key.len > 0 and key[0] == '.') key = key[1..];
+                if (key.len == 0) continue;
+                const n = @min(key.len, r.ext.len);
+                @memcpy(r.ext[0..n], key[0..n]);
+                r.ext_len = n;
+                const v = std.mem.trim(u8, entry.value, " \t");
+                const m = @min(v.len, r.cmd.len);
+                @memcpy(r.cmd[0..m], v[0..m]);
+                r.cmd_len = m;
+                config.format_count += 1;
+            }
             continue;
         }
         if (std.mem.eql(u8, entry.key, "tab_width")) {
