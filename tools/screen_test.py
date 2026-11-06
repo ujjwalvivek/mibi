@@ -855,6 +855,44 @@ def dragging_a_tab_reorders_it(m, path):
 
 
 @check
+def tabs_show_names_and_reveal_paths(m, path):
+    """Tabs show the file name; hover and drag reveal the path."""
+    work = os.path.join(SHOT_DIR, "work-tabnames")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(os.path.join(work, "src"))
+    with open(os.path.join(work, "src", "main.zig"), "w", encoding="utf-8") as f:
+        f.write("const a = 1;\n")
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello\n")
+
+    proc = Mibi(["src/main.zig"], cwd=work)
+    try:
+        assert proc.wait_for("const"), "editor did not start"
+        proc.wait_quiet()
+        bar = proc.screen_text().splitlines()[0]
+        assert "main.zig" in bar and "src/main.zig" not in bar, f"tab shows a path: {bar!r}"
+
+        proc.send("\x14")  # second tab
+        proc.wait_quiet()
+        proc.send("\x1b[<35;2;1M")  # hover the first tab
+        proc.wait_quiet()
+        status = proc.screen_text().splitlines()[-1]
+        assert "src/main.zig" in status, f"hover did not reveal the path: {status!r}"
+
+        proc.send("\x1b[<0;3;1M")  # press the first tab
+        proc.wait_quiet()
+        proc.send("\x1b[<32;20;1M")  # drag it right
+        proc.wait_quiet()
+        mid = proc.screen_text().splitlines()[0]
+        assert "src/main.zig" in mid, f"drag chip missing the path: {mid!r}"
+        proc.send("\x1b[<0;20;1m")  # release
+        proc.wait_quiet()
+        proc.shot("28-tabs")
+    finally:
+        proc.close()
+
+
+@check
 def unicode_and_wide_cells(m, path):
     """A CJK character takes two cells and does not break the layout."""
     m.send("\x1b[F")  # End of the current line

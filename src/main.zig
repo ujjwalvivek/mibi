@@ -122,9 +122,12 @@ const Session = struct {
     tab_count: usize = 0,
     /// Syntax registry, so UI paths (the tree) can pick a language.
     registry: ?*syntax.Registry = null,
-    /// Tab being dragged and where it would land.
+    /// Tab being dragged, where it would land, and the pointer column.
     drag_tab: ?usize = null,
     drag_to: usize = 0,
+    drag_x: u16 = 0,
+    /// Tab under the pointer (shows its path in the status line).
+    hover_tab: ?usize = null,
     /// File tree sidebar; null when closed.
     tree: ?tree_mod.Tree = null,
     tree_focus: bool = false,
@@ -696,6 +699,7 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, ms
     }
     if (session.drag_tab) |from| {
         if (button == 32) { // motion while held
+            session.drag_x = x;
             var to = from;
             var i: usize = 0;
             while (i < session.tab_count) : (i += 1) {
@@ -711,6 +715,7 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, ms
         if (final == 'm') { // release
             session.moveTab(from, session.drag_to);
             session.drag_tab = null;
+            session.hover_tab = null;
             return;
         }
     }
@@ -719,6 +724,22 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, ms
         ed.movePage(if (button == 64) -1 else 1, 1, false);
         return;
     }
+    // Hovering the tab bar shows that tab's path in the status line.
+    if (button == 35 or button == 32) {
+        session.hover_tab = null;
+        if (y == 1) {
+            var hi: usize = 0;
+            while (hi < session.tab_count) : (hi += 1) {
+                const span = session.tab_spans[hi];
+                if (x >= span[0] and x < span[1]) {
+                    session.hover_tab = hi;
+                    break;
+                }
+            }
+        }
+        if (button == 35) return;
+    }
+
     if (button != 0) return; // primary button only
 
     // File tree: click a row to select it, click again to open or expand.
@@ -1488,7 +1509,13 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
         }
         drawPrompt(s, p, w, h, bar_bg, accent, text_fg);
     } else {
-        drawStatus(s, ed, msg, w, h, rc, total, bar_bg, accent, hint_fg);
+        var status_msg = msg;
+    if (session.hover_tab) |hi| {
+        if (hi < session.docs.items.len) {
+            if (session.docs.items[hi].path) |hp| status_msg = hp;
+        }
+    }
+    drawStatus(s, ed, status_msg, w, h, rc, total, bar_bg, accent, hint_fg);
     }
 
     // The help panel covers the bottom rows, so a prompt (which lives on the
@@ -1661,29 +1688,58 @@ fn openTreeSelection(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
 }
 
 fn drawTabBar(s: *render.Screen, session: *Session, w: usize, text_fg: render.Color, dim_fg: render.Color) void {
-    const bar_bg = session.config.theme.tab_bg;
-    const active_bg = session.config.theme.tab_active_bg;
+    const theme = session.config.theme;
+    const bar_bg = theme.tab_bg;
+    const active_bg = theme.tab_active_bg;
     session.tab_count = 0;
     var x: usize = 0;
     while (x < w) : (x += 1) s.put(@intCast(x), 0, .{ .bg = bar_bg });
 
     var tx: usize = 0;
     for (session.docs.items, 0..) |ed, i| {
-        const name = ed.path orelse "[No Name]";
+        // File name only; the full path shows on hover and while dragging.
+        const name = if (ed.path) |p| baseName(p) else "[No Name]";
         var buf: [160]u8 = undefined;
         const label = std.fmt.bufPrint(&buf, " {s}{s} ", .{ name, if (ed.dirty) " [+]" else "" }) catch continue;
         if (tx + label.len > w) break;
         const active = i == session.active;
+        const hovered = session.hover_tab == i;
+        const dragging = session.drag_tab == i;
         s.putStr(@intCast(tx), 0, label, .{
-            .bg = if (active) active_bg else bar_bg,
-            .fg = if (active) text_fg else dim_fg,
-            .attr = .{ .bold = active },
+            .bg = if (dragging) theme.accent else if (active) active_bg else if (hovered) theme.selection else bar_bg,
+            .fg = if (dragging) bar_bg else if (active or hovered) text_fg else dim_fg,
+            .attr = .{ .bold = active or dragging, .underline = hovered and !active },
         });
         if (session.tab_count < MAX_TABS) {
             session.tab_spans[session.tab_count] = .{ @intCast(tx), @intCast(tx + label.len) };
             session.tab_count += 1;
         }
         tx += label.len;
+    }
+
+    // While dragging: a drop marker where the tab would land, and the tab
+    // itself following the pointer.
+    if (session.drag_tab) |from| {
+        if (session.drag_to < session.tab_count) {
+            const marker = session.tab_spans[session.drag_to][0];
+            if (marker < w) s.put(@intCast(marker), 0, .{ .ch = '\u{2502}', .bg = bar_bg, .fg = theme.accent });
+        }
+        const ed = session.docs.items[from];
+        const path = ed.path orelse "[No Name]";
+        var chip_buf: [300]u8 = undefined;
+        const chip = std.fmt.bufPrint(&chip_buf, " {s} ", .{path}) catch path;
+        const start_x: usize = if (session.drag_x > 0) @as(usize, session.drag_x) - 1 else 0;
+        var cx = start_x;
+        var i: usize = 0;
+        while (i < chip.len and cx < w) : (i += 1) {
+            s.put(@intCast(cx), 0, .{
+                .ch = chip[i],
+                .bg = theme.accent,
+                .fg = bar_bg,
+                .attr = .{ .bold = true },
+            });
+            cx += 1;
+        }
     }
 }
 
@@ -2070,6 +2126,17 @@ fn drawHelp(s: *render.Screen, session: *Session, w: usize, h: usize, theme: con
         const line = std.fmt.bufPrint(&line_buf, "  {s}{s}{s}", .{ keys_text, pad, help_rows[i].desc }) catch help_rows[i].desc;
         s.putStr(0, @intCast(top + 1 + i), line, .{ .bg = bg, .fg = fg });
     }
+}
+
+/// The last component of a path ("src/main.zig" -> "main.zig").
+fn baseName(path: []const u8) []const u8 {
+    var end = path.len;
+    while (end > 0 and (path[end - 1] == '/' or path[end - 1] == '\\')) end -= 1;
+    var i = end;
+    while (i > 0) : (i -= 1) {
+        if (path[i - 1] == '/' or path[i - 1] == '\\') return path[i..end];
+    }
+    return path[0..end];
 }
 
 /// The directory part of a typed path, or "." when there is none.
