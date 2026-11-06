@@ -198,6 +198,11 @@ const MOUSE_MOVED: DWORD = 0x0001;
             0x74 => return csi(out, mod, '~', 15), // F5: split side by side
             0x75 => return csi(out, mod, '~', 17), // F6: pane focus
             0x76 => return csi(out, mod, '~', 18), // F7: split stacked
+            0x77 => return csi(out, mod, '~', 19), // F8: embedded terminal
+            0x78 => return csi(out, mod, '~', 20), // F9
+            0x79 => return csi(out, mod, '~', 21), // F10
+            0x7a => return csi(out, mod, '~', 23), // F11
+            0x7b => return csi(out, mod, '~', 24), // F12
             else => {},
         }
 
@@ -481,7 +486,7 @@ pub fn readInput(buf: []u8, extra: ?ExtraHandle, timeout_ms: u32) !Input {
         .{ .fd = (extra orelse -1), .events = std.posix.POLL.IN, .revents = 0 },
     };
     const count: usize = if (extra == null) 1 else 2;
-    const ready = std.posix.poll(fds[0..count], timeout_ms) catch 1;
+    const ready = std.posix.poll(fds[0..count], @intCast(timeout_ms)) catch 1;
     if (ready == 0) {
         idle = true;
         return .{};

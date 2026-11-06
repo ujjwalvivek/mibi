@@ -32,21 +32,24 @@ boundary; never print via `std.debug` or `std.Io.Threaded`.
 
 ## mibi binary size by phase, cross-compiled
 
-| Target | Phase 1 (skeleton) | Phase 2 (editing) | Current (Phase 3 + Phase 4 features) |
-| --- | ---: | ---: | ---: |
-| `x86_64-linux-gnu` | 8,960 | 26,168 | 153,640 |
-| `aarch64-linux-gnu` | 8,816 | 24,752 | 140,432 |
-| `x86_64-macos` | 16,994 | 33,922 | 161,931 |
-| `aarch64-macos` | 50,304 | 69,392 | 183,512 |
-| `x86_64-windows-gnu` | 50,176 | 71,680 | 211,456 |
-| `x86_64-windows` | 55,808 | 69,632 | 211,456 |
+| Target | Phase 1 (skeleton) | Phase 2 (editing) | Phase 4 (current) | Phase 5 (terminal) |
+| --- | ---: | ---: | ---: | ---: |
+| `x86_64-linux-gnu` | 8,960 | 26,168 | 153,640 | 176,920 |
+| `aarch64-linux-gnu` | 8,816 | 24,752 | 140,432 | 161,184 |
+| `x86_64-macos` | 16,994 | 33,922 | 161,931 | 186,979 |
+| `aarch64-macos` | 50,304 | 69,392 | 183,512 | 219,560 |
+| `x86_64-windows-gnu` | 50,176 | 71,680 | 211,456 | 236,032 |
+| `x86_64-windows` | 55,808 | 69,632 | 211,456 | 236,032 |
 
 The hardening pass (cached line index, UTF-8 `putStr`, file-safety guards,
-richer error reporting) cost ~1.5-2 KB per target. Current numbers are explicit
-`-Dtarget=` builds (baseline CPU); a native build with host CPU features is
-105,984 bytes on Windows. `tools/check-size.ps1` (`.\build.ps1 size`) rebuilds
-all six targets and fails if one exceeds its budget, so a size trap cannot
-return unnoticed.
+richer error reporting) cost ~1.5-2 KB per target. The embedded terminal (phase
+5: ConPTY/`posix_openpt`, the 1,766-line VT parser and the panel) cost **22,560
+bytes on Windows** (213,472 -> 236,032), well inside its +150 KB phase gate: a
+pty is a kernel object, so the price is the parser and the scrollback code, not
+the platform layer. Current numbers are explicit `-Dtarget=` builds (baseline
+CPU); a native build with host CPU features is smaller. `tools/check-size.ps1`
+(`.\build.ps1 size`) rebuilds all six targets and fails if one exceeds its
+budget, so a size trap cannot return unnoticed.
 
 **Sorting is expensive.** `std.mem.sort` instantiated for a second element type
 cost ~17 KB on Linux: pdqsort is generic, so every `[]u8` comparator type gets

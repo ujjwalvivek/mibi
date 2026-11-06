@@ -21,6 +21,7 @@ const syntax = @import("syntax.zig");
 const picker = @import("picker.zig");
 const tree_mod = @import("tree.zig");
 const panes_mod = @import("panes.zig");
+const terminal_mod = @import("terminal.zig");
 const regex = @import("regex.zig");
 const config_mod = @import("config.zig");
 const keys = @import("keys.zig");
@@ -41,10 +42,8 @@ const help_rows = [_]HelpRow{
     .{ .actions = &.{ .move_home, .move_end }, .desc = "line start / end" },
     .{ .actions = &.{ .page_up, .page_down }, .desc = "move a page" },
     .{ .actions = &.{ .select_all, .clear_selection }, .desc = "select all / clear" },
-    .{ .actions = &.{ .copy, .cut }, .desc = "copy / cut" },
-    .{ .actions = &.{.paste}, .desc = "paste" },
-    .{ .actions = &.{.duplicate_line}, .desc = "duplicate line" },
-    .{ .actions = &.{ .undo, .redo }, .desc = "undo / redo" },
+    .{ .actions = &.{ .copy, .cut, .paste }, .desc = "copy / cut / paste" },
+    .{ .actions = &.{ .duplicate_line, .undo, .redo }, .desc = "duplicate line / undo / redo" },
     .{ .actions = &.{ .find, .find_next, .find_prev }, .desc = "find / next / previous" },
     .{ .actions = &.{.replace}, .desc = "replace" },
     .{ .actions = &.{.goto}, .desc = "go to line[:col]" },
@@ -55,12 +54,12 @@ const help_rows = [_]HelpRow{
     .{ .actions = &.{ .new_tab, .close_tab }, .desc = "new / close tab" },
     .{ .actions = &.{ .next_tab, .prev_tab }, .desc = "next / previous tab" },
     .{ .actions = &.{ .split_columns, .close_pane, .next_pane }, .desc = "split / unsplit / next" },
+    .{ .actions = &.{ .toggle_terminal, .close_terminal }, .desc = "terminal / close (shift+pgup scrolls)" },
     .{ .literal = "ctrl+alt+up/down", .desc = "add a cursor above / below" },
     .{ .actions = &.{.format}, .desc = "format with the configured tool" },
     .{ .actions = &.{.help}, .desc = "toggle this help" },
     .{ .actions = &.{.quit}, .desc = "quit (asks if unsaved)" },
-    .{ .literal = "click / wheel", .desc = "cursor, tabs, pickers / scroll" },
-    .{ .literal = "ctrl+b", .desc = "file tree (j/k, Enter, click)" },
+    .{ .literal = "click / wheel / ctrl+b", .desc = "cursor, tabs, pickers, scroll, file tree" },
 };
 
 pub const std_options: std.Options = .{
@@ -163,6 +162,10 @@ const Session = struct {
     click_x: u16 = 0,
     click_y: u16 = 0,
     click_count: u8 = 0,
+    /// The embedded terminal, once it has been opened, and whether the keyboard
+    /// goes to it instead of the editor.
+    terminal: ?terminal_mod.Terminal = null,
+    terminal_focus: bool = false,
     /// Where a tab being dragged would land if dropped on a pane.
     drop_zone: ?DropZone = null,
     /// Tab under the pointer (shows its path in the status line).
@@ -602,6 +605,7 @@ fn run(init: std.process.Init.Minimal) !void {
     g_exe_dir = exe_dir;
     term.installCloseHandler(saveSessionOnClose);
     var last_save_ms = os.ticksMs();
+    var last_housekeeping = os.ticksMs();
     var unsaved = false;
     var input: [256]u8 = undefined;
     var msg_buf: [96]u8 = undefined;
@@ -635,6 +639,18 @@ fn run(init: std.process.Init.Minimal) !void {
             @memset(screen.front, render.Cell{ .ch = 0, .attr = .{ .bold = true, .underline = true, .reverse = true } });
             try term.write("\x1b[2J");
             needs_redraw = true;
+        }
+
+        // Keep the shell's window in step with the panel, which moves when the
+        // console is resized or the panel is opened.
+        if (session.terminal) |*t| {
+            const g = terminalRect(&session, now.cols, now.rows);
+            const want_cols: u16 = @intCast(@max(g.w, 20));
+            const want_rows: u16 = @intCast(@max(g.h - 1, 3));
+            if (want_cols != t.vt.cols() or want_rows != t.vt.rows()) {
+                t.resize(want_cols, want_rows) catch {};
+                needs_redraw = true;
+            }
         }
 
         // Keep the view on the cursor; when the view scrolls, repaint the whole
@@ -679,7 +695,18 @@ fn run(init: std.process.Init.Minimal) !void {
             needs_redraw = false;
         }
 
-        const read = try term.readInput(&input, null, term.IDLE_MS);
+        const extra: ?term.ExtraHandle = if (session.terminal) |*t| t.outputHandle() else null;
+        // A visible terminal is pumped often so its output feels live; without
+        // one the loop only needs to wake for the idle tick.
+        const wait_ms: u32 = if (extra != null) 100 else term.IDLE_MS;
+        const read = try term.readInput(&input, extra, wait_ms);
+        if (read.extra) {
+            zero_reads = 0;
+            if (session.terminal) |*t| {
+                if (t.pump()) needs_redraw = true;
+            }
+            continue;
+        }
         const n = read.n;
         if (n == 0) {
             // Focus changes are not input, but a terminal that was in the
@@ -697,13 +724,18 @@ fn run(init: std.process.Init.Minimal) !void {
                 zero_reads = 0;
                 continue;
             }
-            // An idle tick: refresh anything that changed on disk, then wait
-            // again. This is what makes the tree and open files keep up.
+            // An idle tick: housekeeping on disk changes. The wait can be much
+            // shorter than the tick when a terminal is open, so the tick keeps
+            // its own cadence.
             if (term.takeIdle()) {
                 zero_reads = 0;
-                if (refreshFromDisk(&session, &msg_buf, &msg)) {
-                    dirtyAll(&screen);
-                    needs_redraw = true;
+                const now_ms = os.ticksMs();
+                if (now_ms - last_housekeeping >= term.IDLE_MS) {
+                    last_housekeeping = now_ms;
+                    if (refreshFromDisk(&session, &msg_buf, &msg)) {
+                        dirtyAll(&screen);
+                        needs_redraw = true;
+                    }
                 }
                 continue;
             }
@@ -727,6 +759,14 @@ fn run(init: std.process.Init.Minimal) !void {
         while (off < pending_len and running) {
             if (session.quit_requested) break;
             const chunk = pending[off..pending_len];
+            // The terminal owns the keyboard while it has focus: its keys go
+            // to the shell, not to the editor.
+            if (session.terminal_focus and session.terminal != null and prompt == null and picker_state == null) {
+                const used = handleTerminalInput(&session, chunk, &msg_buf, &msg);
+                if (used == 0) break; // a partial escape sequence: wait for more
+                off += used;
+                continue;
+            }
             if (session.tree_focus and session.tree != null and prompt == null and picker_state == null) {
                 if (handleTreeInput(&session, chunk, &msg_buf, &msg)) |consumed| {
                     off += consumed;
@@ -1242,6 +1282,23 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
         }
     }
     const size = term.size();
+    // The terminal panel owns its rows: a click focuses it, the wheel scrolls
+    // the shell's scrollback, and neither disturbs the editor behind it.
+    if (session.terminal != null) {
+        const g = terminalRect(session, size.cols, size.rows);
+        const row = if (y > 0) @as(usize, y) - 1 else 0;
+        if (g.h > 0 and row >= g.y and row + 1 < @as(usize, size.rows)) {
+            if (button == 64 or button == 65) {
+                if (session.terminal) |*t| t.scroll(if (button == 64) -1 else 1);
+                return;
+            }
+            if (button == 0 and final == 'M') {
+                session.terminal_focus = true;
+                return;
+            }
+            if (button == 35 or button == 32) return;
+        }
+    }
     if (button == 64 or button == 65) { // wheel up / down
         // Over the tab bar the wheel scrolls the strip instead of the text.
         if (y == 1) {
@@ -1334,6 +1391,7 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
     const sy = @as(usize, y) - 1;
     const node = paneUnder(session, x, y) orelse return;
     session.focusPane(node);
+    session.terminal_focus = false; // the click went to the editor
     const rect = session.panes.rectOf(node) orelse return;
     const target = session.current();
     const gutter: usize = if (session.config.line_numbers) digits(target.lineCount()) + 1 else 0;
@@ -1358,6 +1416,221 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
 
 /// Housekeeping on an idle tick: the file tree follows the disk, and clean
 /// buffers reload when their file changes underneath us.
+// --- embedded terminal -----------------------------------------------------
+
+/// Rows the terminal panel takes from the bottom of the text area (0 = hidden).
+/// It keeps a title row plus the configured content height, and always leaves
+/// the editor at least four rows.
+fn terminalPanelRows(session: *Session, rows: u16) usize {
+    const area = viewRows(rows);
+    if (area < 8) return 0;
+    return @min(session.config.terminal_height, area - 4);
+}
+
+/// The same, but zero while no terminal is open, so the panes get the room.
+fn terminalRows(session: *Session, rows: u16) usize {
+    if (session.terminal == null) return 0;
+    return terminalPanelRows(session, rows);
+}
+
+/// Where the panes live: the text area minus the terminal panel.
+fn paneAreaRect(session: *Session, cols: u16, rows: u16) panes_mod.Rect {
+    const side = sidebarWidth(session);
+    const area_h = viewRows(rows);
+    const term_rows = terminalRows(session, rows);
+    return .{
+        .x = side,
+        .y = 1,
+        .w = if (cols > side) cols - side else 0,
+        .h = if (area_h > term_rows) area_h - term_rows else 0,
+    };
+}
+
+/// The panel's rectangle: the title row plus the content rows below it.
+const TermRect = struct { x: usize, y: usize, w: usize, h: usize };
+
+fn terminalRect(session: *Session, cols: u16, rows: u16) TermRect {
+    const side = sidebarWidth(session);
+    const h = terminalRows(session, rows);
+    return .{
+        .x = side,
+        .y = if (rows > 1 + h) rows - 1 - h else 0,
+        .w = if (cols > side) cols - side else 0,
+        .h = h,
+    };
+}
+
+/// F8: start the shell the first time, then hand the keyboard back and forth.
+fn toggleTerminal(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
+    if (session.terminal != null) {
+        session.terminal_focus = !session.terminal_focus;
+        if (session.terminal_focus) {
+            setMsg(msg_buf, msg, "F8: back to the editor  Shift+F8: close");
+        } else {
+            setMsg(msg_buf, msg, "terminal runs on: F8 goes back to it");
+        }
+        return;
+    }
+    const sz = term.size();
+    const side = sidebarWidth(session);
+    const panel_h = terminalPanelRows(session, sz.rows);
+    if (panel_h == 0) {
+        setMsg(msg_buf, msg, "the window is too small for a terminal");
+        return;
+    }
+    const panel_w = if (sz.cols > side) @as(usize, sz.cols) - side else 0;
+    const cols: u16 = @intCast(@max(panel_w, 20));
+    const rows: u16 = @intCast(@max(panel_h - 1, 3));
+    session.terminal = terminal_mod.Terminal.spawn(session.allocator, session.config.terminalCommand(), cols, rows) catch |e| {
+        var why: [96]u8 = undefined;
+        setMsg(msg_buf, msg, std.fmt.bufPrint(&why, "cannot start the terminal ({s})", .{@errorName(e)}) catch "cannot start the terminal");
+        return;
+    };
+    session.terminal_focus = true;
+    setMsg(msg_buf, msg, "F8: back to the editor  Shift+F8: close");
+}
+
+/// Shift+F8: stop the shell and drop the panel.
+fn closeTerminal(session: *Session) void {
+    if (session.terminal) |*t| {
+        t.kill();
+        t.deinit();
+        session.terminal = null;
+    }
+    session.terminal_focus = false;
+}
+
+const TermAct = enum { back, close, page_up, page_down, line_up, line_down, top, live };
+
+const TermKey = struct { seq: []const u8, act: TermAct };
+
+/// Keys while the terminal has the keyboard. Everything that is not one of the
+/// panel's own keys goes to the shell untouched: the input layer has already
+/// turned keys into the escape sequences a terminal sends.
+fn handleTerminalInput(session: *Session, chunk: []const u8, msg_buf: []u8, msg: *[]const u8) usize {
+    _ = msg_buf;
+    _ = msg;
+    const t = if (session.terminal) |*tp| tp else return 0;
+    // Longest first: Shift+F8 must not be eaten by F8's prefix.
+    const term_keys = [_]TermKey{
+        .{ .seq = "\x1b[19;2~", .act = .close },
+        .{ .seq = "\x1b[19~", .act = .back },
+        .{ .seq = "\x1b[5;2~", .act = .page_up },
+        .{ .seq = "\x1b[6;2~", .act = .page_down },
+        .{ .seq = "\x1b[1;2A", .act = .line_up },
+        .{ .seq = "\x1b[1;2B", .act = .line_down },
+        .{ .seq = "\x1b[1;2H", .act = .top },
+        .{ .seq = "\x1b[1;2F", .act = .live },
+    };
+    for (term_keys) |k| {
+        if (!std.mem.startsWith(u8, chunk, k.seq)) continue;
+        switch (k.act) {
+            .back => session.terminal_focus = false,
+            .close => closeTerminal(session),
+            .page_up => t.scroll(-10),
+            .page_down => t.scroll(10),
+            .line_up => t.scroll(-1),
+            .line_down => t.scroll(1),
+            .top => t.scroll(-@as(isize, @intCast(t.vt.scrollbackLen() + 1))),
+            .live => t.scroll(@as(isize, @intCast(t.vt.scrollbackLen() + 1))),
+        }
+        return k.seq.len;
+    }
+    // An escape sequence that is still arriving must not be typed into the
+    // shell as text. A lone Esc is the Esc key, so it goes through.
+    if (chunk.len > 1 and chunk[0] == 0x1b) {
+        var partial = false;
+        for (term_keys) |k| {
+            if (chunk.len < k.seq.len and std.mem.startsWith(u8, k.seq, chunk)) partial = true;
+        }
+        if (chunk[1] == '[' or chunk[1] == 'O') {
+            var i: usize = 2;
+            while (i < chunk.len) : (i += 1) {
+                if (chunk[i] >= 0x40 and chunk[i] <= 0x7e) break;
+            }
+            if (i >= chunk.len) partial = true;
+        }
+        if (partial) return 0;
+    }
+    if (session.terminal_focus) t.sendKeys(chunk);
+    return chunk.len;
+}
+
+/// Paint the panel: a title row, then the terminal grid, with the block cursor
+/// when the view is live.
+fn drawTerminal(s: *render.Screen, session: *Session, t: *terminal_mod.Terminal, cols: u16, rows: u16, theme: config_mod.Theme) void {
+    const g = terminalRect(session, cols, rows);
+    if (g.h == 0 or g.w == 0) return;
+    // Title row. Shells often set the title to their full path, so show the
+    // last component; anything else ("vim notes.txt") is left alone.
+    var code_buf: [32]u8 = undefined;
+    const reported = t.titleText();
+    const name = if (reported.len > 0) baseName(reported) else "terminal";
+    const state: []const u8 = if (t.exit_code) |code| blk: {
+        if (code == 0) break :blk "  exited";
+        break :blk std.fmt.bufPrint(&code_buf, "  exited ({d})", .{code}) catch "  exited";
+    } else if (session.terminal_focus) "  F8 back to the editor  Shift+F8 closes" else "  F8 to type here";
+    var line_buf: [220]u8 = undefined;
+    const head = std.fmt.bufPrint(&line_buf, " {s}{s}", .{ name, state }) catch " terminal";
+    var x: usize = 0;
+    while (x < g.w) : (x += 1) {
+        const ch: u21 = if (x < head.len) head[x] else ' ';
+        s.put(@intCast(g.x + x), @intCast(g.y), .{ .ch = ch, .fg = theme.hint_fg, .bg = theme.bar_bg, .attr = .{ .bold = true } });
+    }
+    // Content: the grid, offset by the scrollback view.
+    const content_rows = g.h - 1;
+    var r: usize = 0;
+    while (r < content_rows) : (r += 1) {
+        const cells = t.vt.line(@intCast(r));
+        x = 0;
+        while (x < g.w and x < cells.len) : (x += 1) {
+            const c = cells[x];
+            if (c.ch == 0) continue; // second half of a wide glyph
+            s.put(@intCast(g.x + x), @intCast(g.y + 1 + r), .{
+                .ch = c.ch,
+                .fg = mapColor(c.fg, theme.text),
+                .bg = mapColor(c.bg, theme.background),
+                .attr = .{
+                    .bold = c.attr.bold,
+                    .underline = c.attr.underline,
+                    .reverse = c.attr.reverse,
+                    .dim = c.attr.dim,
+                    .italic = c.attr.italic,
+                    .strike = c.attr.strike,
+                },
+            });
+        }
+    }
+    // Block cursor, only on the live screen.
+    if (t.view == 0) {
+        const cur = t.vt.cursor();
+        if (cur.visible and cur.x < g.w and cur.y < content_rows) {
+            const cells = t.vt.line(cur.y);
+            const under: render.Cell = if (cur.x < cells.len) .{
+                .ch = if (cells[cur.x].ch == 0) ' ' else cells[cur.x].ch,
+                .fg = mapColor(cells[cur.x].fg, theme.text),
+                .bg = mapColor(cells[cur.x].bg, theme.background),
+            } else .{ .ch = ' ' };
+            s.put(@intCast(g.x + cur.x), @intCast(g.y + 1 + cur.y), .{
+                .ch = under.ch,
+                .fg = under.bg,
+                .bg = under.fg,
+                .attr = .{ .reverse = true },
+            });
+        }
+    }
+}
+
+/// Terminal colours are the terminal host's palette, so indexed and RGB values
+/// pass straight through; only "default" needs a theme colour.
+fn mapColor(c: terminal_mod.Color, fallback: render.Color) render.Color {
+    return switch (c) {
+        .default => fallback,
+        .indexed => |n| .{ .indexed = n },
+        .rgb => |v| .{ .rgb = .{ .r = v.r, .g = v.g, .b = v.b } },
+    };
+}
+
 /// Mark every cell as needing a repaint, so the next frame paints all of it.
 /// The sentinel is a cell no real frame produces (reverse + bold + underline on
 /// a NUL), so it never compares equal to what `draw` puts in the back buffer.
@@ -1587,6 +1860,8 @@ fn defaultKeyFor(action: keys.Action, shift: bool) DefaultKey {
         .split_rows => .{ .csi = .{ .params = "18", .final = '~' } }, // F7
         .next_pane => .{ .csi = .{ .params = "17", .final = '~' } }, // F6
         .prev_pane => .{ .csi = .{ .params = if (shift) "17;2" else "17;5", .final = '~' } },
+        .toggle_terminal => .{ .csi = .{ .params = "19", .final = '~' } }, // F8
+        .close_terminal => .{ .csi = .{ .params = "19;2", .final = '~' } }, // Shift+F8
     };
 }
 
@@ -2046,6 +2321,7 @@ fn applyCsi(
             15 => if (shift) session.closePane() else try session.splitFocused(.columns), // F5 / Shift+F5
             17 => session.cyclePane(if (shift) -1 else 1), // F6 / Shift+F6
             18 => if (shift) session.closePane() else try session.splitFocused(.rows), // F7 / Shift+F7
+            19 => if (shift) closeTerminal(session) else toggleTerminal(session, msg_buf, msg), // F8 / Shift+F8
             else => {},
         },
         else => {},
@@ -2146,17 +2422,12 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
     }
 
     drawTabBar(s, session, w, text_fg, theme.gutter);
-    const side = sidebarWidth(session);
     if (session.tree) |*t| drawTree(s, t, session.tree_focus, h, theme, session.config.icons_unicode);
 
     // The text area, split into panes. Row 0 is the tab bar, row h-1 the
-    // status line; the sidebar takes the left columns.
-    const area = panes_mod.Rect{
-        .x = side,
-        .y = 1,
-        .w = if (w > side) w - side else 0,
-        .h = h - 2,
-    };
+    // status line; the sidebar takes the left columns and the terminal panel
+    // the bottom rows.
+    const area = paneAreaRect(session, s.cols, s.rows);
     session.pane_area = area;
     session.panes.layout(area);
     // Drawing another pane borrows the editor and moves its cursor, so the
@@ -2190,6 +2461,8 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
     }
     if (session.drag_tab == null) session.drop_zone = null;
     if (session.drop_zone) |dz| drawDropHint(s, session, dz, theme);
+    // The terminal panel sits under the panes, above the status line.
+    if (session.terminal) |*t| drawTerminal(s, session, t, s.cols, s.rows, theme);
     // Separators; the ones beside the focused pane glow in the accent colour.
     const focus_rect = session.panes.rectOf(session.panes.focus);
     pi = 0;

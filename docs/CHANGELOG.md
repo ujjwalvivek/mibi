@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+**Embedded terminal (phase 5)**
+
+- `F8` opens a real shell in a panel under the panes: ConPTY on Windows,
+  `posix_openpt` + `fork` on Unix (`src/pty.zig`), rendered by our own VT parser
+  (`src/vterm.zig`: cursor addressing, scroll regions, alt screen, 16/256/
+  true-colour SGR, wide characters, deferred wrap, DA/DSR replies) with a
+  2000-line scrollback.
+- The keyboard goes to the shell while the panel is focused; `F8` hands it back
+  and `Shift+F8` closes the panel. `Shift+PgUp`/`PgDn` and `Shift+Up`/`Down`
+  scroll the scrollback, and any key returns to the live screen.
+- The shell's window follows the panel, so resizing the console or the panel
+  resizes the child too. `[terminal] command` picks the shell, `height` the
+  panel size.
+- Selecting text inside the terminal is not implemented yet.
+
+**Mouse**
+
+- Double click selects the word under the pointer, triple click the whole line.
+
 **Hot reload**
 
 - An idle tick every half second re-lists the file tree and re-stamps every

@@ -1,16 +1,13 @@
 //! Pseudo terminal: a child process attached to a pty master we can read,
-//! write and resize.
-//!
-//! Windows uses ConPTY (`CreatePseudoConsole`, Windows 10 1809+); Unix builds
+//! write and resize. Windows uses ConPTY (`CreatePseudoConsole`); Unix builds
 //! the pair from `posix_openpt` + `fork`, because `forkpty`/`openpty` live in
-//! libutil, which mibi does not link. Everything is raw kernel32/libc: no
-//! `std.Io`, no threads (see experiments/README.md for why that matters).
+//! libutil, which mibi does not link. Raw kernel32/libc only: no `std.Io`, no
+//! threads.
 //!
-//! `read` never blocks: it returns 0 when nothing is available yet. On Windows
-//! that is a `PeekNamedPipe` probe, on Unix the master fd is `O_NONBLOCK`.
-//! Callers wait on `outputHandle` and poll `exited`. `exited` is also what
-//! closes the ConPTY, and that is what lets the output pipe reach EOF once the
-//! child is gone - so poll it rather than relying on `read` alone.
+//! `read` never blocks: 0 when nothing is available yet (a `PeekNamedPipe`
+//! probe on Windows, an `O_NONBLOCK` master fd on Unix), EndOfStream at EOF.
+//! Callers wait on `outputHandle` and poll `exited`, which also closes the
+//! ConPTY so the output pipe can reach EOF after the child dies.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -28,6 +25,7 @@ const win = if (is_windows) struct {
 
     const INVALID_HANDLE_VALUE: HANDLE = @ptrFromInt(std.math.maxInt(usize));
     const EXTENDED_STARTUPINFO_PRESENT: DWORD = 0x0008_0000;
+    const STARTF_USESTDHANDLES: DWORD = 0x0000_0100;
     const WAIT_OBJECT_0: DWORD = 0;
     /// ProcThreadAttributeValue(22, FALSE, TRUE, FALSE): the pseudo console.
     const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x0002_0016;
@@ -38,36 +36,23 @@ const win = if (is_windows) struct {
 
     const STARTUPINFOW = extern struct {
         cb: DWORD = 0,
-        lpReserved: ?[*:0]u16 = null,
-        lpDesktop: ?[*:0]u16 = null,
-        lpTitle: ?[*:0]u16 = null,
-        dwX: DWORD = 0,
-        dwY: DWORD = 0,
-        dwXSize: DWORD = 0,
-        dwYSize: DWORD = 0,
-        dwXCountChars: DWORD = 0,
-        dwYCountChars: DWORD = 0,
-        dwFillAttribute: DWORD = 0,
-        dwFlags: DWORD = 0,
-        wShowWindow: u16 = 0,
-        cbReserved2: u16 = 0,
-        lpReserved2: ?[*]u8 = null,
-        hStdInput: HANDLE = INVALID_HANDLE_VALUE,
-        hStdOutput: HANDLE = INVALID_HANDLE_VALUE,
-        hStdError: HANDLE = INVALID_HANDLE_VALUE,
+        lpReserved: ?[*:0]u16 = null, lpDesktop: ?[*:0]u16 = null, lpTitle: ?[*:0]u16 = null,
+        dwX: DWORD = 0, dwY: DWORD = 0, dwXSize: DWORD = 0, dwYSize: DWORD = 0,
+        dwXCountChars: DWORD = 0, dwYCountChars: DWORD = 0,
+        dwFillAttribute: DWORD = 0, dwFlags: DWORD = 0,
+        wShowWindow: u16 = 0, cbReserved2: u16 = 0, lpReserved2: ?[*]u8 = null,
+        hStdInput: HANDLE = INVALID_HANDLE_VALUE, hStdOutput: HANDLE = INVALID_HANDLE_VALUE, hStdError: HANDLE = INVALID_HANDLE_VALUE,
     };
 
     /// `STARTUPINFOW` plus the attribute list pointer; `cb` must cover both.
     const STARTUPINFOEXW = extern struct {
-        StartupInfo: STARTUPINFOW,
+        StartupInfo: STARTUPINFOW = .{},
         lpAttributeList: ?*anyopaque = null,
     };
 
     const PROCESS_INFORMATION = extern struct {
-        hProcess: HANDLE = INVALID_HANDLE_VALUE,
-        hThread: HANDLE = INVALID_HANDLE_VALUE,
-        dwProcessId: DWORD = 0,
-        dwThreadId: DWORD = 0,
+        hProcess: HANDLE = INVALID_HANDLE_VALUE, hThread: HANDLE = INVALID_HANDLE_VALUE,
+        dwProcessId: DWORD = 0, dwThreadId: DWORD = 0,
     };
 
     extern "kernel32" fn CreatePipe(hReadPipe: *HANDLE, hWritePipe: *HANDLE, lpPipeAttributes: ?*anyopaque, nSize: DWORD) callconv(.winapi) BOOL;
@@ -99,14 +84,6 @@ const win = if (is_windows) struct {
     extern "kernel32" fn TerminateProcess(hProcess: HANDLE, code: c_uint) callconv(.winapi) BOOL;
     extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
     extern "kernel32" fn Sleep(ms: DWORD) callconv(.winapi) void;
-
-    /// Close a handle and forget it, so a later error path cannot close it twice.
-    fn close(h: *HANDLE) void {
-        if (h.* != INVALID_HANDLE_VALUE) {
-            _ = CloseHandle(h.*);
-            h.* = INVALID_HANDLE_VALUE;
-        }
-    }
 
     /// Clamp a cell count to the signed COORD range.
     fn coord(v: u16) i16 {
@@ -155,25 +132,21 @@ pub const Pty = struct {
 
     /// Start `argv` on a new pseudo terminal of `cols` x `rows` cells.
     pub fn spawn(allocator: std.mem.Allocator, argv: []const []const u8, cols: u16, rows: u16) !Pty {
-        if (is_windows) {
-            return spawnWindows(allocator, argv, cols, rows);
-        } else {
-            return spawnUnix(allocator, argv, cols, rows);
-        }
+        return if (is_windows) spawnWindows(allocator, argv, cols, rows) else spawnUnix(allocator, argv, cols, rows);
     }
 
     /// Close the pty and reap the child. Kills a child that is still running:
     /// a Pty owns its process, and deinit must not leave an orphan behind.
     pub fn deinit(self: *Pty) void {
         if (is_windows) {
-            // Close the pseudo console first: the conhost it owns is what keeps
-            // the output pipe open.
-            if (self.hpc) |hpc| {
-                win.ClosePseudoConsole(hpc);
-                self.hpc = null;
-            }
-            win.close(&self.h_in);
-            win.close(&self.h_out);
+            // Close the pseudo console first: the conhost it owns keeps the
+            // output pipe open.
+            if (self.hpc) |hpc| win.ClosePseudoConsole(hpc);
+            self.hpc = null;
+            if (self.h_in) |h| _ = win.CloseHandle(h);
+            if (self.h_out) |h| _ = win.CloseHandle(h);
+            self.h_in = null;
+            self.h_out = null;
             if (self.h_process) |h| {
                 if (self.exit_code == null) {
                     _ = win.WaitForSingleObject(h, 500);
@@ -190,27 +163,14 @@ pub const Pty = struct {
             }
             if (!self.reaped and self.pid > 0) {
                 _ = unix.kill(self.pid, unix.SIGKILL);
-                var status: c_int = 0;
-                while (true) {
-                    const rc = unix.waitpid(self.pid, &status, 0);
-                    if (rc == self.pid) {
-                        self.exit_code = decodeStatus(status);
-                        break;
-                    }
-                    if (rc < 0 and std.c.errno(rc) != .INTR) break;
-                }
-                self.reaped = true;
+                self.reapUnix();
             }
         }
     }
 
     /// The handle to wait on for output readiness: waitable HANDLE / pollable fd.
     pub fn outputHandle(self: *const Pty) Handle {
-        if (is_windows) {
-            return self.h_out orelse win.INVALID_HANDLE_VALUE;
-        } else {
-            return self.master;
-        }
+        return if (is_windows) (self.h_out orelse win.INVALID_HANDLE_VALUE) else self.master;
     }
 
     /// Read what is available. 0 means "nothing yet"; EndOfStream at EOF.
@@ -324,9 +284,13 @@ pub const Pty = struct {
     /// Hang up the shell, then insist after a short grace period.
     pub fn kill(self: *Pty) void {
         if (is_windows) {
-            if (self.exit_code != null) return;
             const h = self.h_process orelse return;
-            if (win.WaitForSingleObject(h, 0) != win.WAIT_OBJECT_0) _ = win.TerminateProcess(h, 1);
+            if (win.WaitForSingleObject(h, 0) != win.WAIT_OBJECT_0) {
+                _ = win.TerminateProcess(h, 1);
+                // TerminateProcess is asynchronous; wait so exited() answers.
+                _ = win.WaitForSingleObject(h, 2000);
+            }
+            _ = self.exited();
         } else {
             if (self.reaped) return;
             _ = unix.kill(self.pid, unix.SIGHUP);
@@ -336,20 +300,22 @@ pub const Pty = struct {
                 sleepMs(10);
             }
             _ = unix.kill(self.pid, unix.SIGKILL);
-            var status: c_int = 0;
-            while (true) {
-                const rc = unix.waitpid(self.pid, &status, 0);
-                if (rc == self.pid) {
-                    self.reaped = true;
-                    self.exit_code = decodeStatus(status);
-                    break;
-                }
-                if (rc < 0 and std.c.errno(rc) != .INTR) {
-                    self.reaped = true;
-                    break;
-                }
-            }
+            self.reapUnix();
         }
+    }
+
+    /// Collect the child, blocking until waitpid has it, and record its status.
+    fn reapUnix(self: *Pty) void {
+        var status: c_int = 0;
+        while (true) {
+            const rc = unix.waitpid(self.pid, &status, 0);
+            if (rc == self.pid) {
+                self.exit_code = decodeStatus(status);
+                break;
+            }
+            if (rc < 0 and std.c.errno(rc) != .INTR) break;
+        }
+        self.reaped = true;
     }
 };
 
@@ -364,10 +330,10 @@ fn spawnWindows(allocator: std.mem.Allocator, argv: []const []const u8, cols: u1
     var out_read: win.HANDLE = win.INVALID_HANDLE_VALUE;
     var out_write: win.HANDLE = win.INVALID_HANDLE_VALUE;
     errdefer {
-        win.close(&in_read);
-        win.close(&in_write);
-        win.close(&out_read);
-        win.close(&out_write);
+        if (in_read != win.INVALID_HANDLE_VALUE) _ = win.CloseHandle(in_read);
+        if (in_write != win.INVALID_HANDLE_VALUE) _ = win.CloseHandle(in_write);
+        if (out_read != win.INVALID_HANDLE_VALUE) _ = win.CloseHandle(out_read);
+        if (out_write != win.INVALID_HANDLE_VALUE) _ = win.CloseHandle(out_write);
     }
 
     if (win.CreatePipe(&in_read, &in_write, null, 0) == 0) return error.PipeFailed;
@@ -379,8 +345,10 @@ fn spawnWindows(allocator: std.mem.Allocator, argv: []const []const u8, cols: u1
         return error.PseudoConsoleFailed;
     self.hpc = hpc;
     // conhost duplicated them; keeping our copies would hold the pipes open.
-    win.close(&in_read);
-    win.close(&out_write);
+    _ = win.CloseHandle(in_read);
+    _ = win.CloseHandle(out_write);
+    in_read = win.INVALID_HANDLE_VALUE;
+    out_write = win.INVALID_HANDLE_VALUE;
 
     // The attribute list is opaque: probe its size, allocate, then fill it in.
     var attr_size: usize = 0;
@@ -399,6 +367,10 @@ fn spawnWindows(allocator: std.mem.Allocator, argv: []const []const u8, cols: u1
 
     var si: win.STARTUPINFOEXW = .{};
     si.StartupInfo.cb = @intCast(@sizeOf(win.STARTUPINFOEXW));
+    // Clear the inherited standard handles (they are invalid, not duplicated):
+    // otherwise the child keeps mibi's own - possibly redirected - handles and
+    // writes there instead of to the pty. Conhost then supplies the pty ones.
+    si.StartupInfo.dwFlags = win.STARTF_USESTDHANDLES;
     si.lpAttributeList = @ptrCast(attrs.ptr);
     var pi: win.PROCESS_INFORMATION = .{};
     const ok = win.CreateProcessW(
@@ -512,16 +484,8 @@ fn buildCommandLine(allocator: std.mem.Allocator, argv: []const []const u8) ![:0
 /// whitespace or a quote, and double the backslashes that sit before a quote.
 fn appendQuoted(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, arg: []const u8) !void {
     var needs = arg.len == 0;
-    for (arg) |c| {
-        if (c == ' ' or c == '\t' or c == '"') {
-            needs = true;
-            break;
-        }
-    }
-    if (!needs) {
-        try buf.appendSlice(allocator, arg);
-        return;
-    }
+    for (arg) |c| needs = needs or c == ' ' or c == '\t' or c == '"';
+    if (!needs) return buf.appendSlice(allocator, arg);
     try buf.append(allocator, '"');
     var slashes: usize = 0;
     for (arg) |c| {
@@ -530,15 +494,14 @@ fn appendQuoted(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, arg: []co
             continue;
         }
         // 2n+1: n pairs collapse back to n, the odd one escapes the quote.
-        const run: usize = if (c == '"') slashes * 2 + 1 else slashes;
-        var i: usize = 0;
-        while (i < run) : (i += 1) try buf.append(allocator, '\\');
+        var run: usize = if (c == '"') slashes * 2 + 1 else slashes;
+        while (run > 0) : (run -= 1) try buf.append(allocator, '\\');
         slashes = 0;
         try buf.append(allocator, c);
     }
     // Trailing backslashes must not escape the closing quote.
-    var i: usize = 0;
-    while (i < slashes * 2) : (i += 1) try buf.append(allocator, '\\');
+    var tail: usize = slashes * 2;
+    while (tail > 0) : (tail -= 1) try buf.append(allocator, '\\');
     try buf.append(allocator, '"');
 }
 
@@ -550,10 +513,7 @@ fn decodeStatus(status: c_int) i32 {
 }
 
 fn sleepMs(ms: u64) void {
-    if (is_windows) {
-        win.Sleep(@intCast(ms));
-    } else {
-        var ts = std.c.timespec{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * std.time.ns_per_ms) };
-        _ = std.c.nanosleep(&ts, null);
-    }
+    if (is_windows) return win.Sleep(@intCast(ms));
+    var ts = std.c.timespec{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * std.time.ns_per_ms) };
+    _ = std.c.nanosleep(&ts, null);
 }

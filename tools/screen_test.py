@@ -673,6 +673,84 @@ def mouse_click_places_the_cursor(m, path):
 
 
 @check
+def embedded_terminal_runs_a_command(m, path):
+    """F8 opens a panel running the configured shell; its output shows up."""
+    work = os.path.join(SHOT_DIR, "work-term")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
+        f.write("[terminal]\ncommand = cmd.exe /c echo hello-from-pty\nheight = 8\n")
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello\nworld\n")
+
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        assert "hello-from-pty" not in proc.screen_text()
+        proc.send("\x1b[19~")  # F8
+        assert proc.wait_for("hello-from-pty"), "the terminal did not run the command:\n" + proc.screen_text()
+        proc.shot("40-terminal")
+    finally:
+        proc.close()
+
+
+@check
+def terminal_takes_the_keyboard(m, path):
+    """Typing goes to the shell while the panel has focus; Shift+F8 closes it."""
+    work = os.path.join(SHOT_DIR, "work-term-keys")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
+        f.write("[terminal]\nheight = 8\n")
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello\nworld\n")
+
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        proc.send("\x1b[19~")  # F8: open the panel and give it the keyboard
+        proc.wait_quiet()
+        proc.send("echo typed-in-terminal\r")
+        assert proc.wait_for("typed-in-terminal"), "keys did not reach the shell:\n" + proc.screen_text()
+        assert "typed-in-terminal" not in proc.screen_text().splitlines()[1], "the editor got the keys"
+
+        # The shell's window follows the panel when the console is resized.
+        proc.resize(30, 100)
+        proc.wait_quiet()
+        assert "F8 back to the editor" in proc.screen_text(), "the panel vanished on resize"
+        proc.resize(24, 80)
+        proc.wait_quiet()
+
+        # F8 hands the keyboard back to the editor; clicking the panel takes it
+        # back. The panel starts at row 16 of 24 with height 8.
+        proc.send("\x1b[19~")
+        proc.wait_quiet()
+        proc.send("Z")
+        proc.wait_quiet()
+        assert "Z" in proc.screen_text().splitlines()[1], "the editor did not get the keyboard back"
+        proc.send("\x1b[<0;6;18M")
+        proc.send("\x1b[<0;6;18m")
+        proc.wait_quiet()
+        proc.send("echo back-to-shell\r")
+        assert proc.wait_for("back-to-shell"), "the panel click did not focus the terminal"
+        lines = proc.screen_text().splitlines()
+        assert any("back-to-shell" in ln for ln in lines[15:]), f"the shell output is not in the panel:\n" + "\n".join(lines)
+        assert "back-to-shell" not in lines[1], "the editor got keys meant for the shell"
+
+        # Shift+F8 closes the panel; the file text is still on screen.
+        proc.send("\x1b[19;2~")
+        proc.wait_quiet()
+        screen = proc.screen_text()
+        assert "hello" in screen, "the editor is gone after closing the terminal"
+        assert "typed-in-terminal" not in screen, f"the panel is still there:\n{screen}"
+        proc.shot("41-terminal-keys")
+    finally:
+        proc.close()
+
+
+@check
 def double_and_triple_click_select(m, path):
     """Double click selects a word, triple click selects the whole line."""
     work = os.path.join(SHOT_DIR, "work-clicks")

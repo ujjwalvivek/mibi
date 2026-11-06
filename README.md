@@ -48,6 +48,10 @@ background = #0e0e0e   ; unset keeps the terminal's own background
 text = #d8dee9
 keyword1 = #c678dd
 comment = #6a7382
+
+[terminal]
+command = cmd.exe     ; the shell F8 runs (default: %COMSPEC% / $SHELL)
+height = 12           ; panel rows, title row included
 ```
 
 The theme controls the whole palette: editor text, gutter, selection, tab bar,
@@ -88,6 +92,10 @@ then exits.
 - `mibi <file>` from a terminal you already have open uses that window and
   profile, and sets the tab title (`mibi - notes.txt`).
 - `--in-terminal` skips the double-click check (used by scripts and tests).
+- The embedded terminal (`F8`) needs a pseudo console: ConPTY on Windows 10
+  1809 or newer (Windows Terminal and current conhost both provide it), and a
+  POSIX pty on Linux and macOS. If the shell cannot be started, the status bar
+  says why instead of leaving an empty panel.
 - `assets/windows-terminal/install.ps1` adds a Windows Terminal profile (icon,
   colour scheme, font). See
   [assets/windows-terminal/README.md](assets/windows-terminal/README.md) for
@@ -133,6 +141,9 @@ packaging.
 | `Shift+F5` / `Shift+F7`   | close the focused pane (its file stays open as a tab)                                       |
 | `F6` / `Shift+F6`         | next / previous pane (or click a pane)                                                      |
 | `F2`                      | theme picker (arrows preview live, Enter keeps and saves, Esc restores)                     |
+| `F8`                      | embedded terminal: opens it, then hands the keyboard back and forth                         |
+| `Shift+F8`                | close the terminal panel                                                                    |
+| `Shift+PgUp` / `PgDn`     | scroll the terminal's scrollback (any key goes back to live)                                |
 | `Ctrl+P`                  | command palette: every action, fuzzy-filtered                                               |
 | `Ctrl+?` / `F1`           | help panel (Esc closes it); hints at the status bar's right edge                            |
 | `Ctrl+Q`                  | quit (asks first if any tab has unsaved edits)                                              |
@@ -168,11 +179,12 @@ packaging.
   painting back while it was in the background catches up at once. The file
   stamp is `FindFirstFileW` on Windows and `statx` (Linux) / `fstatat`
   (macOS) elsewhere.
-- Mouse: click text to place the cursor, click a tab to switch to it, click
-  picker rows (click again to accept), click the status-bar hint for help;
-  the wheel moves one line per notch. Over the tab bar the wheel scrolls the
-  strip instead. Quick-edit mode is turned off so the console reports clicks
-  to the editor.
+- Mouse: click text to place the cursor (a double click selects the word, a
+  triple click the whole line), click a tab to switch to it, click picker rows
+  (click again to accept), click the status-bar hint for help; the wheel moves
+  one line per notch. Over the tab bar the wheel scrolls the strip instead, and
+  over the terminal panel it scrolls the shell's scrollback. Quick-edit mode is
+  turned off so the console reports clicks to the editor.
 - Configurable keybindings and a colour theme via `mibi.ini` (`[keys]` and
   `[theme]`), with the whole palette and every action bindable. The help
   panel renders the keys you actually bound.
@@ -208,6 +220,7 @@ packaging.
   quit that checks every tab.
 - File open/save; path prompts list the directory; Tab completes. A failed
   open or save reports the actual OS error rather than failing silently.
+- Embedded terminal (`F8`): a real shell in a pseudo terminal (ConPTY on Windows, `posix_openpt` + `fork` elsewhere) drawn in a panel under the panes, with its own VT parser (`src/vterm.zig`), 256-colour and true-colour SGR, a scrollback of 2000 lines (`Shift+PgUp`/`PgDn`, `Shift+Up`/`Down`, any key returns to live), the block cursor, and the shell's window kept in step with the panel. Keys go to the shell while the panel has focus; `F8` hands the keyboard back, `Shift+F8` closes it. Configure the shell with `[terminal] command` in `mibi.ini` (default `%COMSPEC%` on Windows, `$SHELL` elsewhere) and its height with `height`. The scrollback ring is allocated when the terminal opens (~2.5 MB at 80 columns, ~6 MB at 200). Selecting and copying inside the terminal is not there yet.
 - Cell-grid **diff renderer**: changed rows are rewritten in full.
 - Raw mode, alternate screen, resize handling, auto-wrap disabled, UTF-8
   console codepage set on Windows.
@@ -225,6 +238,9 @@ src/config.zig   mibi.ini: settings, theme, key bindings
 src/keys.zig     key names, actions and the key map
 src/render.zig   cell grid + ANSI diff
 src/term.zig     raw mode, alt screen, size, input
+src/terminal.zig the embedded terminal: pty + VT screen + key forwarding
+src/pty.zig      pseudo terminal (ConPTY / posix_openpt + fork)
+src/vterm.zig    VT/ANSI parser, screen buffer and scrollback
 src/os.zig       raw OS layer (no std.Io)
 src/text.zig     UTF-8 helpers
 src/width.zig    generated Unicode width table
@@ -233,16 +249,16 @@ src/width.zig    generated Unicode width table
 ## Size
 
 ReleaseSmall, stripped, cross-compiled. `.\build.ps1 size` rebuilds every
-target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
-150 KB, hard ceiling 1 MB); see `experiments/README.md` for the probe data.
+target and fails if one grows past its budget (re-based after Phase 5, hard
+ceiling 1 MB); see `experiments/README.md` for the probe data.
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu | 142,728 |
-| x86_64-linux-gnu  | 156,288 |
-| x86_64-macos      | 166,138 |
-| aarch64-macos     | 200,616 |
-| x86_64-windows    | 214,016 |
+| aarch64-linux-gnu | 161,184 |
+| x86_64-linux-gnu  | 176,920 |
+| x86_64-macos      | 186,979 |
+| aarch64-macos     | 219,560 |
+| x86_64-windows    | 236,032 |
 
 ## Changelog
 
@@ -292,6 +308,11 @@ directory):
 Set `MIBI_STATE_DIR` to put them somewhere else (the tests use it to keep each
 run isolated).
 
+The embedded terminal is deliberately not part of the session: it is a running
+process, so it starts fresh on every launch (`F8` opens one, `Shift+F8` closes
+it).
+
 ## Not yet
 
-Multi-cursor, macros, embedded terminal.
+LSP and completion, macros (dropped by decision), and selecting text inside the
+embedded terminal.
