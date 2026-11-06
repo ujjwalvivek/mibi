@@ -46,6 +46,10 @@ pub const Action = enum {
     page_down,
     theme_picker,
     command_palette,
+    split_columns,
+    split_rows,
+    next_pane,
+    prev_pane,
 };
 
 pub fn actionFromName(name: []const u8) ?Action {

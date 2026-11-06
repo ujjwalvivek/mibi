@@ -20,6 +20,7 @@ const width = @import("width.zig");
 const syntax = @import("syntax.zig");
 const picker = @import("picker.zig");
 const tree_mod = @import("tree.zig");
+const panes_mod = @import("panes.zig");
 const regex = @import("regex.zig");
 const config_mod = @import("config.zig");
 const keys = @import("keys.zig");
@@ -47,14 +48,13 @@ const help_rows = [_]HelpRow{
     .{ .actions = &.{ .find, .find_next, .find_prev }, .desc = "find / next / previous" },
     .{ .actions = &.{.replace}, .desc = "replace" },
     .{ .actions = &.{.goto}, .desc = "go to line[:col]" },
-    .{ .actions = &.{ .insert_newline, .insert_tab }, .desc = "new line / indent" },
-    .{ .actions = &.{ .backspace, .delete_forward }, .desc = "delete" },
     .{ .actions = &.{.save}, .desc = "save" },
     .{ .actions = &.{.open}, .desc = "open file picker" },
     .{ .actions = &.{.theme_picker}, .desc = "theme picker (live preview)" },
     .{ .actions = &.{.command_palette}, .desc = "command palette" },
     .{ .actions = &.{ .new_tab, .close_tab }, .desc = "new / close tab" },
     .{ .actions = &.{ .next_tab, .prev_tab }, .desc = "next / previous tab" },
+    .{ .actions = &.{ .split_columns, .next_pane }, .desc = "split / next pane" },
     .{ .actions = &.{.help}, .desc = "toggle this help" },
     .{ .actions = &.{.quit}, .desc = "quit (asks if unsaved)" },
     .{ .literal = "click / wheel", .desc = "cursor, tabs, pickers / scroll" },
@@ -158,6 +158,10 @@ const Session = struct {
     /// File tree sidebar; null when closed.
     tree: ?tree_mod.Tree = null,
     tree_focus: bool = false,
+    /// Split layout: each pane shows one document, by its stable id. `active`
+    /// always names the focused pane's document.
+    panes: panes_mod.Tree = panes_mod.Tree.empty(),
+    next_doc_id: u32 = 1,
 
     fn init(allocator: std.mem.Allocator) Session {
         return .{ .allocator = allocator, .docs = std.ArrayList(*Editor).empty, .active = 0 };
@@ -187,14 +191,89 @@ const Session = struct {
         ed.tab_width = self.config.tab_width;
         ed.lang = if (self.config.syntax) lang else null;
         errdefer ed.deinit();
+        ed.id = self.next_doc_id;
+        self.next_doc_id += 1;
         try self.docs.append(self.allocator, ed);
         self.active = self.docs.items.len - 1;
+        // A new document always lands in the focused pane.
+        self.panes.setFocusedDoc(ed.id);
+    }
+
+    /// Index of the document with this id, if it is still open.
+    fn docIndex(self: *Session, id: u32) ?usize {
+        for (self.docs.items, 0..) |ed, i| {
+            if (ed.id == id) return i;
+        }
+        return null;
+    }
+
+    /// Make document `i` the active one. If a pane already shows it, that pane
+    /// takes the focus; otherwise the focused pane switches to it.
+    fn focusDoc(self: *Session, i: usize) void {
+        if (i >= self.docs.items.len) return;
+        const id = self.docs.items[i].id;
+        if (self.panes.paneWithDoc(id)) |node| {
+            self.panes.focus = node;
+        } else {
+            self.panes.setFocusedDoc(id);
+        }
+        self.active = i;
+    }
+
+    /// Keep `active` pointing at the focused pane's document.
+    fn syncActive(self: *Session) void {
+        const id = self.panes.focusedDoc() orelse return;
+        if (self.docIndex(id)) |i| self.active = i;
+    }
+
+    /// Every pane must show a live document: drop panes whose document was
+    /// closed, and give the tree a document again if it lost its last pane.
+    fn ensurePaneDocs(self: *Session) void {
+        if (self.docs.items.len == 0) return;
+        var guard: usize = 0;
+        while (guard <= panes_mod.MAX_PANES) : (guard += 1) {
+            var dead: ?u8 = null;
+            for (self.panes.leaves[0..self.panes.leaf_count]) |node| {
+                if (self.docIndex(self.panes.nodes[node].doc) == null) {
+                    dead = node;
+                    break;
+                }
+            }
+            const node = dead orelse break;
+            self.panes.focus = node;
+            self.panes.removeFocused();
+            if (self.panes.live == 0) break;
+        }
+        if (self.panes.live == 0) {
+            const i = @min(self.active, self.docs.items.len - 1);
+            self.panes = panes_mod.Tree.init(self.docs.items[i].id);
+        }
+        self.syncActive();
+    }
+
+    /// Split the focused pane. The new pane shows the next tab that no other
+    /// pane is showing, or a fresh scratch buffer when there is nothing else.
+    fn splitFocused(self: *Session, dir: panes_mod.Dir) !void {
+        if (self.docs.items.len > 1) {
+            var k: usize = 1;
+            while (k <= self.docs.items.len) : (k += 1) {
+                const cand = (self.active + k) % self.docs.items.len;
+                if (self.panes.paneWithDoc(self.docs.items[cand].id) == null) {
+                    if (!self.panes.split(dir, self.docs.items[cand].id)) return;
+                    self.active = cand;
+                    return;
+                }
+            }
+        }
+        // Nothing else to show: the new pane starts on an empty buffer.
+        if (!self.panes.split(dir, 0)) return;
+        try self.add(null, "", null); // add() points the focused pane at it
     }
 
     /// Close the tab at `index`; a dirty tab becomes active and asks first.
     fn closeTabAt(self: *Session, index: usize, prompt: *?Prompt) void {
         if (index >= self.docs.items.len) return;
-        self.active = index;
+        self.focusDoc(index);
         if (self.docs.items[index].dirty) {
             prompt.* = .{ .kind = .confirm_close };
             return;
@@ -219,19 +298,35 @@ const Session = struct {
     fn closeActive(self: *Session) void {
         if (self.docs.items.len == 0) return;
         const ed = self.docs.items[self.active];
+        const id = ed.id;
         ed.deinit();
         self.allocator.destroy(ed);
         _ = self.docs.orderedRemove(self.active);
-        if (self.active >= self.docs.items.len and self.docs.items.len > 0) {
-            self.active = self.docs.items.len - 1;
+        // The pane showing it goes too; its sibling takes the parent's place.
+        if (self.panes.paneWithDoc(id)) |node| {
+            self.panes.focus = node;
+            self.panes.removeFocused();
         }
+        if (self.docs.items.len == 0) {
+            self.panes = panes_mod.Tree.empty();
+            return;
+        }
+        if (self.active >= self.docs.items.len) self.active = self.docs.items.len - 1;
+        self.ensurePaneDocs();
     }
 
     fn cycle(self: *Session, delta: isize) void {
         const n = self.docs.items.len;
         if (n <= 1) return;
         const i: isize = @as(isize, @intCast(self.active)) + delta;
-        self.active = @intCast(@mod(i, @as(isize, @intCast(n))));
+        self.focusDoc(@intCast(@mod(i, @as(isize, @intCast(n)))));
+    }
+
+    /// Move the focus to the next pane and follow it with the active document.
+    fn cyclePane(self: *Session, delta: isize) void {
+        if (self.panes.leaf_count <= 1) return;
+        self.panes.cycleFocus(delta);
+        self.syncActive();
     }
 
     /// Scroll the tab strip by one tab. Manual scrolling pins the strip, so the
@@ -365,7 +460,7 @@ fn run(init: std.process.Init.Minimal) !void {
         for (session.docs.items, 0..) |doc, i| {
             if (doc.path) |doc_path| {
                 if (std.mem.eql(u8, doc_path, p)) {
-                    session.active = i;
+                    session.focusDoc(i);
                     already = true;
                     break;
                 }
@@ -574,6 +669,23 @@ fn saveSession(session: *Session, exe_dir: ?[]const u8) void {
         const root_line = std.fmt.bufPrint(&line_buf, "tree_root {s}\n", .{t.rootPath()}) catch "";
         out.appendSlice(allocator, root_line) catch {};
     }
+    // Split layout, preorder: `p <tab>` for a leaf, `s <dir> <ratio>` for a
+    // split. Tab indices are remapped back to document ids on load.
+    {
+        var enc = std.ArrayList(panes_mod.Encoded).empty;
+        defer enc.deinit(allocator);
+        panes_mod.encode(&session.panes, &enc, allocator) catch {};
+        for (enc.items) |*e| {
+            const line = switch (e.*) {
+                .leaf => |id| blk: {
+                    const idx: u32 = if (session.docIndex(id)) |i| @intCast(i) else 0;
+                    break :blk std.fmt.bufPrint(&line_buf, "p {d}\n", .{idx}) catch continue;
+                },
+                .split => |sp| std.fmt.bufPrint(&line_buf, "s {d} {d}\n", .{ @intFromEnum(sp.dir), sp.ratio }) catch continue,
+            };
+            out.appendSlice(allocator, line) catch {};
+        }
+    }
     for (session.docs.items, 0..) |ed, i| {
         var buf_path: [1024]u8 = undefined;
         const bp = bufferPath(exe_dir, i, &buf_path);
@@ -607,19 +719,33 @@ fn loadSession(allocator: std.mem.Allocator, exe_dir: ?[]const u8, registry: *sy
     var tree_open = false;
     var tree_root: [1024]u8 = undefined;
     var tree_root_len: usize = 0;
+    var pane_enc = std.ArrayList(panes_mod.Encoded).empty;
+    defer pane_enc.deinit(allocator);
     while (lines.next()) |raw| {
         const line = std.mem.trimEnd(u8, raw, " \r");
         if (std.mem.startsWith(u8, line, "active ")) {
             active = std.fmt.parseInt(usize, line["active ".len..], 10) catch 0;
         } else if (std.mem.startsWith(u8, line, "count ")) {
             // informational only
-        } else if (std.mem.startsWith(u8, line, "tree ")) {
-            tree_open = std.mem.eql(u8, line["tree ".len..], "1");
         } else if (std.mem.startsWith(u8, line, "tree_root ")) {
+            // Before "tree ": every tree_root line also starts with "tree ".
             const root = line["tree_root ".len..];
             const n = @min(root.len, tree_root.len);
             @memcpy(tree_root[0..n], root[0..n]);
             tree_root_len = n;
+        } else if (std.mem.startsWith(u8, line, "tree ")) {
+            tree_open = std.mem.eql(u8, line["tree ".len..], "1");
+        } else if (std.mem.startsWith(u8, line, "p ")) {
+            const idx = std.fmt.parseInt(u32, line["p ".len..], 10) catch 0;
+            pane_enc.append(allocator, .{ .leaf = idx }) catch {};
+        } else if (std.mem.startsWith(u8, line, "s ")) {
+            var fields = std.mem.splitScalar(u8, line["s ".len..], ' ');
+            const dir = std.fmt.parseInt(u8, fields.next() orelse "0", 10) catch 0;
+            const ratio = std.fmt.parseInt(u8, fields.next() orelse "50", 10) catch 50;
+            pane_enc.append(allocator, .{ .split = .{
+                .dir = if (dir == 1) .rows else .columns,
+                .ratio = @min(@max(ratio, 10), 90),
+            } }) catch {};
         } else if (std.mem.startsWith(u8, line, "tab ")) {
             var fields = std.mem.splitScalar(u8, line["tab ".len..], '\t');
             const tab_path = fields.next() orelse continue;
@@ -658,6 +784,28 @@ fn loadSession(allocator: std.mem.Allocator, exe_dir: ?[]const u8, registry: *sy
     }
     if (loaded == 0) return false;
     session.active = @min(active, session.count() - 1);
+    // Rebuild the split layout. Saved leaves carry tab indices; map them back
+    // to document ids now that the tabs exist.
+    if (pane_enc.items.len > 0) {
+        for (pane_enc.items) |*e| {
+            switch (e.*) {
+                .leaf => |idx| {
+                    const i = @min(idx, @as(u32, @intCast(session.count() - 1)));
+                    e.* = .{ .leaf = session.docs.items[i].id };
+                },
+                .split => {},
+            }
+        }
+        if (panes_mod.decode(pane_enc.items)) |t| {
+            session.panes = t;
+            const want = session.docs.items[session.active].id;
+            if (session.panes.paneWithDoc(want)) |node| {
+                session.panes.focus = node;
+            } else if (session.panes.leaf_count > 0) {
+                session.panes.focus = session.panes.leaves[0];
+            }
+        }
+    }
     if (tree_open) {
         const root = if (tree_root_len > 0) tree_root[0..tree_root_len] else ".";
         session.tree = tree_mod.Tree.init(allocator, root) catch null;
@@ -757,6 +905,18 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
     // Closing the last tab empties the session; the run loop quits right after,
     // so any further event in the same chunk must not touch the editor.
     if (session.docs.items.len == 0) return;
+    // The mouse needs the pane geometry. The draw before input normally leaves
+    // it cached, but a click can arrive before the first frame.
+    if (session.panes.rect_count == 0) {
+        const sz = term.size();
+        const side: usize = if (session.tree != null) TREE_WIDTH else 0;
+        session.panes.layout(.{
+            .x = side,
+            .y = 1,
+            .w = if (sz.cols > side) @as(usize, sz.cols) - side else 0,
+            .h = viewRows(sz.rows),
+        });
+    }
     const nums = parseMouse(params);
     const button = nums[0];
     const x = nums[1];
@@ -790,7 +950,7 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
         while (i < session.tab_count) : (i += 1) {
             const span = session.tab_spans[i];
             if (x >= span[0] and x < span[1]) {
-                session.active = i; // a plain click switches
+                session.focusDoc(i); // a plain click switches
                 // A press only becomes a drag once the pointer really moves,
                 // so clicking a tab never flashes the drag chip.
                 session.press_tab = i;
@@ -835,7 +995,12 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
             session.scrollTabs(if (button == 64) -1 else 1);
             return;
         }
-        ed.movePage(if (button == 64) -1 else 1, 1, false);
+        // Over a pane the wheel scrolls that pane, not the focused one.
+        var target = ed;
+        if (paneUnder(session, x, y)) |node| {
+            if (session.docIndex(session.panes.nodes[node].doc)) |i| target = session.docs.items[i];
+        }
+        target.movePage(if (button == 64) -1 else 1, 1, false);
         return;
     }
     // Hovering the tab bar shows that tab's name in the status line, and
@@ -894,7 +1059,7 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
         while (i < session.tab_count) : (i += 1) {
             const span = session.tab_spans[i];
             if (x >= span[0] and x < span[1]) {
-                session.active = i;
+                session.focusDoc(i);
                 return;
             }
         }
@@ -907,13 +1072,25 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
         return;
     }
 
-    // Text: place the cursor at the clicked cell.
+    // Text: focus the pane under the pointer and place the cursor in it.
     if (y < 2 or y >= size.rows) return;
-    const row = ed.scroll_row + (y - 2);
-    const gutter: usize = if (session.config.line_numbers) digits(ed.lineCount()) + 1 else 0;
-    const screen_col = if (x > 0) @as(usize, x) - 1 else 0;
-    const col = if (screen_col > gutter) screen_col - gutter + ed.scroll_col else 0;
-    ed.gotoLineCol(row, col);
+    const sx = if (x > 0) @as(usize, x) - 1 else 0;
+    const sy = @as(usize, y) - 1;
+    const node = paneUnder(session, x, y) orelse return;
+    session.panes.focus = node;
+    session.syncActive();
+    const rect = session.panes.rectOf(node) orelse return;
+    const target = session.current();
+    const gutter: usize = if (session.config.line_numbers) digits(target.lineCount()) + 1 else 0;
+    const row = target.scroll_row + (sy - rect.y);
+    const col = if (sx >= rect.x + gutter) sx - rect.x - gutter + target.scroll_col else 0;
+    target.gotoLineCol(row, col);
+}
+
+/// The pane under a 1-based screen cell, if any.
+fn paneUnder(session: *Session, x: u16, y: u16) ?u8 {
+    if (x == 0 or y < 2) return null;
+    return session.panes.paneAt(@as(usize, x) - 1, @as(usize, y) - 1);
 }
 
 /// Rows available for document text: everything but the tab bar and status line.
@@ -971,6 +1148,10 @@ fn defaultKeyFor(action: keys.Action, shift: bool) DefaultKey {
         .find_prev => moveCsi('R', true),
         .next_tab => .{ .csi = .{ .params = "6;5", .final = '~' } },
         .prev_tab => .{ .csi = .{ .params = "5;5", .final = '~' } },
+        .split_columns => .{ .byte = 0x1c },
+        .split_rows => .{ .csi = .{ .params = "18", .final = '~' } }, // F7
+        .next_pane => .{ .csi = .{ .params = "17", .final = '~' } }, // F6
+        .prev_pane => .{ .csi = .{ .params = if (shift) "17;2" else "17;5", .final = '~' } },
     };
 }
 
@@ -1032,6 +1213,8 @@ fn csiKeyName(buf: []u8, params_bytes: []const u8, final: u8) ?[]const u8 {
             6 => "pgdn",
             11 => "f1",
             12 => "f2",
+            17 => "f6",
+            18 => "f7",
             else => return null,
         },
         else => return null,
@@ -1092,6 +1275,9 @@ fn applyByte(
             session.closeActive();
             if (session.count() == 0) running.* = false;
         }
+    } else if (b == 0x1c) { // Ctrl+\: split the pane side by side
+        try session.splitFocused(.columns);
+        setMsg(msg_buf, msg, "Split");
     } else if (b == 0x02) { // Ctrl+B: file tree
         if (session.tree != null) {
             session.tree_focus = false;
@@ -1287,7 +1473,7 @@ fn executePrompt(
             defer allocator.free(data);
             // Already open: switch to that tab rather than opening it twice.
             if (session.findByPath(text)) |idx| {
-                session.active = idx;
+                session.focusDoc(idx);
                 setMsg(msg_buf, msg, "Switched");
                 return true;
             }
@@ -1400,6 +1586,8 @@ fn applyCsi(
             11 => help.* = !help.*, // F1
             5 => if (ctrl) session.cycle(-1) else ed.movePage(-1, view_rows, shift),
             6 => if (ctrl) session.cycle(1) else ed.movePage(1, view_rows, shift),
+            17 => session.cyclePane(if (shift) -1 else 1), // F6 / Shift+F6
+            18 => try session.splitFocused(.rows), // F7
             else => {},
         },
         else => {},
@@ -1484,18 +1672,8 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
     const h: usize = s.rows;
     if (h < 3 or w < 4) return;
 
-    const ed = session.current();
     const theme = session.config.theme;
-    const view_rows = h - 2; // row 0 is the tab bar, row h-1 the status line
-    const total = ed.lineCount();
-    const gutter: usize = if (session.config.line_numbers) digits(total) + 1 else 0;
-    const side: usize = if (session.tree != null) TREE_WIDTH else 0;
-    const text_cols: usize = if (w > side + gutter + 1) w - side - gutter - 1 else 0;
-    ed.scrollToCursor(view_rows, text_cols);
-
-    const gutter_fg = theme.gutter;
     const text_fg = theme.text;
-    const sel_bg = theme.selection;
     const bar_bg = theme.bar_bg;
     const accent = theme.accent;
     const hint_bg = theme.hint_bg;
@@ -1509,32 +1687,121 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
         }
     }
 
-    drawTabBar(s, session, w, text_fg, gutter_fg);
+    drawTabBar(s, session, w, text_fg, theme.gutter);
+    const side: usize = if (session.tree != null) TREE_WIDTH else 0;
     if (session.tree) |*t| drawTree(s, t, session.tree_focus, h, theme, session.config.icons_unicode);
 
-    const sel = session.current().selectionRange();
-    const rc = session.current().rowCol();
+    // The text area, split into panes. Row 0 is the tab bar, row h-1 the
+    // status line; the sidebar takes the left columns.
+    const area = panes_mod.Rect{
+        .x = side,
+        .y = 1,
+        .w = if (w > side) w - side else 0,
+        .h = h - 2,
+    };
+    session.panes.layout(area);
+    var pi: usize = 0;
+    while (pi < session.panes.rect_count) : (pi += 1) {
+        const pr = session.panes.rects[pi];
+        const idx = session.docIndex(session.panes.nodes[pr.node].doc) orelse continue;
+        drawPane(s, session, session.docs.items[idx], pr.rect, pr.node == session.panes.focus);
+    }
+    // Separators; the ones beside the focused pane glow in the accent colour.
+    const focus_rect = session.panes.rectOf(session.panes.focus);
+    pi = 0;
+    while (pi < session.panes.sep_count) : (pi += 1) {
+        const sp = session.panes.seps[pi];
+        var hot = false;
+        if (focus_rect) |fr| {
+            hot = if (sp.dir == .columns)
+                (fr.x == sp.x + 1 or fr.x + fr.w == sp.x)
+            else
+                (fr.y == sp.y + 1 or fr.y + fr.h == sp.y);
+        }
+        const fg = if (hot) accent else theme.gutter;
+        if (sp.dir == .columns) {
+            var k: usize = 0;
+            while (k < sp.len) : (k += 1) {
+                s.put(@intCast(sp.x), @intCast(sp.y + k), .{ .ch = '\u{2502}', .fg = fg, .bg = theme.background });
+            }
+        } else {
+            var k: usize = 0;
+            while (k < sp.len) : (k += 1) {
+                s.put(@intCast(sp.x + k), @intCast(sp.y), .{ .ch = '\u{2500}', .fg = fg, .bg = theme.background });
+            }
+        }
+    }
+
+    if (prompt) |p| {
+        // One line of the directory being typed, like `ls` (paths only).
+        if ((p.kind == .save_as or p.kind == .open) and h >= 3) {
+            var line = std.ArrayList(u8).empty;
+            defer line.deinit(s.allocator);
+            const dir = promptDir(p.buf[0..p.len]);
+            os.listDirLine(s.allocator, dir, &line) catch {};
+            const y: u16 = @intCast(h - 2);
+            var hx: usize = 0;
+            while (hx < w) : (hx += 1) s.put(@intCast(hx), y, .{ .bg = hint_bg });
+            const show = line.items[0..@min(line.items.len, w)];
+            s.putStr(0, y, show, .{ .bg = hint_bg, .fg = hint_fg });
+        }
+        drawPrompt(s, p, w, h, bar_bg, accent, text_fg);
+    } else {
+        var status_msg = msg;
+        if (session.hover_tab) |hi| {
+            if (hi < session.docs.items.len) {
+                // The name only: long paths look bad in the status line.
+                if (session.docs.items[hi].path) |hp| status_msg = baseName(hp);
+            }
+        }
+        // The status line always describes the focused pane's document.
+        const active = session.current();
+        drawStatus(s, active, status_msg, w, h, active.rowCol(), active.lineCount(), bar_bg, accent, hint_fg);
+    }
+
+    // The help panel covers the bottom rows, so a prompt (which lives on the
+    // last row) takes precedence over it while it is open.
+    if (help and prompt == null) drawHelp(s, session, w, h, theme);
+}
+
+/// Draw one pane's document inside `r`. Only the focused pane draws the block
+/// cursor and the current-line tint, so the focus is visible even when the
+/// panes are narrow.
+fn drawPane(s: *render.Screen, session: *Session, ed: *Editor, r: panes_mod.Rect, focused: bool) void {
+    if (r.w == 0 or r.h == 0) return;
+    const theme = session.config.theme;
+    const total = ed.lineCount();
+    const gutter: usize = if (session.config.line_numbers) digits(total) + 1 else 0;
+    const text_cols: usize = if (r.w > gutter + 1) r.w - gutter - 1 else 0;
+    ed.scrollToCursor(r.h, text_cols);
+
+    const right = r.x + r.w;
+    const gutter_fg = theme.gutter;
+    const text_fg = theme.text;
+    const sel_bg = theme.selection;
+    const sel = ed.selectionRange();
+    const rc = ed.rowCol();
     const line_bg = theme.lineHighlight();
-    const cur_dcol = session.current().cursorDisplayCol();
+    const cur_dcol = ed.cursorDisplayCol();
 
     // Syntax state at the top of the viewport, carried down the visible rows.
     var syn_state = ed.syntaxStateAt(ed.scroll_row);
     var spans: [syntax.MAX_SPANS]syntax.Span = undefined;
 
     var row: usize = 0;
-    while (row < view_rows) : (row += 1) {
-        const y: u16 = @intCast(row + 1);
+    while (row < r.h) : (row += 1) {
+        const y: u16 = @intCast(r.y + row);
         const lr = ed.scroll_row + row;
         if (lr >= total) break;
         const line = ed.line(lr);
         const line_start = ed.rowStart(lr);
         const line_end = line_start + line.len;
         const nspans = ed.highlightLine(lr, &syn_state, &spans);
-        const cursor_line = lr == rc.row and std.meta.activeTag(line_bg) != .default;
+        const cursor_line = focused and lr == rc.row and std.meta.activeTag(line_bg) != .default;
         const row_bg = if (cursor_line) line_bg else theme.background;
         if (cursor_line) {
-            var cx: usize = side; // never paint over the sidebar
-            while (cx < w) : (cx += 1) s.put(@intCast(cx), y, .{ .ch = ' ', .bg = line_bg });
+            var cx: usize = r.x; // the pane's own columns only
+            while (cx < right) : (cx += 1) s.put(@intCast(cx), y, .{ .ch = ' ', .bg = line_bg });
         }
 
         // Gutter.
@@ -1543,13 +1810,13 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
             const num = std.fmt.bufPrint(&num_buf, "{d}", .{lr + 1}) catch "";
             const gx = gutter - 1;
             var k: usize = 0;
-            while (k + num.len < gx) : (k += 1) s.put(@intCast(side + k), y, .{ .ch = ' ', .bg = row_bg });
-            s.putStr(@intCast(side + gx - num.len), y, num, .{ .fg = gutter_fg, .bg = row_bg });
+            while (k + num.len < gx) : (k += 1) s.put(@intCast(r.x + k), y, .{ .ch = ' ', .bg = row_bg });
+            s.putStr(@intCast(r.x + gx - num.len), y, num, .{ .fg = gutter_fg, .bg = row_bg });
         }
 
         // Text (wide characters take two cells; the second is marked cont).
         var dcol: usize = 0;
-        var sx: usize = side + gutter;
+        var sx: usize = r.x + gutter;
         var bi: usize = 0;
         var span_i: usize = 0;
         while (bi < line.len) {
@@ -1572,7 +1839,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
                         if (selected) cell.bg = sel_bg;
                         s.put(@intCast(sx), y, cell);
                         sx += 1;
-                        if (sx >= w) break;
+                        if (sx >= right) break;
                     }
                 }
                 continue;
@@ -1580,7 +1847,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
             const cw = width.cellWidth(cp);
             if (cw == 0) continue; // combining mark: attaches to the previous cell
             if (dcol >= ed.scroll_col) {
-                if (sx + cw > w) break;
+                if (sx + cw > right) break;
                 var cell = render.Cell{ .ch = cp, .fg = fg, .bg = row_bg };
                 if (selected) cell.bg = sel_bg;
                 s.put(@intCast(sx), y, cell);
@@ -1597,15 +1864,15 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
         // Selection covering the newline (or end of file).
         if (sel) |sr| {
             if (line_end >= sr.start and line_end < sr.end and dcol >= ed.scroll_col) {
-                const cell_x = gutter + (dcol - ed.scroll_col);
-                if (cell_x < w) s.put(@intCast(cell_x), y, .{ .ch = ' ', .bg = sel_bg });
+                const cell_x = r.x + gutter + (dcol - ed.scroll_col);
+                if (cell_x < right) s.put(@intCast(cell_x), y, .{ .ch = ' ', .bg = sel_bg });
             }
         }
 
         // Block cursor (drawn last so it wins over selection).
-        if (lr == rc.row and cur_dcol >= ed.scroll_col) {
-            const cx = side + gutter + (cur_dcol - ed.scroll_col);
-            if (cx < w) {
+        if (focused and lr == rc.row and cur_dcol >= ed.scroll_col) {
+            const cx = r.x + gutter + (cur_dcol - ed.scroll_col);
+            if (cx < right) {
                 var under: u21 = ' ';
                 if (rc.col < line.len) under = utf8.cpAt(line, rc.col);
                 if (under < 0x20) under = ' ';
@@ -1614,7 +1881,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
                     under = ' ';
                     uw = 1;
                 }
-                if (cx + uw <= w) {
+                if (cx + uw <= right) {
                     s.put(@intCast(cx), y, .{ .ch = under, .fg = text_fg, .attr = .{ .reverse = true } });
                     if (uw == 2) {
                         s.put(@intCast(cx + 1), y, .{ .ch = ' ', .fg = text_fg, .attr = .{ .reverse = true }, .cont = true });
@@ -1623,35 +1890,6 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
             }
         }
     }
-
-    if (prompt) |p| {
-        // One line of the directory being typed, like `ls` (paths only).
-        if ((p.kind == .save_as or p.kind == .open) and h >= 3) {
-            var line = std.ArrayList(u8).empty;
-            defer line.deinit(s.allocator);
-            const dir = promptDir(p.buf[0..p.len]);
-            os.listDirLine(s.allocator, dir, &line) catch {};
-            const y: u16 = @intCast(h - 2);
-            var hx: usize = 0;
-            while (hx < w) : (hx += 1) s.put(@intCast(hx), y, .{ .bg = hint_bg });
-            const show = line.items[0..@min(line.items.len, w)];
-            s.putStr(0, y, show, .{ .bg = hint_bg, .fg = hint_fg });
-        }
-        drawPrompt(s, p, w, h, bar_bg, accent, text_fg);
-    } else {
-        var status_msg = msg;
-    if (session.hover_tab) |hi| {
-        if (hi < session.docs.items.len) {
-            // The name only: long paths look bad in the status line.
-            if (session.docs.items[hi].path) |hp| status_msg = baseName(hp);
-        }
-    }
-    drawStatus(s, ed, status_msg, w, h, rc, total, bar_bg, accent, hint_fg);
-    }
-
-    // The help panel covers the bottom rows, so a prompt (which lives on the
-    // last row) takes precedence over it while it is open.
-    if (help and prompt == null) drawHelp(s, session, w, h, theme);
 }
 
 /// One row of tabs: ` name [+] ` per document, the active one highlighted.
@@ -1799,7 +2037,7 @@ fn openTreeSelection(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
     for (session.docs.items, 0..) |doc, i| {
         if (doc.path) |p| {
             if (std.mem.eql(u8, p, path)) {
-                session.active = i;
+                session.focusDoc(i);
                 session.tree_focus = false;
                 return;
             }
@@ -2189,7 +2427,7 @@ fn acceptPicker(
             for (session.docs.items, 0..) |doc, i| {
                 if (doc.path) |doc_path| {
                     if (std.mem.eql(u8, doc_path, path)) {
-                        session.active = i;
+                        session.focusDoc(i);
                         closePicker(slot);
                         return;
                     }
@@ -3383,6 +3621,74 @@ test "the close button on the last tab asks to quit instead of crashing" {
     // document that is now gone.
     handleMouse(&d.session, "<0;5;3", 'M', &help, &pr, &mb, &msg);
     try std.testing.expectEqual(@as(usize, 0), d.session.count());
+}
+
+test "ctrl+backslash splits the window into two panes" {
+    var d = try Drive.start("one\ntwo");
+    defer d.stop();
+    try d.send("\x1c"); // Ctrl+\
+    // The new pane starts on a scratch buffer, so there is a tab for it.
+    try std.testing.expectEqual(@as(usize, 2), d.session.count());
+    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
+    try std.testing.expectEqualStrings("", d.session.current().text());
+
+    var s = try render.Screen.init(std.testing.allocator, 40, 10);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+    try std.testing.expectEqual(@as(usize, 2), d.session.panes.rect_count);
+    try std.testing.expectEqual(@as(usize, 1), d.session.panes.sep_count);
+    // A vertical rule separates the panes.
+    const sep_x = d.session.panes.seps[0].x;
+    try std.testing.expectEqual(@as(u21, 0x2502), s.back[1 * s.cols + sep_x].ch);
+    // Both documents are drawn, each in its own rectangle.
+    try std.testing.expectEqual(@as(usize, 0), d.session.panes.rects[0].rect.x);
+    try std.testing.expectEqual(@as(usize, 20), d.session.panes.rects[1].rect.x);
+}
+
+test "F6 moves the focus between panes" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    try d.send("\x1c");
+    const right = d.session.active;
+    try d.send("\x1b[17~"); // F6
+    try std.testing.expect(d.session.active != right);
+    try d.send("\x1b[17;2~"); // Shift+F6
+    try std.testing.expectEqual(right, d.session.active);
+}
+
+test "closing a tab closes its pane" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    try d.send("\x1c");
+    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
+    try d.send("\x17"); // Ctrl+W on the focused (scratch) tab
+    try std.testing.expectEqual(@as(usize, 1), d.session.count());
+    try std.testing.expectEqual(@as(usize, 1), d.session.panes.live);
+    // The surviving pane keeps its document and gets the whole width back.
+    try std.testing.expectEqualStrings("one", d.session.current().text());
+    var s = try render.Screen.init(std.testing.allocator, 40, 10);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+    try std.testing.expectEqual(@as(usize, 40), d.session.panes.rects[0].rect.w);
+}
+
+test "clicking a pane focuses it and places the cursor there" {
+    var d = try Drive.start("one\ntwo\nthree");
+    defer d.stop();
+    try d.send("\x1c"); // left: "one/two/three", right: scratch
+    var s = try render.Screen.init(std.testing.allocator, 40, 10);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+    const left_doc = d.session.docIndex(d.session.panes.nodes[d.session.panes.rects[0].node].doc).?;
+
+    // Click the third text row of the left pane (row 4, column 4 on screen).
+    var help = false;
+    var pr: ?Prompt = null;
+    var mb: [64]u8 = undefined;
+    var msg: []const u8 = "";
+    handleMouse(&d.session, "<0;4;4", 'M', &help, &pr, &mb, &msg);
+    try std.testing.expectEqual(left_doc, d.session.active);
+    try std.testing.expectEqual(@as(usize, 2), d.session.current().rowCol().row);
 }
 
 test "a failed save-as keeps the old path and the dirty flag" {

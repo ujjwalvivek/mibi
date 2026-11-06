@@ -837,6 +837,42 @@ def session_restores_tabs_and_unsaved_edits(m, path):
 
 
 @check
+def split_layout_persists(m, path):
+    """The split layout and both documents come back after a restart."""
+    work = os.path.join(SHOT_DIR, "work-split-session")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello\nworld")
+
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        proc.send("\x1c")  # Ctrl+\ : split
+        proc.wait_quiet()
+        proc.send("scratch")  # typed into the new pane
+        proc.wait_quiet()
+        proc.send("\x11")  # quit
+        proc.wait_quiet()
+        proc.send("y")
+        proc.wait_quiet()
+    finally:
+        proc.close()
+
+    again = Mibi([], cwd=work, keep_session=True)
+    try:
+        assert again.wait_for("hello", timeout=5), "the document was not restored"
+        again.wait_quiet()
+        screen = again.screen_text()
+        assert "\u2502" in screen, f"the split was not restored:\n{screen}"
+        assert "scratch" in screen, f"the second pane's text was not restored:\n{screen}"
+        again.shot("33-split-session")
+    finally:
+        again.close()
+
+
+@check
 def dragging_a_tab_reorders_it(m, path):
     """Press on a tab, drag to the other one, release: the tabs swap."""
     m.send("\x14")  # second tab
@@ -977,6 +1013,38 @@ def tab_strip_scrolls_when_it_overflows(m, path):
     first = m.screen_text().splitlines()[0]
     assert "notes.txt" in first, f"the strip did not scroll back to the start: {first!r}"
     m.shot("31-tab-scroll")
+
+
+@check
+def splitting_creates_two_panes(m, path):
+    """Ctrl+\\ splits the window; each pane edits its own document."""
+    m.send("\x1c")  # Ctrl+\
+    m.wait_quiet()
+    screen = m.screen_text()
+    lines = screen.splitlines()
+    sep_cols = {row.index("\u2502") for row in lines if "\u2502" in row}
+    assert sep_cols, f"no pane separator:\n{screen}"
+    sep = sep_cols.pop()
+    assert 20 <= sep <= 60, f"unexpected separator column {sep}:\n{screen}"
+
+    # Typing goes into the new (right) pane.
+    m.send("right")
+    m.wait_quiet()
+    lines = m.screen_text().splitlines()
+    left_text = "\n".join(row[:sep] for row in lines[1:-1])
+    right_text = "\n".join(row[sep + 1:] for row in lines[1:-1])
+    assert "right" in right_text, f"the new pane did not get the typing:\n{right_text!r}"
+    assert "hello" in left_text, f"the left pane lost its document:\n{left_text!r}"
+
+    # F6 focuses the other pane, so typing lands on the left.
+    m.send("\x1b[17~")
+    m.wait_quiet()
+    m.send("X")
+    m.wait_quiet()
+    lines = m.screen_text().splitlines()
+    left_text = "\n".join(row[:sep] for row in lines[1:-1])
+    assert "Xhello" in left_text, f"focus did not move to the left pane:\n{left_text!r}"
+    m.shot("32-split")
 
 
 @check

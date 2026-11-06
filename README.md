@@ -128,6 +128,8 @@ packaging.
 | `Ctrl+O`                  | fuzzy file picker: type to filter, Enter opens in a new tab |
 | `Ctrl+T` / `Ctrl+W`       | new tab / close tab (closing the last one quits)      |
 | `Ctrl+PgUp` / `Ctrl+PgDn` | previous / next tab                                   |
+| `Ctrl+\` / `F7`          | split the pane side by side / stacked                 |
+| `F6` / `Shift+F6`         | next / previous pane (or click a pane)                |
 | `F2`                      | theme picker (arrows preview live, Enter keeps and saves, Esc restores) |
 | `Ctrl+P`                  | command palette: every action, fuzzy-filtered |
 | `Ctrl+?` / `F1`           | help panel; shows your bindings, hinted at the status bar's right edge |
@@ -170,6 +172,12 @@ packaging.
   languages ship in the repo, and adding one is dropping in a file - no
   rebuild. Multi-line comments and strings carry state across lines.
 - Line numbers, status bar (name, dirty `[+]`, cursor, line count, size).
+- Split panes (`Ctrl+\` side by side, `F7` stacked): a binary split tree with
+  a `│`/`─` rule between panes, the rule glowing next to the focused
+  pane. Each pane edits its own document with its own cursor, selection and
+  scroll; `F6` cycles the focus and clicking inside a pane focuses it and puts
+  the cursor there. Closing a tab closes its pane, and the layout is saved in
+  the session file.
 - Multiple documents as tabs: file names only in the tab bar, a `+` button
   pinned to the right edge and a per-tab `x` to close (with a cell of padding
   so it does not touch the tab edge; hovering `x`, `+` or the scroll arrows
@@ -210,12 +218,12 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu |  111,216 |
-| x86_64-linux-gnu  |  121,160 |
-| x86_64-macos      |  132,604 |
-| aarch64-macos     |  162,952 |
-| x86_64-windows    |  180,736 |
+| aarch64-linux-gnu |  119,376 |
+| x86_64-linux-gnu  |  130,392 |
+| x86_64-macos      |  140,788 |
+| aarch64-macos     |  163,448 |
+| x86_64-windows    |  189,952 |
 
 ## Not yet
 
-Splits, multi-cursor, macros, embedded terminal.
+Multi-cursor, macros, embedded terminal.

@@ -24,16 +24,17 @@ if (-not (Test-Path $Zig)) {
     & (Join-Path $Root 'tools\get-zig.ps1')
 }
 
-# Per-target regression budgets, measured after the Phase 2 hardening pass with
-# ~25% headroom. Phase gates from PLAN.md: Phase 1 <= 80 KB, Phase 2 <= 150 KB,
-# Phase 3 <= 350 KB, hard ceiling 1 MB (all targets are far below it).
+# Per-target regression budgets, re-measured after Phase 4 (splits) with ~15%
+# headroom. Phase gates from PLAN.md: Phase 1 <= 80 KB, Phase 2 <= 150 KB,
+# Phase 3 <= 350 KB, Phase 4 <= 700 KB, hard ceiling 1 MB (every target is far
+# below it).
 $targets = [ordered]@{
-    'x86_64-linux-gnu'   = @{ budget = 128 * $KB; exe = 'mibi' }
-    'aarch64-linux-gnu'  = @{ budget = 128 * $KB; exe = 'mibi' }
-    'x86_64-macos'       = @{ budget = 160 * $KB; exe = 'mibi' }
-    'aarch64-macos'      = @{ budget = 160 * $KB; exe = 'mibi' }
-    'x86_64-windows'     = @{ budget = 192 * $KB; exe = 'mibi.exe' }
-    'x86_64-windows-gnu' = @{ budget = 192 * $KB; exe = 'mibi.exe' }
+    'x86_64-linux-gnu'   = @{ budget = 144 * $KB; exe = 'mibi' }
+    'aarch64-linux-gnu'  = @{ budget = 144 * $KB; exe = 'mibi' }
+    'x86_64-macos'       = @{ budget = 176 * $KB; exe = 'mibi' }
+    'aarch64-macos'      = @{ budget = 176 * $KB; exe = 'mibi' }
+    'x86_64-windows'     = @{ budget = 208 * $KB; exe = 'mibi.exe' }
+    'x86_64-windows-gnu' = @{ budget = 208 * $KB; exe = 'mibi.exe' }
 }
 
 $rows = @()

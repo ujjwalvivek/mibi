@@ -60,6 +60,9 @@ fn appendExpanded(
 pub const Editor = struct {
     allocator: Allocator,
     buf: Buffer,
+    /// Stable document id, assigned by the session. Panes and the session file
+    /// refer to documents by this id, so reordering tabs cannot confuse them.
+    id: u32 = 0,
     cursor: usize = 0,
     /// Cells a tab advances to; set from the config.
     tab_width: usize = 4,
