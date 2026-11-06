@@ -83,6 +83,17 @@ pub const Config = struct {
     format_rules: [16]FormatRule = [_]FormatRule{.{}} ** 16,
     format_count: usize = 0,
     format_on_save: bool = false,
+    /// `[terminal]`: the shell the embedded terminal runs (empty = the
+    /// platform default) and the panel height in rows.
+    terminal_command: [256]u8 = [_]u8{0} ** 256,
+    terminal_command_len: usize = 0,
+    terminal_height: usize = 12,
+
+    /// The shell configured for the embedded terminal, or null for the default.
+    pub fn terminalCommand(self: *const Config) ?[]const u8 {
+        if (self.terminal_command_len == 0) return null;
+        return self.terminal_command[0..self.terminal_command_len];
+    }
 
     pub const FormatRule = struct {
         ext: [16]u8 = [_]u8{0} ** 16,
@@ -214,6 +225,18 @@ pub fn apply(config: *Config, text: []const u8) void {
                 @memcpy(r.cmd[0..m], v[0..m]);
                 r.cmd_len = m;
                 config.format_count += 1;
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, entry.section, "terminal")) {
+            if (std.mem.eql(u8, entry.key, "command")) {
+                const v = std.mem.trim(u8, entry.value, " \t");
+                const n = @min(v.len, config.terminal_command.len);
+                @memcpy(config.terminal_command[0..n], v[0..n]);
+                config.terminal_command_len = n;
+            } else if (std.mem.eql(u8, entry.key, "height")) {
+                const n = std.fmt.parseInt(usize, std.mem.trim(u8, entry.value, " \t"), 10) catch continue;
+                config.terminal_height = @min(@max(n, 3), 60);
             }
             continue;
         }

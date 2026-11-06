@@ -17,6 +17,10 @@ pub const Attr = packed struct {
     bold: bool = false,
     underline: bool = false,
     reverse: bool = false,
+    /// Only the embedded terminal uses these today; the editor never sets them.
+    dim: bool = false,
+    italic: bool = false,
+    strike: bool = false,
 };
 
 pub const Cell = struct {
@@ -41,7 +45,7 @@ fn colorEql(a: Color, b: Color) bool {
 
 fn cellEql(a: Cell, b: Cell) bool {
     return a.ch == b.ch and a.cont == b.cont and
-        @as(u3, @bitCast(a.attr)) == @as(u3, @bitCast(b.attr)) and
+        @as(u6, @bitCast(a.attr)) == @as(u6, @bitCast(b.attr)) and
         colorEql(a.fg, b.fg) and colorEql(a.bg, b.bg);
 }
 
@@ -155,26 +159,23 @@ pub const Screen = struct {
             .indexed => |n| try std.fmt.bufPrint(&bg_buf, "48;5;{d}", .{n}),
             .rgb => |c| try std.fmt.bufPrint(&bg_buf, "48;2;{d};{d};{d}", .{ c.r, c.g, c.b }),
         };
-        var pre_buf: [8]u8 = undefined;
+        var pre_buf: [16]u8 = undefined;
         var p: usize = 0;
-        if (cell.attr.bold) {
-            pre_buf[p] = '1';
-            p += 1;
-        }
-        if (cell.attr.underline) {
+        const codes = [_]struct { on: bool, code: u8 }{
+            .{ .on = cell.attr.bold, .code = '1' },
+            .{ .on = cell.attr.dim, .code = '2' },
+            .{ .on = cell.attr.italic, .code = '3' },
+            .{ .on = cell.attr.underline, .code = '4' },
+            .{ .on = cell.attr.reverse, .code = '7' },
+            .{ .on = cell.attr.strike, .code = '9' },
+        };
+        for (codes) |c| {
+            if (!c.on) continue;
             if (p > 0) {
                 pre_buf[p] = ';';
                 p += 1;
             }
-            pre_buf[p] = '4';
-            p += 1;
-        }
-        if (cell.attr.reverse) {
-            if (p > 0) {
-                pre_buf[p] = ';';
-                p += 1;
-            }
-            pre_buf[p] = '7';
+            pre_buf[p] = c.code;
             p += 1;
         }
         var sgr_buf: [80]u8 = undefined;
@@ -232,7 +233,7 @@ pub const Screen = struct {
                 }
 
                 if (!colorEql(last_fg, b.fg) or !colorEql(last_bg, b.bg) or
-                    @as(u3, @bitCast(last_attr)) != @as(u3, @bitCast(b.attr)))
+                    @as(u6, @bitCast(last_attr)) != @as(u6, @bitCast(b.attr)))
                 {
                     try self.appendSgr(b);
                     last_fg = b.fg;

@@ -673,6 +673,44 @@ def mouse_click_places_the_cursor(m, path):
 
 
 @check
+def double_and_triple_click_select(m, path):
+    """Double click selects a word, triple click selects the whole line."""
+    work = os.path.join(SHOT_DIR, "work-clicks")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "words.txt"), "w", encoding="utf-8") as f:
+        f.write("alpha beta gamma\nsecond line\n")
+    proc = Mibi(["words.txt"], cwd=work)
+    try:
+        assert proc.wait_for("alpha beta gamma"), "editor did not start"
+        proc.wait_quiet()
+        # "beta" starts at column 6; the gutter is 2 cells, so screen column 9
+        # of the first text row (screen row 2) lands inside the word. The clicks
+        # go out as one write: send() settles between keystrokes, which is far
+        # slower than a double click.
+        proc.proc.write("\x1b[<0;9;2M\x1b[<0;9;2m" * 2)
+        proc.wait_quiet()
+        proc.send("X")
+        proc.wait_quiet()
+        screen = proc.screen_text()
+        assert "alpha X gamma" in screen, f"double click did not select the word:\n{screen}"
+
+        proc.send("\x1a")  # undo the replacement
+        proc.wait_quiet()
+        # Three clicks in one burst: the whole line gets selected.
+        proc.proc.write("\x1b[<0;9;2M\x1b[<0;9;2m" * 3)
+        proc.wait_quiet()
+        proc.send("Y")
+        proc.wait_quiet()
+        screen = proc.screen_text()
+        assert "alpha beta gamma" not in screen, f"triple click did not select the line:\n{screen}"
+        assert "Y" in screen and "second line" in screen, f"triple click lost the next line:\n{screen}"
+        proc.shot("19b-double-click")
+    finally:
+        proc.close()
+
+
+@check
 def mouse_clicks_tabs_and_picker(m, path):
     """Click a tab to switch, click picker rows to select and accept."""
     work = os.path.join(SHOT_DIR, "work-click")

@@ -331,6 +331,39 @@ pub const Editor = struct {
         return std.ascii.isAlphanumeric(c) or c == '_';
     }
 
+    /// Double click: select the run of word characters at `at`. Punctuation
+    /// selects its own run, and a click in the gap right after a word still
+    /// selects that word, because that is where the pointer usually lands.
+    pub fn selectWordAt(self: *Editor, at: usize) void {
+        const f = self.buf.flat();
+        if (f.len == 0) return;
+        var i = if (at >= f.len) f.len - 1 else at;
+        if (!isWordChar(f[i]) and i > 0 and isWordChar(f[i - 1])) i -= 1;
+        const wordish = isWordChar(f[i]);
+        var start = i;
+        while (start > 0 and isWordChar(f[start - 1]) == wordish) start -= 1;
+        var end = i;
+        while (end < f.len and isWordChar(f[end]) == wordish) end += 1;
+        if (end <= start) return; // whitespace: nothing worth selecting
+        self.sel_anchor = start;
+        self.cursor = end;
+        self.pref_col = null;
+        self.clearCursors();
+    }
+
+    /// Triple click: select the whole line at `at`, without its newline, so
+    /// typing over it keeps the line break.
+    pub fn selectLineAt(self: *Editor, at: usize) void {
+        const row = self.rowColAt(at).row;
+        const start = self.rowStart(row);
+        const len = self.line(row).len;
+        if (len == 0) return;
+        self.sel_anchor = start;
+        self.cursor = start + len;
+        self.pref_col = null;
+        self.clearCursors();
+    }
+
     pub fn moveWordLeft(self: *Editor, extend: bool) void {
         self.prepMove(extend);
         const f = self.buf.flat();
@@ -1226,4 +1259,36 @@ test "regex replace expands capture groups" {
     const n = try ed.replaceAll("(\\w+)=(\\d+)", "$2:$1");
     try std.testing.expectEqual(@as(usize, 2), n);
     try std.testing.expectEqualStrings("1:foo 2:bar", ed.text());
+}
+
+test "double click selects the word under the pointer" {
+    var e = try Editor.init(std.testing.allocator, null, "alpha beta gamma\nsecond");
+    defer e.deinit();
+
+    e.selectWordAt(6);
+    try std.testing.expectEqual(@as(?usize, 6), e.sel_anchor);
+    try std.testing.expectEqual(@as(usize, 10), e.cursor);
+    // Typing replaces the whole selection.
+    try e.insertText("X");
+    try std.testing.expectEqualStrings("alpha X gamma\nsecond", e.text());
+}
+
+test "double click on the gap after a word still selects it" {
+    var e = try Editor.init(std.testing.allocator, null, "alpha beta gamma");
+    defer e.deinit();
+
+    e.selectWordAt(10); // the space right after "beta"
+    try std.testing.expectEqual(@as(?usize, 6), e.sel_anchor);
+    try std.testing.expectEqual(@as(usize, 10), e.cursor);
+}
+
+test "triple click selects the whole line but not its newline" {
+    var e = try Editor.init(std.testing.allocator, null, "alpha beta gamma\nsecond");
+    defer e.deinit();
+
+    e.selectLineAt(6);
+    try std.testing.expectEqual(@as(?usize, 0), e.sel_anchor);
+    try std.testing.expectEqual(@as(usize, 16), e.cursor);
+    try e.insertText("Y");
+    try std.testing.expectEqualStrings("Y\nsecond", e.text());
 }

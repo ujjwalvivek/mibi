@@ -72,6 +72,12 @@ const win = if (is_windows) struct {
     extern "kernel32" fn ReadConsoleInputW(h: HANDLE, buf: *INPUT_RECORD, len: DWORD, read: *DWORD) callconv(.winapi) BOOL;
     extern "kernel32" fn GetNumberOfConsoleInputEvents(h: HANDLE, n: *DWORD) callconv(.winapi) BOOL;
     extern "kernel32" fn WaitForSingleObject(hHandle: HANDLE, dwMilliseconds: DWORD) callconv(.winapi) DWORD;
+    extern "kernel32" fn WaitForMultipleObjects(
+        nCount: DWORD,
+        lpHandles: [*]const HANDLE,
+        bWaitAll: BOOL,
+        dwMilliseconds: DWORD,
+    ) callconv(.winapi) DWORD;
     const WAIT_TIMEOUT: DWORD = 0x00000102;
     extern "kernel32" fn SetConsoleCtrlHandler(
         handler: ?*const fn (u32) callconv(.winapi) BOOL,
@@ -95,6 +101,8 @@ const ENABLE_QUICK_EDIT_MODE: DWORD = 0x0040;
     const RIGHTMOST_BUTTON_PRESSED: DWORD = 0x0002;
     const MOUSE_WHEELED: DWORD = 0x0004;
 const MOUSE_MOVED: DWORD = 0x0001;
+    /// `dwEventFlags` bit marking the second click of a double click.
+    const DOUBLE_CLICK_FLAG: DWORD = 0x0002;
 
     const KEY_EVENT: u16 = 0x0001;
     const FOCUS_EVENT: u16 = 0x0010;
@@ -150,6 +158,11 @@ const MOUSE_MOVED: DWORD = 0x0001;
             button = 2;
         } else if (m.dwEventFlags & win.MOUSE_MOVED != 0) {
             button = 35; // motion with nothing held: ignore in the editor
+        } else if (m.dwEventFlags & win.DOUBLE_CLICK_FLAG != 0) {
+            // The console flags the second click of a double click and may have
+            // already cleared the button bits; it is still a press, and the
+            // editor needs it to count clicks.
+            button = 0;
         } else {
             // Release: reported so a drag can finish.
             const written = std.fmt.bufPrint(out, "\x1b[<0;{d};{d}m", .{ x, y }) catch return 0;
@@ -226,13 +239,29 @@ const MOUSE_MOVED: DWORD = 0x0001;
         return std.unicode.utf8Encode(ch, out) catch 0;
     }
 
-    fn readInput(buf: []u8) !usize {
-        // A half-second wait lets the editor tick while nothing is typed.
-        if (WaitForSingleObject(inHandle() orelse return 0, 500) == WAIT_TIMEOUT) {
-            idle = true;
-            return 0;
-        }
+    fn readInput(buf: []u8, extra: ?ExtraHandle, timeout_ms: u32) !Input {
         const h = inHandle() orelse return error.NoHandle;
+        var res: Input = .{};
+        // A short wait lets the editor tick while nothing is typed. When a
+        // pseudo terminal is visible it is waited on too, so its output wakes
+        // the loop instead of waiting for the next tick.
+        if (extra) |eh| {
+            var handles = [2]HANDLE{ h, eh };
+            switch (WaitForMultipleObjects(2, &handles, 0, timeout_ms)) {
+                0 => {},
+                1 => {
+                    res.extra = true;
+                    return res;
+                },
+                else => {
+                    idle = true;
+                    return res;
+                },
+            }
+        } else if (WaitForSingleObject(h, timeout_ms) == WAIT_TIMEOUT) {
+            idle = true;
+            return res;
+        }
         var n: usize = 0;
         while (true) {
             if (n > 0) {
@@ -247,7 +276,8 @@ const MOUSE_MOVED: DWORD = 0x0001;
             }
             if (read == 0) {
                 if (n > 0) break;
-                return 0;
+                res.n = n;
+                return res;
             }
             // A resize is not input, but it must wake the run loop so the
             // screen is repainted at the new size without waiting for a key.
@@ -259,12 +289,14 @@ const MOUSE_MOVED: DWORD = 0x0001;
                     focus_changed = true;
                 }
                 if (n > 0) break;
-                return 0;
+                res.n = n;
+                return res;
             }
             if (rec.EventType == WINDOW_BUFFER_SIZE_EVENT) {
                 resized = true;
                 if (n > 0) break;
-                return 0;
+                res.n = n;
+                return res;
             }
             if (rec.EventType == KEY_EVENT and rec.Event.KeyEvent.bKeyDown != 0) {
                 n += translateKey(rec.Event.KeyEvent, buf[n..]);
@@ -274,9 +306,18 @@ const MOUSE_MOVED: DWORD = 0x0001;
             }
             if (n >= buf.len) break;
         }
-        return n;
+        res.n = n;
+        return res;
     }
 } else struct {};
+
+/// What one blocking read produced: bytes for the editor, and whether the
+/// extra handle (a pseudo terminal's output) is what woke it instead.
+pub const Input = struct { n: usize = 0, extra: bool = false };
+
+/// Handle the run loop can also wait on: a pipe on Windows, a file descriptor
+/// on Unix. The embedded terminal passes its output handle here.
+pub const ExtraHandle = if (is_windows) *anyopaque else i32;
 
 /// Set when the console was resized since the last call (Windows only).
 var resized = false;
@@ -429,17 +470,24 @@ pub fn installCloseHandler(handler: *const fn () void) void {
     _ = win.SetConsoleCtrlHandler(ctrlHandlerRoutine, 1);
 }
 
-/// Blocking read of one input chunk as ANSI bytes. Returns bytes read.
-pub fn readInput(buf: []u8) !usize {
-    if (is_windows) return win.readInput(buf);
-    // Unix: poll first, so an idle editor still wakes up every half second.
-    var fds = [1]std.posix.pollfd{.{ .fd = os.STDIN, .events = std.posix.POLL.IN, .revents = 0 }};
-    const ready = std.posix.poll(&fds, IDLE_MS) catch 1;
+/// Blocking read of one input chunk as ANSI bytes. Returns what it read, and
+/// whether `extra` (the embedded terminal's output) is what woke it.
+pub fn readInput(buf: []u8, extra: ?ExtraHandle, timeout_ms: u32) !Input {
+    if (is_windows) return win.readInput(buf, extra, timeout_ms);
+    // Unix: poll first, so an idle editor still wakes up, and so pseudo
+    // terminal output does not have to wait for the timeout.
+    var fds = [2]std.posix.pollfd{
+        .{ .fd = os.STDIN, .events = std.posix.POLL.IN, .revents = 0 },
+        .{ .fd = (extra orelse -1), .events = std.posix.POLL.IN, .revents = 0 },
+    };
+    const count: usize = if (extra == null) 1 else 2;
+    const ready = std.posix.poll(fds[0..count], timeout_ms) catch 1;
     if (ready == 0) {
         idle = true;
-        return 0;
+        return .{};
     }
-    return os.read(os.STDIN, buf);
+    if (count == 2 and fds[1].revents != 0) return .{ .extra = true };
+    return .{ .n = try os.read(os.STDIN, buf) };
 }
 
 /// Milliseconds between idle wake-ups (housekeeping ticks).

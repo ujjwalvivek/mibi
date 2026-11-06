@@ -121,6 +121,10 @@ const MAX_TABS = 32;
 /// Cells the pointer must travel over a tab before a click turns into a drag.
 const DRAG_THRESHOLD = 3;
 
+/// Milliseconds within which a second click on the same cell is a double click.
+/// The OS default double-click time is 500 ms, so match it.
+const CLICK_MS = 500;
+
 /// Where a dragged tab would land when dropped on a pane: the half of the
 /// pane it is over, which becomes a split in that direction.
 const DropSide = enum { left, right, top, bottom };
@@ -153,6 +157,12 @@ const Session = struct {
     press_tab: ?usize = null,
     press_x: u16 = 0,
     press_y: u16 = 0,
+    /// Click counting for the text area: same cell within `CLICK_MS` is a
+    /// double click (selects a word), one more is a triple (selects the line).
+    click_ms: u64 = 0,
+    click_x: u16 = 0,
+    click_y: u16 = 0,
+    click_count: u8 = 0,
     /// Where a tab being dragged would land if dropped on a pane.
     drop_zone: ?DropZone = null,
     /// Tab under the pointer (shows its path in the status line).
@@ -669,7 +679,8 @@ fn run(init: std.process.Init.Minimal) !void {
             needs_redraw = false;
         }
 
-        const n = try term.readInput(&input);
+        const read = try term.readInput(&input, null, term.IDLE_MS);
+        const n = read.n;
         if (n == 0) {
             // Focus changes are not input, but a terminal that was in the
             // background may have painted nothing at all, so the picture it
@@ -1329,6 +1340,20 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
     const row = target.scroll_row + (sy - rect.y);
     const col = if (sx >= rect.x + gutter) sx - rect.x - gutter + target.scroll_col else 0;
     target.gotoLineCol(row, col);
+    // Click counting: the same cell within CLICK_MS is a double click, a third
+    // is a triple. Anywhere else, or after a pause, starts over at one.
+    const now = os.ticksMs();
+    const repeated = session.click_count > 0 and now - session.click_ms <= CLICK_MS and
+        x == session.click_x and y == session.click_y;
+    session.click_count = if (!repeated) 1 else if (session.click_count >= 3) 1 else session.click_count + 1;
+    session.click_ms = now;
+    session.click_x = x;
+    session.click_y = y;
+    if (session.click_count == 2) {
+        target.selectWordAt(target.cursor);
+    } else if (session.click_count == 3) {
+        target.selectLineAt(target.cursor);
+    }
 }
 
 /// Housekeeping on an idle tick: the file tree follows the disk, and clean
