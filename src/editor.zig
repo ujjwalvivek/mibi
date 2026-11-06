@@ -73,6 +73,9 @@ pub const Editor = struct {
     scroll_col: usize = 0,
     path: ?[]u8 = null,
     dirty: bool = false,
+    /// Size+mtime stamp of the file when it was read or written, so an idle
+    /// tick can notice that it changed on disk.
+    stamp: u64 = 0,
     /// Selection anchor; when set and != cursor, a range is selected.
     sel_anchor: ?usize = null,
     /// Column to keep when moving vertically through short lines.
@@ -97,6 +100,7 @@ pub const Editor = struct {
             .allocator = allocator,
             .cursors = std.ArrayList(usize).empty,
             .buf = try Buffer.init(allocator, data),
+            .stamp = if (path) |p| os.fileStamp(p) else 0,
             .path = if (path) |p| try allocator.dupe(u8, p) else null,
             .register = std.ArrayList(u8).empty,
             .lang = null,
@@ -641,6 +645,25 @@ pub const Editor = struct {
         self.invalidateSyntax(self.rowCol().row);
     }
 
+    /// Re-read the file when it changed on disk underneath us. Only clean
+    /// buffers are reloaded: unsaved edits are never thrown away.
+    pub fn reloadIfChanged(self: *Editor) void {
+        const path = self.path orelse return;
+        if (self.dirty) return;
+        const now = os.fileStamp(path);
+        if (now == 0 or now == self.stamp) return;
+        const data = os.readFileAlloc(self.allocator, path, 16 * 1024 * 1024) catch return;
+        defer self.allocator.free(data);
+        self.stamp = now;
+        if (std.mem.eql(u8, data, self.text())) return;
+        self.buf.deinit();
+        self.buf = buffer.Buffer.init(self.allocator, data) catch return;
+        if (self.cursor > self.buf.len()) self.cursor = self.buf.len();
+        self.sel_anchor = null;
+        self.clearCursors();
+        self.invalidateSyntax(0);
+    }
+
     /// Replace the whole buffer as one undo step (used by the formatter),
     /// keeping the cursor inside the new text.
     pub fn replaceText(self: *Editor, bytes: []const u8) !void {
@@ -913,6 +936,9 @@ pub const Editor = struct {
     }
 
     pub fn save(self: *Editor) !void {
+        defer {
+            if (self.path) |p| self.stamp = os.fileStamp(p);
+        }
         const p = self.path orelse return error.NoFileName;
         try os.writeFile(p, self.buf.flat());
         self.dirty = false;

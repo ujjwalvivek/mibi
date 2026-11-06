@@ -355,6 +355,22 @@ pub fn getEnvAlloc(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     return allocator.dupe(u8, v[0..n]);
 }
 
+/// A cheap "did this file change" stamp: modification time mixed with size.
+/// Zero when the file cannot be examined. Windows only for now (the idle
+/// refresh is a no-op elsewhere).
+pub fn fileStamp(path: []const u8) u64 {
+    if (!is_windows) return 0;
+    const wpath = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path) catch return 0;
+    defer std.heap.page_allocator.free(wpath);
+    var data: win.WIN32_FIND_DATAW = undefined;
+    const h = win.FindFirstFileW(wpath.ptr, &data);
+    if (h == win.INVALID_HANDLE_VALUE) return 0;
+    _ = win.FindClose(h);
+    const written: u64 = (@as(u64, data.ftLastWriteTime.dwHighDateTime) << 32) | data.ftLastWriteTime.dwLowDateTime;
+    const size: u64 = (@as(u64, data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+    return (written *% 31) ^ size;
+}
+
 /// Result of running a command: its exit status, and whether it had to be
 /// killed for running too long.
 pub const RunResult = struct {

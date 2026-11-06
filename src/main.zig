@@ -672,6 +672,13 @@ fn run(init: std.process.Init.Minimal) !void {
                 zero_reads = 0;
                 continue;
             }
+            // An idle tick: refresh anything that changed on disk, then wait
+            // again. This is what makes the tree and open files keep up.
+            if (term.takeIdle()) {
+                zero_reads = 0;
+                refreshFromDisk(&session);
+                continue;
+            }
             zero_reads += 1;
             if (zero_reads >= 3) break;
             continue;
@@ -1062,6 +1069,8 @@ fn processInput(
                 if (i + 2 >= buf.len) return i;
                 switch (buf[i + 2]) {
                     'A', 'B', 'C', 'D', 'H', 'F', 'R', 'P', 'Q' => |f| applyCsi(session, "", f, view_rows, running, prompt, msg_buf, msg, help, true) catch |e| setMsg(msg_buf, msg, @errorName(e)),
+                    // F4 in its SS3 form (ESC O S), which is what terminals send.
+                    'S' => applyCsi(session, "14", '~', view_rows, running, prompt, msg_buf, msg, help, true) catch |e| setMsg(msg_buf, msg, @errorName(e)),
                     else => {},
                 }
                 i += 3;
@@ -1302,6 +1311,13 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
     const row = target.scroll_row + (sy - rect.y);
     const col = if (sx >= rect.x + gutter) sx - rect.x - gutter + target.scroll_col else 0;
     target.gotoLineCol(row, col);
+}
+
+/// Housekeeping on an idle tick: the file tree follows the disk, and clean
+/// buffers reload when their file changes underneath us.
+fn refreshFromDisk(session: *Session) void {
+    if (session.tree) |*t| t.refreshIfChanged();
+    for (session.docs.items) |ed| ed.reloadIfChanged();
 }
 
 /// Split a configured command into argv, replacing `{file}` with the path so
@@ -1568,6 +1584,7 @@ fn csiKeyName(buf: []u8, params_bytes: []const u8, final: u8) ?[]const u8 {
             6 => "pgdn",
             11 => "f1",
             12 => "f2",
+            14 => "f4",
             15 => "f5",
             17 => "f6",
             18 => "f7",

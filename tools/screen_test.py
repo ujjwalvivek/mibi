@@ -1112,6 +1112,43 @@ def dragging_a_tab_down_splits_the_pane(m, path):
 
 
 @check
+def the_tree_follows_the_disk(m, path):
+    """A file created while the editor sits idle shows up in the tree."""
+    work = os.path.join(SHOT_DIR, "work-hot")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello")
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        proc.send("\x02")  # open the tree
+        proc.wait_quiet()
+        assert "fresh.txt" not in proc.screen_text()
+
+        with open(os.path.join(work, "fresh.txt"), "w", encoding="utf-8") as f:
+            f.write("new")
+        # No keystrokes: the idle tick has to notice by itself.
+        deadline = time.time() + 5
+        while time.time() < deadline and "fresh.txt" not in proc.screen_text():
+            time.sleep(0.1)
+        assert "fresh.txt" in proc.screen_text(), "the tree did not pick up a new file"
+        proc.shot("38-hot-tree")
+    finally:
+        proc.close()
+
+
+@check
+def formatting_without_a_tool_reports_it(m, path):
+    """F4 with no formatter configured says so instead of doing nothing."""
+    m.send("\x1bOS")  # F4 (SS3 form)
+    m.wait_quiet()
+    status = m.screen_text().splitlines()[-1]
+    assert "formatter" in status.lower(), f"no message for a missing formatter: {status!r}"
+
+
+@check
 def unicode_and_wide_cells(m, path):
     """A CJK character takes two cells and does not break the layout."""
     m.send("\x1b[F")  # End of the current line

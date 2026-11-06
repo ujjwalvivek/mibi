@@ -27,6 +27,8 @@ pub const Tree = struct {
     expanded: std.ArrayList([]u8),
     selected: usize = 0,
     scroll: usize = 0,
+    /// Signature of the directory listings last read, for the idle refresh.
+    listing_sig: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, root: []const u8) !Tree {
         var t = Tree{
@@ -205,6 +207,56 @@ pub const Tree = struct {
                 return;
             }
         }
+    }
+
+    /// Re-read the directories this tree shows when the listing changed, and
+    /// keep the selected entry selected. Cheap enough to run twice a second.
+    pub fn refreshIfChanged(self: *Tree) void {
+        var sig: u64 = 0xcbf29ce484222325;
+        var names = std.ArrayList([]u8).empty;
+        defer {
+            for (names.items) |n| self.allocator.free(n);
+            names.deinit(self.allocator);
+        }
+        if (!self.stampDirs(&sig, &names)) return; // listing unavailable
+        if (sig == self.listing_sig) return;
+        self.listing_sig = sig;
+        var sel_buf: [MAX_PATH * 2]u8 = undefined;
+        var sel_len: usize = 0;
+        if (self.selectedPath(&sel_buf)) |p| sel_len = @min(p.len, sel_buf.len);
+        self.reload() catch return;
+        if (sel_len > 0) self.selectPath(sel_buf[0..sel_len]);
+    }
+
+    fn stampDirs(self: *Tree, sig: *u64, names: *std.ArrayList([]u8)) bool {
+        var ok = true;
+        self.stampOne(self.rootPath(), sig, names) catch {
+            ok = false;
+        };
+        for (self.expanded.items) |dir| {
+            var buf: [MAX_PATH * 2]u8 = undefined;
+            const full = std.fmt.bufPrint(&buf, "{s}/{s}", .{ self.rootPath(), dir }) catch continue;
+            self.stampOne(full, sig, names) catch {
+                ok = false;
+            };
+        }
+        return ok;
+    }
+
+    fn stampOne(self: *Tree, dir: []const u8, sig: *u64, names: *std.ArrayList([]u8)) !void {
+        names.clearRetainingCapacity();
+        try os.listDirNames(self.allocator, dir, names);
+        os.sortStrings(names.items);
+        for (names.items) |name| {
+            for (name) |b| {
+                sig.* ^= b;
+                sig.* *%= 0x100000001b3;
+            }
+            sig.* ^= '/';
+            sig.* *%= 0x100000001b3;
+        }
+        sig.* ^= 0xff;
+        sig.* *%= 0x100000001b3;
     }
 
     pub fn count(self: *const Tree) usize {

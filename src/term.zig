@@ -70,6 +70,8 @@ const win = if (is_windows) struct {
     extern "kernel32" fn GetConsoleScreenBufferInfo(h: HANDLE, info: *CONSOLE_SCREEN_BUFFER_INFO) callconv(.winapi) BOOL;
     extern "kernel32" fn ReadConsoleInputW(h: HANDLE, buf: *INPUT_RECORD, len: DWORD, read: *DWORD) callconv(.winapi) BOOL;
     extern "kernel32" fn GetNumberOfConsoleInputEvents(h: HANDLE, n: *DWORD) callconv(.winapi) BOOL;
+    extern "kernel32" fn WaitForSingleObject(hHandle: HANDLE, dwMilliseconds: DWORD) callconv(.winapi) DWORD;
+    const WAIT_TIMEOUT: DWORD = 0x00000102;
     extern "kernel32" fn SetConsoleCtrlHandler(
         handler: ?*const fn (u32) callconv(.winapi) BOOL,
         add: BOOL,
@@ -174,6 +176,7 @@ const MOUSE_MOVED: DWORD = 0x0001;
             0x2E => return csi(out, mod, '~', 3), // delete
             0x2D => return csi(out, mod, '~', 2), // insert
             0x72 => return csi(out, mod, 'R', 0), // F3: find next
+            0x73 => return csi(out, mod, '~', 14), // F4: format
             0x74 => return csi(out, mod, '~', 15), // F5: split side by side
             0x75 => return csi(out, mod, '~', 17), // F6: pane focus
             0x76 => return csi(out, mod, '~', 18), // F7: split stacked
@@ -219,6 +222,11 @@ const MOUSE_MOVED: DWORD = 0x0001;
     }
 
     fn readInput(buf: []u8) !usize {
+        // A half-second wait lets the editor tick while nothing is typed.
+        if (WaitForSingleObject(inHandle() orelse return 0, 500) == WAIT_TIMEOUT) {
+            idle = true;
+            return 0;
+        }
         const h = inHandle() orelse return error.NoHandle;
         var n: usize = 0;
         while (true) {
@@ -393,7 +401,25 @@ pub fn installCloseHandler(handler: *const fn () void) void {
 /// Blocking read of one input chunk as ANSI bytes. Returns bytes read.
 pub fn readInput(buf: []u8) !usize {
     if (is_windows) return win.readInput(buf);
+    // Unix: poll first, so an idle editor still wakes up every half second.
+    var fds = [1]std.posix.pollfd{.{ .fd = os.STDIN, .events = std.posix.POLL.IN, .revents = 0 }};
+    const ready = std.posix.poll(&fds, IDLE_MS) catch 1;
+    if (ready == 0) {
+        idle = true;
+        return 0;
+    }
     return os.read(os.STDIN, buf);
+}
+
+/// Milliseconds between idle wake-ups (housekeeping ticks).
+pub const IDLE_MS = 500;
+var idle: bool = false;
+
+/// True when the last read returned only because the timeout expired.
+pub fn takeIdle() bool {
+    const v = idle;
+    idle = false;
+    return v;
 }
 
 pub fn write(bytes: []const u8) !void {
