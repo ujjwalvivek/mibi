@@ -121,6 +121,7 @@ packaging.
 | `Ctrl+V`                  | paste from the register                               |
 | `Ctrl+D`                  | duplicate the current line                            |
 | `Ctrl+Z` / `Ctrl+Y`       | undo / redo                                           |
+| `Ctrl+Alt+Up` / `Down`    | add a cursor above / below (Esc drops them)           |
 | `Ctrl+F`                  | find (incremental); `F3` / `Shift+F3` next / previous; `Ctrl+R` in the prompt toggles regex |
 | `Ctrl+R`                  | replace all                                           |
 | `Ctrl+G`                  | go to `line[:column]`                                 |
@@ -174,6 +175,9 @@ packaging.
   languages ship in the repo, and adding one is dropping in a file - no
   rebuild. Multi-line comments and strings carry state across lines.
 - Line numbers, status bar (name, dirty `[+]`, cursor, line count, size).
+- Multiple cursors (`Ctrl+Alt+Up` / `Ctrl+Alt+Down`): typing, backspace and
+  delete apply at every cursor, movement moves them together, `Esc` drops
+  them. Extra cursors are drawn as blocks like the main one.
 - Split panes (`F5` side by side, `F7` stacked): a binary split tree with
   a `│`/`─` rule between panes, the rule glowing next to the focused
   pane. Each pane edits its own document with its own cursor, selection and

@@ -64,6 +64,9 @@ pub const Editor = struct {
     /// refer to documents by this id, so reordering tabs cannot confuse them.
     id: u32 = 0,
     cursor: usize = 0,
+    /// Extra cursors, for editing several places at once. The primary is
+    /// `cursor`; these are the others. Empty for a normal edit.
+    cursors: std.ArrayList(usize),
     /// Cells a tab advances to; set from the config.
     tab_width: usize = 4,
     scroll_row: usize = 0,
@@ -92,6 +95,7 @@ pub const Editor = struct {
     pub fn init(allocator: Allocator, path: ?[]const u8, data: []const u8) !Editor {
         return .{
             .allocator = allocator,
+            .cursors = std.ArrayList(usize).empty,
             .buf = try Buffer.init(allocator, data),
             .path = if (path) |p| try allocator.dupe(u8, p) else null,
             .register = std.ArrayList(u8).empty,
@@ -103,6 +107,7 @@ pub const Editor = struct {
     }
 
     pub fn deinit(self: *Editor) void {
+        self.cursors.deinit(self.allocator);
         if (self.regex_prog) |*p| p.deinit();
         if (self.path) |p| self.allocator.free(p);
         if (self.search) |s| self.allocator.free(s);
@@ -180,16 +185,20 @@ pub const Editor = struct {
     }
 
     pub fn rowCol(self: *Editor) RowCol {
+        return self.rowColAt(self.cursor);
+    }
+
+    pub fn rowColAt(self: *Editor, pos: usize) RowCol {
         const starts = self.buf.lineStarts();
-        if (starts.len == 0) return .{ .row = 0, .col = self.cursor };
-        // Largest row whose start is <= cursor (binary search; starts[0] == 0).
+        if (starts.len == 0) return .{ .row = 0, .col = pos };
+        // Largest row whose start is <= pos (binary search; starts[0] == 0).
         var lo: usize = 0;
         var hi: usize = starts.len;
         while (lo + 1 < hi) {
             const mid = lo + (hi - lo) / 2;
-            if (starts[mid] <= self.cursor) lo = mid else hi = mid;
+            if (starts[mid] <= pos) lo = mid else hi = mid;
         }
-        return .{ .row = lo, .col = self.cursor - starts[lo] };
+        return .{ .row = lo, .col = pos - starts[lo] };
     }
 
     fn offsetOfRowCol(self: *Editor, row: usize, col: usize) usize {
@@ -254,6 +263,11 @@ pub const Editor = struct {
     // --- movement --------------------------------------------------------
 
     pub fn moveLeft(self: *Editor, extend: bool) void {
+        if (self.cursors.items.len == 0) return self.moveLeftOne(extend);
+        self.moveEach(moveLeftOne, extend);
+    }
+
+    fn moveLeftOne(self: *Editor, extend: bool) void {
         if (!extend) {
             if (self.selectionRange()) |r| {
                 self.sel_anchor = null;
@@ -268,6 +282,11 @@ pub const Editor = struct {
     }
 
     pub fn moveRight(self: *Editor, extend: bool) void {
+        if (self.cursors.items.len == 0) return self.moveRightOne(extend);
+        self.moveEach(moveRightOne, extend);
+    }
+
+    fn moveRightOne(self: *Editor, extend: bool) void {
         if (!extend) {
             if (self.selectionRange()) |r| {
                 self.sel_anchor = null;
@@ -282,12 +301,22 @@ pub const Editor = struct {
     }
 
     pub fn moveHome(self: *Editor, extend: bool) void {
+        if (self.cursors.items.len == 0) return self.moveHomeOne(extend);
+        self.moveEach(moveHomeOne, extend);
+    }
+
+    fn moveHomeOne(self: *Editor, extend: bool) void {
         self.prepMove(extend);
         const rc = self.rowCol();
         self.cursor = self.offsetOfRowCol(rc.row, 0);
     }
 
     pub fn moveEnd(self: *Editor, extend: bool) void {
+        if (self.cursors.items.len == 0) return self.moveEndOne(extend);
+        self.moveEach(moveEndOne, extend);
+    }
+
+    fn moveEndOne(self: *Editor, extend: bool) void {
         self.prepMove(extend);
         const rc = self.rowCol();
         const ln = self.line(rc.row);
@@ -334,10 +363,20 @@ pub const Editor = struct {
     }
 
     pub fn moveUp(self: *Editor, extend: bool) void {
+        if (self.cursors.items.len == 0) return self.moveUpOne(extend);
+        self.moveEach(moveUpOne, extend);
+    }
+
+    fn moveUpOne(self: *Editor, extend: bool) void {
         self.moveVertical(-1, extend);
     }
 
     pub fn moveDown(self: *Editor, extend: bool) void {
+        if (self.cursors.items.len == 0) return self.moveDownOne(extend);
+        self.moveEach(moveDownOne, extend);
+    }
+
+    fn moveDownOne(self: *Editor, extend: bool) void {
         self.moveVertical(1, extend);
     }
 
@@ -363,7 +402,119 @@ pub const Editor = struct {
         self.grouping = is_type;
     }
 
+    // --- multiple cursors -------------------------------------------------
+    pub const MAX_CURSORS = 32;
+
+    /// Every cursor position, primary included, sorted ascending.
+    fn allCursors(self: *Editor, out: *[MAX_CURSORS]usize) usize {
+        out[0] = self.cursor;
+        var n: usize = 1;
+        for (self.cursors.items) |c| {
+            if (n >= out.len) break;
+            out[n] = c;
+            n += 1;
+        }
+        // Insertion sort: std.mem.sort would instantiate pdqsort again.
+        var i: usize = 1;
+        while (i < n) : (i += 1) {
+            const v = out[i];
+            var j = i;
+            while (j > 0 and out[j - 1] > v) : (j -= 1) out[j] = out[j - 1];
+            out[j] = v;
+        }
+        return n;
+    }
+
+    pub fn hasCursors(self: *Editor) bool {
+        return self.cursors.items.len > 0;
+    }
+
+    pub fn clearCursors(self: *Editor) void {
+        self.cursors.clearRetainingCapacity();
+    }
+
+    /// Add a cursor on the line below (or above) the last one, at the same
+    /// column. Returns false when there is no such line.
+    pub fn addCursor(self: *Editor, delta: i32) bool {
+        if (self.cursors.items.len >= MAX_CURSORS - 1) return false;
+        // Work from the lowest cursor so each new one is below the previous.
+        var last = self.cursor;
+        for (self.cursors.items) |c| {
+            if (delta > 0) {
+                if (c > last) last = c;
+            } else {
+                if (c < last) last = c;
+            }
+        }
+        const rc = self.rowColAt(last);
+        const total = self.lineCount();
+        if (delta > 0 and rc.row + 1 >= total) return false;
+        if (delta < 0 and rc.row == 0) return false;
+        const target_row = if (delta > 0) rc.row + 1 else rc.row - 1;
+        const pos = self.offsetOfRowCol(target_row, rc.col);
+        // A cursor already there is not worth a second one.
+        if (pos == self.cursor) return false;
+        for (self.cursors.items) |c| {
+            if (c == pos) return false;
+        }
+        self.cursors.append(self.allocator, pos) catch return false;
+        return true;
+    }
+
+    /// Apply a single-cursor movement to every cursor.
+    fn moveEach(self: *Editor, comptime one: fn (*Editor, bool) void, extend: bool) void {
+        var positions: [MAX_CURSORS]usize = undefined;
+        const n = self.allCursors(&positions);
+        var results: [MAX_CURSORS]usize = undefined;
+        const primary = self.cursor;
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            self.cursor = positions[i];
+            one(self, extend);
+            results[i] = self.cursor;
+        }
+        self.cursor = primary;
+        self.cursors.clearRetainingCapacity();
+        i = 0;
+        while (i < n) : (i += 1) {
+            if (positions[i] == primary) {
+                self.cursor = results[i];
+            } else {
+                self.cursors.append(self.allocator, results[i]) catch {};
+            }
+        }
+    }
+
     pub fn insertText(self: *Editor, bytes: []const u8) !void {
+        if (self.cursors.items.len == 0) return self.insertTextOne(bytes);
+        var positions: [MAX_CURSORS]usize = undefined;
+        const n = self.allCursors(&positions);
+        const primary = self.cursor;
+        self.sel_anchor = null; // a multi-cursor edit is not a selection edit
+        try self.beginEdit(bytes.len == 1 and bytes[0] >= 0x20);
+        // Insert from the highest cursor down so earlier offsets stay valid.
+        var i = n;
+        while (i > 0) {
+            i -= 1;
+            try self.buf.insert(positions[i], bytes);
+        }
+        // Each cursor moves past its own insert plus every insert below it.
+        self.cursors.clearRetainingCapacity();
+        i = 0;
+        while (i < n) : (i += 1) {
+            const moved = positions[i] + (i + 1) * bytes.len;
+            if (positions[i] == primary) {
+                self.cursor = moved;
+            } else {
+                self.cursors.append(self.allocator, moved) catch {};
+            }
+        }
+        self.dirty = true;
+        self.pref_col = null;
+        self.invalidateSyntax(self.rowColAt(positions[0]).row);
+    }
+
+    fn insertTextOne(self: *Editor, bytes: []const u8) !void {
         const is_type = bytes.len == 1 and bytes[0] >= 0x20;
         if (self.selectionRange()) |r| {
             try self.beginEdit(false);
@@ -381,6 +532,49 @@ pub const Editor = struct {
     }
 
     pub fn backspace(self: *Editor) !void {
+        if (self.cursors.items.len == 0) return self.backspaceOne();
+        var positions: [MAX_CURSORS]usize = undefined;
+        const n = self.allCursors(&positions);
+        const primary = self.cursor;
+        self.sel_anchor = null;
+        var starts: [MAX_CURSORS]usize = undefined;
+        var lens: [MAX_CURSORS]usize = undefined;
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const p = positions[i];
+            if (p == 0) {
+                starts[i] = 0;
+                lens[i] = 0;
+                continue;
+            }
+            const st = self.prevCodepointStart(p);
+            starts[i] = st;
+            lens[i] = p - st;
+        }
+        try self.beginEdit(false);
+        i = n;
+        while (i > 0) {
+            i -= 1;
+            if (lens[i] > 0) try self.buf.delete(starts[i], lens[i]);
+        }
+        self.cursors.clearRetainingCapacity();
+        var below: usize = 0;
+        i = 0;
+        while (i < n) : (i += 1) {
+            const np = starts[i] - below;
+            below += lens[i];
+            if (positions[i] == primary) {
+                self.cursor = np;
+            } else {
+                self.cursors.append(self.allocator, np) catch {};
+            }
+        }
+        self.dirty = true;
+        self.pref_col = null;
+        self.invalidateSyntax(0);
+    }
+
+    fn backspaceOne(self: *Editor) !void {
         if (self.selectionRange()) |_| return self.deleteSelection();
         if (self.cursor == 0) return;
         const start = self.prevCodepointStart(self.cursor);
@@ -393,6 +587,50 @@ pub const Editor = struct {
     }
 
     pub fn deleteForward(self: *Editor) !void {
+        if (self.cursors.items.len == 0) return self.deleteForwardOne();
+        var positions: [MAX_CURSORS]usize = undefined;
+        const n = self.allCursors(&positions);
+        const primary = self.cursor;
+        const len = self.buf.len();
+        self.sel_anchor = null;
+        var ends: [MAX_CURSORS]usize = undefined;
+        var lens: [MAX_CURSORS]usize = undefined;
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const p = positions[i];
+            if (p >= len) {
+                ends[i] = p;
+                lens[i] = 0;
+                continue;
+            }
+            const e = self.nextCodepointEnd(p);
+            ends[i] = e;
+            lens[i] = e - p;
+        }
+        try self.beginEdit(false);
+        i = n;
+        while (i > 0) {
+            i -= 1;
+            if (lens[i] > 0) try self.buf.delete(positions[i], lens[i]);
+        }
+        self.cursors.clearRetainingCapacity();
+        var below: usize = 0;
+        i = 0;
+        while (i < n) : (i += 1) {
+            const np = positions[i] - below;
+            below += lens[i];
+            if (positions[i] == primary) {
+                self.cursor = np;
+            } else {
+                self.cursors.append(self.allocator, np) catch {};
+            }
+        }
+        self.dirty = true;
+        self.pref_col = null;
+        self.invalidateSyntax(0);
+    }
+
+    fn deleteForwardOne(self: *Editor) !void {
         if (self.selectionRange()) |_| return self.deleteSelection();
         if (self.cursor >= self.buf.len()) return;
         const end = self.nextCodepointEnd(self.cursor);
@@ -705,7 +943,12 @@ pub const Editor = struct {
     /// Display column of the cursor, accounting for tabs, wide (2-cell) and
     /// zero-width codepoints.
     pub fn cursorDisplayCol(self: *Editor) usize {
-        const rc = self.rowCol();
+        return self.displayColAt(self.cursor);
+    }
+
+    /// Display column of an arbitrary offset (tabs expand, CR counts as zero).
+    pub fn displayColAt(self: *Editor, pos: usize) usize {
+        const rc = self.rowColAt(pos);
         const ln = self.line(rc.row);
         var dcol: usize = 0;
         var i: usize = 0;

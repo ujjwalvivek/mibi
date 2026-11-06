@@ -55,6 +55,7 @@ const help_rows = [_]HelpRow{
     .{ .actions = &.{ .new_tab, .close_tab }, .desc = "new / close tab" },
     .{ .actions = &.{ .next_tab, .prev_tab }, .desc = "next / previous tab" },
     .{ .actions = &.{ .split_columns, .close_pane, .next_pane }, .desc = "split / unsplit / next" },
+    .{ .literal = "ctrl+alt+up/down", .desc = "add a cursor above / below" },
     .{ .actions = &.{.help}, .desc = "toggle this help" },
     .{ .actions = &.{.quit}, .desc = "quit (asks if unsaved)" },
     .{ .literal = "click / wheel", .desc = "cursor, tabs, pickers / scroll" },
@@ -1411,6 +1412,8 @@ fn defaultKeyFor(action: keys.Action, shift: bool) DefaultKey {
         .prev_tab => .{ .csi = .{ .params = "5;5", .final = '~' } },
         .split_columns => .{ .csi = .{ .params = "15", .final = '~' } }, // F5
         .close_pane => .{ .csi = .{ .params = if (shift) "18;2" else "15;2", .final = '~' } }, // Shift+F5 / Shift+F7
+        .add_cursor_below => .{ .csi = .{ .params = "1;7", .final = 'B' } }, // Ctrl+Alt+Down
+        .add_cursor_above => .{ .csi = .{ .params = "1;7", .final = 'A' } }, // Ctrl+Alt+Up
         .split_rows => .{ .csi = .{ .params = "18", .final = '~' } }, // F7
         .next_pane => .{ .csi = .{ .params = "17", .final = '~' } }, // F6
         .prev_pane => .{ .csi = .{ .params = if (shift) "17;2" else "17;5", .final = '~' } },
@@ -1482,10 +1485,15 @@ fn csiKeyName(buf: []u8, params_bytes: []const u8, final: u8) ?[]const u8 {
         },
         else => return null,
     };
+    const alt = (bits & 2) != 0;
     var n: usize = 0;
     if (ctrl) {
         @memcpy(buf[n..][0..5], "ctrl+");
         n += 5;
+    }
+    if (alt) {
+        @memcpy(buf[n..][0..4], "alt+");
+        n += 4;
     }
     if (shift) {
         @memcpy(buf[n..][0..6], "shift+");
@@ -1592,9 +1600,12 @@ fn applyByte(
     } else if (b == 0x1f) {
         help.* = !help.*;
     } else if (b == 0x1b) {
-        // Esc closes the help panel first, then clears the selection.
+        // Esc closes the help panel, then drops extra cursors, then clears the
+        // selection.
         if (help.*) {
             help.* = false;
+        } else if (ed.hasCursors()) {
+            ed.clearCursors();
         } else {
             ed.clearSelection();
         }
@@ -1836,11 +1847,16 @@ fn applyCsi(
     const m: u16 = if (np >= 1 and params[1] != 0) params[1] else 1;
     const bits = m - 1;
     const shift = (bits & 1) != 0;
+    const alt = (bits & 2) != 0;
     const ctrl = (bits & 4) != 0;
     switch (final) {
         'Q' => session.ui_request = .theme_picker,
-        'A' => ed.moveUp(shift),
-        'B' => ed.moveDown(shift),
+        'A' => if (ctrl and alt) {
+            _ = ed.addCursor(-1);
+        } else ed.moveUp(shift),
+        'B' => if (ctrl and alt) {
+            _ = ed.addCursor(1);
+        } else ed.moveDown(shift),
         'C' => if (ctrl) ed.moveWordRight(shift) else ed.moveRight(shift),
         'D' => if (ctrl) ed.moveWordLeft(shift) else ed.moveLeft(shift),
         'H' => ed.moveHome(shift),
@@ -2189,6 +2205,35 @@ fn drawPane(s: *render.Screen, session: *Session, ed: *Editor, r: panes_mod.Rect
                         s.put(@intCast(cx + 1), y, .{ .ch = ' ', .fg = text_fg, .attr = .{ .reverse = true }, .cont = true });
                     }
                 }
+            }
+        }
+    }
+
+    // Extra cursors, drawn as blocks like the main one.
+    if (focused) {
+        for (ed.cursors.items) |pos| {
+            const crc = ed.rowColAt(pos);
+            if (crc.row < ed.scroll_row) continue;
+            const vrow = crc.row - ed.scroll_row;
+            if (vrow >= r.h) continue;
+            const dcol = ed.displayColAt(pos);
+            if (dcol < ed.scroll_col) continue;
+            const cx = r.x + gutter + (dcol - ed.scroll_col);
+            if (cx >= right) continue;
+            const ln = ed.line(crc.row);
+            var under: u21 = ' ';
+            if (crc.col < ln.len) under = utf8.cpAt(ln, crc.col);
+            if (under < 0x20) under = ' ';
+            var uw: usize = width.cellWidth(under);
+            if (uw == 0) {
+                under = ' ';
+                uw = 1;
+            }
+            if (cx + uw > right) continue;
+            const cy: u16 = @intCast(r.y + vrow);
+            s.put(@intCast(cx), cy, .{ .ch = under, .fg = text_fg, .attr = .{ .reverse = true } });
+            if (uw == 2) {
+                s.put(@intCast(cx + 1), cy, .{ .ch = ' ', .fg = text_fg, .attr = .{ .reverse = true }, .cont = true });
             }
         }
     }
@@ -3958,6 +4003,32 @@ test "the console close handler writes the session" {
     defer std.testing.allocator.free(data);
     try std.testing.expect(std.mem.indexOf(u8, data, "tab ") != null);
     try std.testing.expect(std.mem.indexOf(u8, data, "active 0") != null);
+}
+
+test "ctrl+alt+down adds a cursor and typing edits every line" {
+    var d = try Drive.start("one\ntwo\nthree");
+    defer d.stop();
+    try d.send("\x1b[1;7B"); // Ctrl+Alt+Down
+    try std.testing.expect(d.session.current().hasCursors());
+    try d.send("X");
+    try std.testing.expectEqualStrings("Xone\nXtwo\nthree", d.session.current().text());
+    try d.send("Y");
+    try std.testing.expectEqualStrings("XYone\nXYtwo\nthree", d.session.current().text());
+
+    // Esc drops the extra cursors; the next key is typed once.
+    try d.send("\x1bq");
+    try std.testing.expect(!d.session.current().hasCursors());
+    try std.testing.expectEqualStrings("XYqone\nXYtwo\nthree", d.session.current().text());
+}
+
+test "backspace deletes at every cursor" {
+    var d = try Drive.start("aa\nbb");
+    defer d.stop();
+    try d.send("\x1b[1;7B"); // cursor on the second line
+    try std.testing.expect(d.session.current().hasCursors());
+    try d.send("\x1b[C"); // both cursors one cell right
+    try d.send("\x7f"); // and one backspace each
+    try std.testing.expectEqualStrings("a\nb", d.session.current().text());
 }
 
 test "esc closes the help panel" {

@@ -28,6 +28,11 @@ MIBI = os.path.join(ROOT, "zig-out", "bin", "mibi.exe")
 SHOT_DIR = os.path.join(ROOT, "experiments", "out", "screens")
 ROWS, COLS = 24, 80
 
+# The status bar shows the version; read it from the manifest so a release
+# does not break the tests.
+import re as _re
+VERSION = _re.search(r'\.version = "([^"]+)"', open(os.path.join(ROOT, "build.zig.zon"), encoding="utf-8").read()).group(1)
+
 
 # --- a very small terminal emulator ----------------------------------------
 
@@ -329,7 +334,7 @@ def startup_renders_file(m, path):
     assert_in(screen, "notes.txt", "tab bar")
     assert_in(screen, "1 hello", "gutter + first line")
     assert_in(screen, "2 world", "second line")
-    assert_in(screen, "mibi 0.0.1", "status bar")
+    assert_in(screen, f"mibi {VERSION}", "status bar")
     assert_in(screen, "2L", "line count")
     assert_in(screen, "80x24", "terminal size")
     m.shot("01-startup")
@@ -1113,7 +1118,7 @@ def unicode_and_wide_cells(m, path):
     m.send(" \u4e2d\u6587")
     screen = m.screen_text()
     assert_in(screen, "\u4e2d\u6587", "CJK text on screen")
-    assert_in(screen, "mibi 0.0.1", "status bar still intact")
+    assert_in(screen, f"mibi {VERSION}", "status bar still intact")
     m.shot("07-unicode")
 
 
