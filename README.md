@@ -96,9 +96,9 @@ directory and zip or tar it:
 ```
 
 ```sh
-./tools/package.sh                        # host target -> dist/mibi-<version>-<target>.tar.gz
-./tools/package.sh x86_64-linux-gnu
-NO_BUILD=1 ./tools/package.sh
+bash tools/package.sh                     # host target -> dist/mibi-<version>-<target>.tar.gz
+bash tools/package.sh x86_64-linux-gnu
+NO_BUILD=1 bash tools/package.sh
 ```
 
 The version comes from `pub const version` in `src/main.zig`, so an archive
@@ -222,6 +222,13 @@ packaging.
 - Syntax highlighting from `syntax.d/*.ini` definitions (kibi's format): 52
   languages ship in the repo, and adding one is dropping in a file - no
   rebuild. Multi-line comments and strings carry state across lines.
+- Matching brackets: with the cursor next to `()`, `[]` or `{}`, both halves
+  of the pair are painted in the theme accent (the partner is found across
+  lines, not just on the current one), so the nesting you are editing is
+  visible at a glance.
+- Paste: a pasted block - bracketed by the terminal or not - lands as one edit,
+  so a single `Ctrl+Z` removes all of it, and its line breaks are normalised to
+  `\n` instead of being inserted as stray CR characters.
 - Line numbers, status bar (name, dirty `[+]`, cursor, line count, size).
 - Multiple cursors (`Ctrl+Alt+Up` / `Ctrl+Alt+Down`): typing, backspace and
   delete apply at every cursor, movement moves them together, `Esc` drops
@@ -280,16 +287,17 @@ src/width.zig    generated Unicode width table
 ## Size
 
 ReleaseSmall, stripped, cross-compiled. `.\build.ps1 size` rebuilds every
-target and fails if one grows past its budget (re-based after v0.0.3, hard
-ceiling 1 MB); see `experiments/README.md` for the probe data.
+target and fails if one grows past its budget (re-based after the embedded
+terminal was removed, hard ceiling 1 MB); see `experiments/README.md` for the
+probe data.
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu | 166,016 |
-| x86_64-linux-gnu  | 181,592 |
-| x86_64-macos      | 191,083 |
-| aarch64-macos     | 220,296 |
-| x86_64-windows    | 240,640 |
+| aarch64-linux-gnu | 147,784 |
+| x86_64-linux-gnu  | 161,344 |
+| x86_64-macos      | 170,226 |
+| aarch64-macos     | 201,352 |
+| x86_64-windows    | 218,624 |
 
 ## Changelog
 
@@ -349,5 +357,4 @@ half a second.
 
 ## Not yet
 
-LSP and completion, macros (dropped by decision), and the phase 6 polish:
-bracketed paste in the editor, matching brackets, soft wrap and atomic save.
+LSP and completion, macros (dropped by decision), soft wrap and atomic save.

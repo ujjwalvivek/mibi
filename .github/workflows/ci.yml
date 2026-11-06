@@ -36,7 +36,9 @@ jobs:
           restore-keys: ${{ runner.os }}-zig-0.16.0-toolchain
 
       - name: Install Zig 0.16.0 (pinned, SHA-256 checked)
-        run: ./tools/get-zig-linux.sh
+        # Invoked through bash so a checkout without the executable bit still
+        # works (git on Windows cannot record the mode).
+        run: bash tools/get-zig-linux.sh
 
       - name: Cache the Zig build
         uses: actions/cache@v4
@@ -72,7 +74,7 @@ jobs:
             $zig build "-Dtarget=$target"
             size=$(stat -c%s "zig-out/bin/$exe")
             if [ "$size" -gt "$budget" ]; then
-              echo "::error file=build.zig,title=size gate::$target is $size bytes, over its $budget budget"
+              echo "::error::size gate: $target is $size bytes, over its $budget byte budget"
               failed=1
             else
               echo "$target: $size / $budget bytes"

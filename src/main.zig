@@ -775,6 +775,40 @@ fn run(init: std.process.Init.Minimal) !void {
             const cut = if (escape_ready) rest.len else (incompleteEscapeStart(rest) orelse rest.len);
             if (cut == 0) break;
             const chunk = rest[0..cut];
+            // A paste burst is inserted as one edit: one undo step, and the
+            // newlines in it do not get line-by-line auto-indent. Hosts that
+            // bracket pastes wrap the text in ESC[200~ / ESC[201~; strip the
+            // markers so they can never end up in the buffer. Prompt and
+            // picker input keeps the byte-by-byte path (those are not
+            // documents, and their buffers have their own rules).
+            if (read.paste and prompt == null and picker_state == null and
+                !session.tree_focus and !help and !isMouseReport(chunk) and
+                std.mem.indexOfScalar(u8, chunk, 0x1b) == null)
+            {
+                var text = chunk;
+                if (std.mem.startsWith(u8, text, "\x1b[200~")) text = text[6..];
+                if (std.mem.endsWith(u8, text, "\x1b[201~")) text = text[0 .. text.len - 6];
+                var scratch: [1024]u8 = undefined;
+                var w: usize = 0;
+                var r: usize = 0;
+                while (r < text.len and w < scratch.len) : (r += 1) {
+                    if (text[r] == '\r') {
+                        scratch[w] = '\n';
+                        w += 1;
+                        if (r + 1 < text.len and text[r + 1] == '\n') r += 1;
+                    } else {
+                        scratch[w] = text[r];
+                        w += 1;
+                    }
+                }
+                if (w > 0) {
+                    session.current().insertText(scratch[0..w]) catch |e| setMsg(&msg_buf, &msg, @errorName(e));
+                    msg = "";
+                    needs_redraw = true;
+                    off += chunk.len;
+                    continue;
+                }
+            }
             // A status message is cleared by typing, not by mouse motion: the
             // pointer moves constantly and used to wipe messages instantly.
             if (!isMouseReport(chunk)) {
@@ -2549,6 +2583,21 @@ fn drawPane(s: *render.Screen, session: *Session, ed: *Editor, r: panes_mod.Rect
     const line_bg = theme.lineHighlight();
     const cur_dcol = ed.cursorDisplayCol();
 
+    // Matching brackets: one lookup per frame, for the focused pane only. The
+    // cursor can sit on a bracket or just after one (you type "(" then ")"), so
+    // ask the editor which bracket is next to it. `maxInt` disables the
+    // comparison when there is no pair, which no real offset can equal.
+    var bracket_src: usize = std.math.maxInt(usize);
+    var bracket_dst: usize = std.math.maxInt(usize);
+    if (focused) {
+        if (ed.bracketNear(ed.cursor)) |b| {
+            if (ed.matchingBracket(ed.cursor)) |partner| {
+                bracket_src = b;
+                bracket_dst = partner;
+            }
+        }
+    }
+
     // Syntax state at the top of the viewport, carried down the visible rows.
     var syn_state = ed.syntaxStateAt(ed.scroll_row);
     var spans: [syntax.MAX_SPANS]syntax.Span = undefined;
@@ -2617,6 +2666,13 @@ fn drawPane(s: *render.Screen, session: *Session, ed: *Editor, r: panes_mod.Rect
                 if (sx + cw > right) break;
                 var cell = render.Cell{ .ch = cp, .fg = fg, .bg = row_bg };
                 if (selected) cell.bg = sel_bg;
+                if (line_start + cp_start == bracket_src or line_start + cp_start == bracket_dst) {
+                    // Both ends of the pair: the accent foreground plus an
+                    // underline reads on the current-line tint and on a
+                    // selection, without needing a new theme colour.
+                    cell.fg = theme.accent;
+                    cell.attr.underline = true;
+                }
                 s.put(@intCast(sx), y, cell);
                 if (cw == 2) {
                     var cont = render.Cell{ .ch = ' ', .fg = fg, .bg = row_bg, .cont = true };
@@ -2649,9 +2705,13 @@ fn drawPane(s: *render.Screen, session: *Session, ed: *Editor, r: panes_mod.Rect
                     uw = 1;
                 }
                 if (cx + uw <= right) {
-                    s.put(@intCast(cx), y, .{ .ch = under, .fg = text_fg, .attr = .{ .reverse = true } });
+                    // Reverse video shows the cell's foreground as the block's
+                    // background, so an accent block marks the bracket under the
+                    // cursor exactly the way its partner is marked.
+                    const block_fg = if (bracket_src == ed.cursor) theme.accent else text_fg;
+                    s.put(@intCast(cx), y, .{ .ch = under, .fg = block_fg, .attr = .{ .reverse = true } });
                     if (uw == 2) {
-                        s.put(@intCast(cx + 1), y, .{ .ch = ' ', .fg = text_fg, .attr = .{ .reverse = true }, .cont = true });
+                        s.put(@intCast(cx + 1), y, .{ .ch = ' ', .fg = block_fg, .attr = .{ .reverse = true }, .cont = true });
                     }
                 }
             }

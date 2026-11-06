@@ -1740,6 +1740,67 @@ def main():
     return 1 if failed else 0
 
 
+@check
+def matching_bracket_is_highlighted(m, path):
+    """The bracket pair next to the cursor is painted in the accent colour."""
+    work = os.path.join(SHOT_DIR, "work-brackets")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "brackets.txt"), "w", encoding="utf-8") as f:
+        f.write("f(a[b]c)\n")
+    proc = Mibi(["brackets.txt"], cwd=work)
+    try:
+        assert proc.wait_for("f(a[b]c)"), "editor did not start"
+        proc.wait_quiet()
+        # The cursor starts on 'f'; two rights put it between '(' and 'a', so
+        # the pair to highlight is the outer parentheses.
+        proc.send("\x1b[C")
+        proc.send("\x1b[C")
+        proc.wait_quiet()
+        lines = proc.screen_text().splitlines()
+        row = next(i for i, ln in enumerate(lines) if "f(a[b]c)" in ln)
+        start = lines[row].index("f(a[b]c)")
+        open_fg = proc.screen.fg_at(row, start + 1)
+        close_fg = proc.screen.fg_at(row, start + 7)
+        plain_fg = proc.screen.fg_at(row, start)
+        assert open_fg is not None and close_fg is not None, "bracket cells were not painted"
+        assert open_fg == close_fg, f"the bracket pair has different colours: {open_fg} vs {close_fg}"
+        assert open_fg != plain_fg, (
+            f"the bracket pair is not highlighted (same colour as text: {open_fg})")
+        proc.shot("91-brackets")
+    finally:
+        proc.close()
+
+
+@check
+def paste_burst_is_inserted_as_one_undo_step(m, path):
+    """A pasted block lands as one edit: one undo removes all of it."""
+    work = os.path.join(SHOT_DIR, "work-paste")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "paste.txt"), "w", encoding="utf-8") as f:
+        f.write("hello\n")
+    proc = Mibi(["paste.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        # One write is one paste burst for the console input layer.
+        proc.proc.write("alpha\nbeta\ngamma")
+        proc.wait_quiet()
+        screen = proc.screen_text()
+        assert "alpha" in screen and "gamma" in screen, (
+            "the paste did not reach the buffer:\n" + screen)
+        proc.send("\x1a")  # ctrl+z: the whole paste is one undo step
+        proc.wait_quiet()
+        screen = proc.screen_text()
+        assert "alpha" not in screen and "gamma" not in screen, (
+            "undo did not remove the whole paste (it was split into steps):\n" + screen)
+        assert "hello" in screen, "undo removed the original text too:\n" + screen
+        proc.shot("92-paste-undo")
+    finally:
+        proc.close()
+
+
 def _clean_root_session():
     """The checks run with cwd=ROOT, so remove the session they leave behind."""
     for name in os.listdir(ROOT):

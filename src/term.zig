@@ -12,6 +12,11 @@ const os = @import("os.zig");
 
 const is_windows = builtin.os.tag == .windows;
 
+/// One read (or one drain of console key events) that produced this many bytes
+/// at once is a paste, not typing: the fastest human repeat rate and the
+/// longest key sequence both stay well below it.
+const paste_burst_bytes: usize = 8;
+
 pub const Size = struct { rows: u16, cols: u16 };
 
 var active = false;
@@ -294,6 +299,9 @@ const win = if (is_windows) struct {
             return res;
         }
         var n: usize = 0;
+        // Only key events count towards the paste heuristic: a mouse report is
+        // a dozen bytes and would otherwise look like a burst.
+        var key_bytes: usize = 0;
         while (true) {
             // Never block inside ReadConsoleInputW. When the queue is empty the
             // call waits for the next record with no timeout, and after a
@@ -334,7 +342,9 @@ const win = if (is_windows) struct {
                 return res;
             }
             if (rec.EventType == KEY_EVENT and rec.Event.KeyEvent.bKeyDown != 0) {
-                n += translateKey(rec.Event.KeyEvent, buf[n..]);
+                const wrote = translateKey(rec.Event.KeyEvent, buf[n..]);
+                n += wrote;
+                key_bytes += wrote;
             }
             if (rec.EventType == MOUSE_EVENT) {
                 n += translateMouse(rec.Event.MouseEvent, buf[n..]);
@@ -342,6 +352,9 @@ const win = if (is_windows) struct {
             if (n >= buf.len) break;
         }
         res.n = n;
+        // A console reports a paste as a burst of key events; there is no
+        // bracketed-paste marker to look for here, so the burst is the signal.
+        res.paste = looksLikePaste(key_bytes, buf[0..n]);
         return res;
     }
 } else struct {};
@@ -352,7 +365,131 @@ pub const Input = struct {
     /// True only at a real end of input (a closed stdin on Unix). A Windows
     /// console never reports EOF: zero records just mean "nothing yet".
     eof: bool = false,
+    /// True when this read looks like a paste burst rather than typing.
+    ///
+    /// Heuristic, not a promise: one read (Windows: one drain of KEY_EVENTs)
+    /// that produced at least `paste_burst_bytes` bytes, or at least two bytes
+    /// including a line break, is treated as a paste. A single key is never a
+    /// paste, and a lone Enter is one byte, so pressing Enter is still a
+    /// keypress. Short pastes on Unix are caught by their bracketed-paste
+    /// markers instead: `stripBracketedPaste` reports those, so a caller that
+    /// wants one undo step per paste ORs the two signals.
+    paste: bool = false,
 };
+
+/// True when a burst of `produced` bytes (the bytes key events translated to)
+/// looks like a paste. `bytes` is the whole read, scanned for a line break; a
+/// mouse report contains no CR/LF, so it cannot fake one.
+fn looksLikePaste(produced: usize, bytes: []const u8) bool {
+    if (produced >= paste_burst_bytes) return true;
+    if (produced < 2) return false;
+    for (bytes) |b| {
+        // A console reports Enter as CR, so a pasted line break can arrive as
+        // either byte; both count as "multi-line".
+        if (b == '\n' or b == '\r') return true;
+    }
+    return false;
+}
+
+/// The markers a host adds around a paste once `?2004h` is on.
+const paste_start = "\x1b[200~";
+const paste_end = "\x1b[201~";
+
+/// Room for the longest marker plus slack; the hold never needs more.
+const pending_marker_max: usize = 8;
+
+/// Bytes held back from the end of the previous chunk that may be the start of
+/// a paste marker (e.g. `ESC[20`). A read boundary can fall anywhere, and a
+/// partial marker must never be typed into the buffer as text.
+var pending_marker: [pending_marker_max]u8 = undefined;
+var pending_marker_len: usize = 0;
+
+/// What `stripBracketedPaste` found in one chunk.
+pub const PasteChunk = struct {
+    /// The chunk with the paste markers removed; a slice of the caller's buffer.
+    text: []const u8,
+    /// True when a `ESC[200~`/`ESC[201~` marker was involved: leading,
+    /// trailing, or completed from a held prefix.
+    paste: bool,
+};
+
+/// Remove the bracketed-paste framing from one input chunk.
+///
+/// A leading `ESC[200~` and a trailing `ESC[201~` are dropped and `paste` is
+/// set. Anything else is returned unchanged, so ordinary typing and escape
+/// sequences pass straight through. A marker cut by the read boundary is held
+/// in a small pending buffer and prepended to the next chunk, so neither half
+/// is ever typed as text. Calling this with an empty chunk flushes a held
+/// prefix that turned out not to be a marker.
+///
+/// `buf` must have room for `in.len + pending_marker_max` bytes (the held
+/// prefix is re-emitted together with the new bytes) and must not alias `in`;
+/// the returned text points into `buf`.
+pub fn stripBracketedPaste(buf: []u8, in: []const u8) PasteChunk {
+    const held = pending_marker[0..pending_marker_len];
+    pending_marker_len = 0;
+    if (held.len + in.len > buf.len) {
+        // The caller broke the buffer contract. Dropping the held bytes is the
+        // only safe answer: truncating the user's text would lose real input.
+        const n = @min(in.len, buf.len);
+        @memcpy(buf[0..n], in[0..n]);
+        return .{ .text = buf[0..n], .paste = false };
+    }
+    @memcpy(buf[0..held.len], held);
+    @memcpy(buf[held.len..][0..in.len], in);
+    var text = buf[0 .. held.len + in.len];
+    var paste = false;
+
+    if (std.mem.startsWith(u8, text, paste_start)) {
+        text = text[paste_start.len..];
+        paste = true;
+    }
+    if (std.mem.endsWith(u8, text, paste_end)) {
+        text = text[0 .. text.len - paste_end.len];
+        paste = true;
+    }
+
+    // An empty chunk is the caller saying "nothing more right now": whatever is
+    // held is emitted as text instead of being held forever.
+    if (in.len == 0) return .{ .text = text, .paste = paste };
+
+    // A chunk that ends exactly on the start marker: hold it whole, the paste
+    // body arrives next read and the marker is stripped as leading then.
+    if (std.mem.endsWith(u8, text, paste_start)) {
+        const keep = paste_start.len;
+        @memcpy(pending_marker[0..keep], text[text.len - keep ..]);
+        pending_marker_len = keep;
+        text = text[0 .. text.len - keep];
+        return .{ .text = text, .paste = true };
+    }
+
+    // A marker cut mid-way: hold the trailing proper prefix (two bytes at
+    // least - a lone ESC is the Esc key, and delaying it would make Esc feel
+    // broken - and one byte short of the full marker).
+    const tail = partialMarkerTail(text);
+    if (tail > 0) {
+        @memcpy(pending_marker[0..tail], text[text.len - tail ..]);
+        pending_marker_len = tail;
+        text = text[0 .. text.len - tail];
+    }
+    return .{ .text = text, .paste = paste };
+}
+
+/// Length of the longest suffix of `text` that is a proper prefix (2..5 bytes)
+/// of either paste marker, or 0 when there is none.
+fn partialMarkerTail(text: []const u8) usize {
+    var len: usize = @min(text.len, paste_start.len - 1);
+    while (len >= 2) : (len -= 1) {
+        const tail = text[text.len - len ..];
+        if (std.mem.eql(u8, tail, paste_start[0..len]) or std.mem.eql(u8, tail, paste_end[0..len])) return len;
+    }
+    return 0;
+}
+
+/// Forget any held marker prefix (tests start from a clean splitter).
+fn resetPasteSplitter() void {
+    pending_marker_len = 0;
+}
 
 /// Set when the console was resized since the last call (Windows only).
 var resized = false;
@@ -450,9 +587,17 @@ pub fn enterAltScreen() !void {
     // Disable auto-wrap (?7l): with absolute cursor positioning we never want
     // the terminal to wrap and scroll on its own.
     try os.writeAll(os.STDOUT, "\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[2J\x1b[H");
+    // Ask the host to frame pastes with ESC[200~/ESC[201~ so a multi-line paste
+    // is one chunk instead of keystrokes the editor would run line by line.
+    // Unix only: a Windows console reports pasted text as key events and has no
+    // such mode, so the burst heuristic is the signal there.
+    if (!is_windows) try os.writeAll(os.STDOUT, "\x1b[?2004h");
 }
 
 pub fn leaveAltScreen() !void {
+    // Hand the mode back before leaving: the shell prompt after us must not
+    // inherit bracketed paste.
+    if (!is_windows) try os.writeAll(os.STDOUT, "\x1b[?2004l");
     try os.writeAll(os.STDOUT, "\x1b[?7h\x1b[0m\x1b[?25h\x1b[?1049l");
 }
 
@@ -517,7 +662,7 @@ pub fn readInput(buf: []u8, timeout_ms: u32) !Input {
         return .{};
     }
     const n = try os.read(os.STDIN, buf);
-    return .{ .n = n, .eof = n == 0 };
+    return .{ .n = n, .eof = n == 0, .paste = looksLikePaste(n, buf[0..n]) };
 }
 
 /// Milliseconds between idle wake-ups (housekeeping ticks).
@@ -673,4 +818,147 @@ test "windows mouse modifiers fall back to the keyboard (Windows only)" {
     try std.testing.expectEqual(@as(u16, 4), win.modifiersFromState(win.RIGHT_CTRL_PRESSED));
     const both = win.modifiersFromState(win.SHIFT_PRESSED) | win.modifiersFromState(win.LEFT_CTRL_PRESSED);
     try std.testing.expectEqual(@as(u16, 5), both);
+}
+
+test "stripBracketedPaste leaves plain text alone" {
+    var buf: [64]u8 = undefined;
+    resetPasteSplitter();
+    const c = stripBracketedPaste(&buf, "hello");
+    try std.testing.expectEqualStrings("hello", c.text);
+    try std.testing.expect(!c.paste);
+
+    // Arrow keys and function keys start with ESC but are not markers.
+    const arrow = stripBracketedPaste(&buf, "\x1b[A");
+    try std.testing.expectEqualStrings("\x1b[A", arrow.text);
+    try std.testing.expect(!arrow.paste);
+    const f1 = stripBracketedPaste(&buf, "\x1bOP");
+    try std.testing.expectEqualStrings("\x1bOP", f1.text);
+    try std.testing.expect(!f1.paste);
+    // A lone ESC is the Esc key: it must pass through, not be held.
+    const esc = stripBracketedPaste(&buf, "\x1b");
+    try std.testing.expectEqualStrings("\x1b", esc.text);
+    try std.testing.expect(!esc.paste);
+}
+
+test "stripBracketedPaste removes the framing markers" {
+    var buf: [64]u8 = undefined;
+    resetPasteSplitter();
+    var c = stripBracketedPaste(&buf, "\x1b[200~hello\x1b[201~");
+    try std.testing.expectEqualStrings("hello", c.text);
+    try std.testing.expect(c.paste);
+
+    resetPasteSplitter();
+    c = stripBracketedPaste(&buf, "\x1b[200~hello");
+    try std.testing.expectEqualStrings("hello", c.text);
+    try std.testing.expect(c.paste);
+
+    resetPasteSplitter();
+    c = stripBracketedPaste(&buf, "hello\x1b[201~");
+    try std.testing.expectEqualStrings("hello", c.text);
+    try std.testing.expect(c.paste);
+
+    // An empty framed paste is still a paste.
+    resetPasteSplitter();
+    c = stripBracketedPaste(&buf, "\x1b[200~\x1b[201~");
+    try std.testing.expectEqualStrings("", c.text);
+    try std.testing.expect(c.paste);
+}
+
+test "stripBracketedPaste holds a split start marker" {
+    var buf: [64]u8 = undefined;
+    resetPasteSplitter();
+    // The read boundary fell inside ESC[200~: nothing may leak as text.
+    var c = stripBracketedPaste(&buf, "\x1b[20");
+    try std.testing.expectEqualStrings("", c.text);
+    try std.testing.expect(!c.paste);
+    c = stripBracketedPaste(&buf, "0~hello\x1b[201~");
+    try std.testing.expectEqualStrings("hello", c.text);
+    try std.testing.expect(c.paste);
+}
+
+test "stripBracketedPaste holds a split end marker" {
+    var buf: [64]u8 = undefined;
+    resetPasteSplitter();
+    // The body arrives now; the closing marker is cut in half.
+    var c = stripBracketedPaste(&buf, "hello\x1b[20");
+    try std.testing.expectEqualStrings("hello", c.text);
+    try std.testing.expect(!c.paste);
+    c = stripBracketedPaste(&buf, "1~");
+    try std.testing.expectEqualStrings("", c.text);
+    try std.testing.expect(c.paste);
+}
+
+test "stripBracketedPaste holds a start marker that ends the chunk" {
+    var buf: [64]u8 = undefined;
+    resetPasteSplitter();
+    // A whole marker at the end: the paste body starts in the next read.
+    var c = stripBracketedPaste(&buf, "abc\x1b[200~");
+    try std.testing.expectEqualStrings("abc", c.text);
+    try std.testing.expect(c.paste);
+    c = stripBracketedPaste(&buf, "body");
+    try std.testing.expectEqualStrings("body", c.text);
+    try std.testing.expect(c.paste);
+}
+
+test "stripBracketedPaste flushes a held prefix that was not a marker" {
+    var buf: [64]u8 = undefined;
+    resetPasteSplitter();
+    // ESC[20 is also how CSI 20 A starts: when the next byte disproves the
+    // marker, the held bytes are typed out again, in order.
+    _ = stripBracketedPaste(&buf, "\x1b[20");
+    const c = stripBracketedPaste(&buf, "A");
+    try std.testing.expectEqualStrings("\x1b[20A", c.text);
+    try std.testing.expect(!c.paste);
+
+    // An empty chunk means "nothing more is coming": flush instead of holding.
+    resetPasteSplitter();
+    _ = stripBracketedPaste(&buf, "\x1b[20");
+    const flush = stripBracketedPaste(&buf, "");
+    try std.testing.expectEqualStrings("\x1b[20", flush.text);
+    try std.testing.expect(!flush.paste);
+}
+
+test "stripBracketedPaste survives a too-small buffer" {
+    var buf: [64]u8 = undefined;
+    resetPasteSplitter();
+    _ = stripBracketedPaste(&buf, "\x1b[20"); // held
+    // The contract is buf.len >= in.len + 8; a broken caller loses the held
+    // bytes rather than panicking or truncating the new ones.
+    var small: [4]u8 = undefined;
+    const c = stripBracketedPaste(&small, "0123456789");
+    try std.testing.expectEqualStrings("0123", c.text);
+    try std.testing.expect(!c.paste);
+}
+
+test "paste burst thresholds" {
+    // A single key is a keypress, never a paste.
+    try std.testing.expect(!looksLikePaste(0, ""));
+    try std.testing.expect(!looksLikePaste(1, "a"));
+    // A lone Enter is one byte: pressing Enter must not look like a paste.
+    try std.testing.expect(!looksLikePaste(1, "\r"));
+    try std.testing.expect(!looksLikePaste(1, "\n"));
+    // Two keys typed quickly are not a paste either...
+    try std.testing.expect(!looksLikePaste(2, "ab"));
+    try std.testing.expect(!looksLikePaste(7, "abcdefg"));
+    // ...but a real burst, or a multi-line burst, is.
+    try std.testing.expect(looksLikePaste(8, "abcdefgh"));
+    try std.testing.expect(looksLikePaste(2, "a\n"));
+    try std.testing.expect(looksLikePaste(2, "a\r")); // a console Enter is CR
+    try std.testing.expect(looksLikePaste(3, "a\rb"));
+}
+
+test "a single key event is not a paste burst (Windows only)" {
+    if (comptime !is_windows) return;
+    var buf: [16]u8 = undefined;
+    var k: win.KEY_EVENT_RECORD = std.mem.zeroes(win.KEY_EVENT_RECORD);
+    k.bKeyDown = 1;
+    k.UnicodeChar = 'a';
+    const n = win.translateKey(k, &buf);
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expect(!looksLikePaste(n, buf[0..n]));
+    // Enter alone stays a keypress too.
+    k.UnicodeChar = '\r';
+    const m = win.translateKey(k, &buf);
+    try std.testing.expectEqual(@as(usize, 1), m);
+    try std.testing.expect(!looksLikePaste(m, buf[0..m]));
 }

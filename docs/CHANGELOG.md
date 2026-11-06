@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+**Phase 6 polish**
+
+- Matching brackets: the pair next to the cursor is painted in the theme accent,
+  including a partner on another line, and the cursor block itself turns accent
+  when it sits on a bracket.
+- Paste is one edit: a pasted block (bracketed by the terminal or a plain
+  burst) is inserted in one undo step, and CR/CRLF in it become `\n`. On Unix
+  mibi enables bracketed-paste mode (`?2004h`) while it owns the terminal.
+- CI: `.github/workflows/ci.yml` builds and tests on Linux and Windows and
+  enforces the six-target size gate on Linux.
+- Packaging: `tools/package.ps1` and `tools/package.sh` stage
+  `dist/mibi-<version>-<target>/` (binary, `syntax.d`, `themes`, licence, README,
+  example config) and archive it; `.gitattributes` pins LF in the repository.
+
 **Removed**
 
 - The embedded terminal panel: `F8` / `Shift+F8`, the `[terminal] command` /

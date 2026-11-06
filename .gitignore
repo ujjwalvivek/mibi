@@ -3,6 +3,9 @@
 .zig-cache-global/
 zig-out/
 zig-out-new/
+dist/
+*.zip
+*.tar.gz
 
 # Vendored toolchain (fetched by tools/get-zig.ps1 / get-zig-linux.sh)
 tools/zig/

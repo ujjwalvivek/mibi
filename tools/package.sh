@@ -16,7 +16,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 target=${1:-}
 
-version=$(grep -oE 'pub const version = "[^"]+"' "$root/src/main.zig" | head -n 1 | sed 's/.*"\(.*\)"/\1/')
+version=$(sed -n 's/^pub const version = "\([^"]*\)";$/\1/p' "$root/src/main.zig" | head -n 1)
 if [ -z "$version" ]; then
     echo "cannot read the version from src/main.zig" >&2
     exit 1
