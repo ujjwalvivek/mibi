@@ -1033,33 +1033,24 @@ def tab_strip_scrolls_when_it_overflows(m, path):
 
 @check
 def splitting_creates_two_panes(m, path):
-    """F5 splits the window; each pane edits its own document."""
+    """F5 splits into two views of the same file."""
     m.send("\x1b[15~")  # F5
     m.wait_quiet()
-    screen = m.screen_text()
-    lines = screen.splitlines()
-    sep_cols = {row.index("\u2502") for row in lines if "\u2502" in row}
-    assert sep_cols, f"no pane separator:\n{screen}"
-    sep = sep_cols.pop()
-    assert 20 <= sep <= 60, f"unexpected separator column {sep}:\n{screen}"
-
-    # Typing goes into the new (right) pane.
-    m.send("right")
-    m.wait_quiet()
     lines = m.screen_text().splitlines()
-    left_text = "\n".join(row[:sep] for row in lines[1:-1])
-    right_text = "\n".join(row[sep + 1:] for row in lines[1:-1])
-    assert "right" in right_text, f"the new pane did not get the typing:\n{right_text!r}"
-    assert "hello" in left_text, f"the left pane lost its document:\n{left_text!r}"
+    seps = {row.index("\u2502") for row in lines if "\u2502" in row}
+    assert seps, f"no pane separator:\n" + "\n".join(lines)
+    sep = seps.pop()
+    left = "\n".join(row[:sep] for row in lines[1:-1])
+    right = "\n".join(row[sep + 1:] for row in lines[1:-1])
+    assert "hello" in left and "hello" in right, f"both panes should show the file:\n{left!r}\n---\n{right!r}"
 
-    # F6 focuses the other pane, so typing lands on the left.
-    m.send("\x1b[17~")
-    m.wait_quiet()
+    # The panes are two views of one buffer: an edit shows in both.
     m.send("X")
     m.wait_quiet()
     lines = m.screen_text().splitlines()
-    left_text = "\n".join(row[:sep] for row in lines[1:-1])
-    assert "Xhello" in left_text, f"focus did not move to the left pane:\n{left_text!r}"
+    left = "\n".join(row[:sep] for row in lines[1:-1])
+    right = "\n".join(row[sep + 1:] for row in lines[1:-1])
+    assert "Xhello" in left and "Xhello" in right, f"the views are not the same buffer:\n{left!r}\n---\n{right!r}"
     m.shot("32-split")
 
 

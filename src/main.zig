@@ -233,11 +233,14 @@ const Session = struct {
         if (i >= self.docs.items.len) return;
         const id = self.docs.items[i].id;
         if (self.panes.paneWithDoc(id)) |node| {
-            self.panes.focus = node;
-        } else {
-            self.panes.setFocusedDoc(id);
+            self.focusPane(node);
+            return;
         }
+        // The focused pane switches to it, keeping the document's own cursor.
+        self.saveView();
+        self.panes.setFocusedDoc(id);
         self.active = i;
+        self.saveView();
     }
 
     /// Keep `active` pointing at the focused pane's document.
@@ -285,29 +288,15 @@ const Session = struct {
     /// pane is showing, reusing an empty scratch tab, and only adds a new
     /// buffer when there is nothing at all left to show.
     fn splitFocused(self: *Session, dir: panes_mod.Dir) !void {
-        // A split should show something worth looking at: a real file first,
-        // and only then an empty buffer. Picking "whatever tab is next" used to
-        // land on a scratch tab and leave the new pane blank.
-        var pass: usize = 0;
-        while (pass < 2) : (pass += 1) {
-            var k: usize = 1;
-            while (k <= self.docs.items.len) : (k += 1) {
-                const cand = (self.active + k) % self.docs.items.len;
-                const ed = self.docs.items[cand];
-                if (self.panes.paneWithDoc(ed.id) != null) continue;
-                if (pass == 0 and ed.path == null) continue; // files before blanks
-                if (!self.panes.split(dir, ed.id)) return;
-                self.active = cand;
-                return;
-            }
-        }
-        if (self.findScratch()) |i| {
-            if (!self.panes.split(dir, self.docs.items[i].id)) return;
-            self.active = i;
-            return;
-        }
-        if (!self.panes.split(dir, 0)) return;
-        try self.add(null, "", null); // add() points the focused pane at it
+        // A split is a second view of what you are looking at, like every
+        // other editor: the same document in both halves, each with its own
+        // cursor and scroll. Nothing is created, so no blank buffer appears.
+        if (self.panes.live == 0 or self.docs.items.len == 0) return;
+        if (self.panes.leaf_count >= panes_mod.MAX_PANES) return;
+        self.saveView();
+        const doc = self.panes.nodes[self.panes.focus].doc;
+        if (!self.panes.split(dir, doc)) return;
+        self.loadView(self.panes.focus);
     }
 
     /// Close the tab at `index`; a dirty tab becomes active and asks first.
@@ -342,8 +331,11 @@ const Session = struct {
         ed.deinit();
         self.allocator.destroy(ed);
         _ = self.docs.orderedRemove(self.active);
-        // The pane showing it goes too; its sibling takes the parent's place.
-        if (self.panes.paneWithDoc(id)) |node| {
+        // Every pane showing it goes; each sibling takes its parent's place.
+        var guard: usize = 0;
+        while (guard < panes_mod.MAX_PANES) : (guard += 1) {
+            const node = self.panes.paneWithDoc(id) orelse break;
+            if (self.panes.live <= 1) break; // the last pane always stays
             self.panes.focus = node;
             self.panes.removeFocused();
         }
@@ -374,50 +366,58 @@ const Session = struct {
     /// pane split off the target.
     fn dropTabIntoPane(self: *Session, tab: usize, dz: DropZone) void {
         if (tab >= self.docs.items.len) return;
+        if (self.panes.live == 0) return;
         const doc = self.docs.items[tab].id;
-        var zone = dz;
-        // A document lives in one pane at a time. If it is already on screen
-        // the drag moves that pane: the old one collapses and the document
-        // lands in the new split, rather than being shown twice.
-        if (self.panes.paneWithDoc(doc)) |node| {
-            if (node == zone.node) {
-                // Dropping a tab on the pane it is already in still splits:
-                // the other half gets a scratch buffer, so the file lands on
-                // the side you dropped it.
-                if (self.panes.live >= panes_mod.MAX_PANES) return;
-                const dir: panes_mod.Dir = if (zone.side == .left or zone.side == .right) .columns else .rows;
-                const first = zone.side == .left or zone.side == .top;
-                self.panes.focus = node;
-                if (self.findScratch()) |i| {
-                    self.panes.setFocusedDoc(self.docs.items[i].id);
-                } else {
-                    self.add(null, "", null) catch return; // the scratch takes this pane
-                }
-                if (!self.panes.splitAt(node, dir, doc, first)) return;
-                self.active = tab;
-                return;
-            }
-            const target = self.panes.rectOf(zone.node) orelse return;
-            if (self.panes.live <= 1) return;
-            self.panes.focus = node;
-            self.panes.removeFocused();
-            self.panes.layout(self.pane_area);
-            const cx = target.x + target.w / 2;
-            const cy = target.y + target.h / 2;
-            const again = self.panes.paneAt(cx, cy) orelse return;
-            zone = .{ .node = again, .side = zone.side };
+        const dir: panes_mod.Dir = if (dz.side == .left or dz.side == .right) .columns else .rows;
+        const first = dz.side == .left or dz.side == .top;
+        // Dropping on a pane edge always makes a new view there, even of the
+        // document that pane already shows.
+        if (self.panes.leaf_count >= panes_mod.MAX_PANES) return;
+        self.saveView();
+        if (!self.panes.splitAt(dz.node, dir, doc, first)) return;
+        self.loadView(self.panes.focus);
+    }
+
+    /// Store the live cursor and scroll in the focused pane, so another pane
+    /// can be given the editor without losing where this one was looking.
+    fn saveView(self: *Session) void {
+        if (self.panes.live == 0 or self.docs.items.len == 0) return;
+        const ed = self.docs.items[self.active];
+        const n = &self.panes.nodes[self.panes.focus];
+        n.view_cursor = ed.cursor;
+        n.view_row = ed.scroll_row;
+        n.view_col = ed.scroll_col;
+    }
+
+    /// Give the editor the view stored in `node`.
+    fn loadView(self: *Session, node: u8) void {
+        const n = self.panes.nodes[node];
+        const idx = self.docIndex(n.doc) orelse return;
+        const ed = self.docs.items[idx];
+        ed.cursor = @min(n.view_cursor, ed.text().len);
+        ed.scroll_row = n.view_row;
+        ed.scroll_col = n.view_col;
+        self.active = idx;
+    }
+
+    /// Focus a pane, carrying the editor's view state with it.
+    fn focusPane(self: *Session, node: u8) void {
+        if (self.panes.live == 0) return;
+        if (node == self.panes.focus) {
+            self.syncActive();
+            return;
         }
-        const dir: panes_mod.Dir = if (zone.side == .left or zone.side == .right) .columns else .rows;
-        const first = zone.side == .left or zone.side == .top;
-        if (!self.panes.splitAt(zone.node, dir, doc, first)) return;
-        self.active = tab;
+        self.saveView();
+        self.panes.focus = node;
+        self.loadView(node);
     }
 
     /// Move the focus to the next pane and follow it with the active document.
     fn cyclePane(self: *Session, delta: isize) void {
         if (self.panes.leaf_count <= 1) return;
+        self.saveView();
         self.panes.cycleFocus(delta);
-        self.syncActive();
+        self.loadView(self.panes.focus);
     }
 
     /// Scroll the tab strip by one tab. Manual scrolling pins the strip, so the
@@ -823,9 +823,9 @@ fn saveSession(session: *Session, exe_dir: ?[]const u8) void {
         panes_mod.encode(&session.panes, &enc, allocator) catch {};
         for (enc.items) |*e| {
             const line = switch (e.*) {
-                .leaf => |id| blk: {
-                    const idx: u32 = if (session.docIndex(id)) |i| @intCast(i) else 0;
-                    break :blk std.fmt.bufPrint(&line_buf, "p {d}\n", .{idx}) catch continue;
+                .leaf => |l| blk: {
+                    const idx: u32 = if (session.docIndex(l.doc)) |i| @intCast(i) else 0;
+                    break :blk std.fmt.bufPrint(&line_buf, "p {d} {d} {d} {d}\n", .{ idx, l.cursor, l.row, l.col }) catch continue;
                 },
                 .split => |sp| std.fmt.bufPrint(&line_buf, "s {d} {d}\n", .{ @intFromEnum(sp.dir), sp.ratio }) catch continue,
             };
@@ -910,8 +910,12 @@ fn loadSession(allocator: std.mem.Allocator, exe_dir: ?[]const u8, registry: *sy
         } else if (std.mem.startsWith(u8, line, "tree ")) {
             tree_open = std.mem.eql(u8, line["tree ".len..], "1");
         } else if (std.mem.startsWith(u8, line, "p ")) {
-            const idx = std.fmt.parseInt(u32, line["p ".len..], 10) catch 0;
-            pane_enc.append(allocator, .{ .leaf = idx }) catch {};
+            var f = std.mem.splitScalar(u8, line["p ".len..], ' ');
+            const idx = std.fmt.parseInt(u32, f.next() orelse "0", 10) catch 0;
+            const cursor = std.fmt.parseInt(usize, f.next() orelse "0", 10) catch 0;
+            const row = std.fmt.parseInt(usize, f.next() orelse "0", 10) catch 0;
+            const col = std.fmt.parseInt(usize, f.next() orelse "0", 10) catch 0;
+            pane_enc.append(allocator, .{ .leaf = .{ .doc = idx, .cursor = cursor, .row = row, .col = col } }) catch {};
         } else if (std.mem.startsWith(u8, line, "s ")) {
             var fields = std.mem.splitScalar(u8, line["s ".len..], ' ');
             const dir = std.fmt.parseInt(u8, fields.next() orelse "0", 10) catch 0;
@@ -963,9 +967,9 @@ fn loadSession(allocator: std.mem.Allocator, exe_dir: ?[]const u8, registry: *sy
     if (pane_enc.items.len > 0) {
         for (pane_enc.items) |*e| {
             switch (e.*) {
-                .leaf => |idx| {
-                    const i = @min(idx, @as(u32, @intCast(session.count() - 1)));
-                    e.* = .{ .leaf = session.docs.items[i].id };
+                .leaf => |l| {
+                    const i = @min(l.doc, @as(u32, @intCast(session.count() - 1)));
+                    e.* = .{ .leaf = .{ .doc = session.docs.items[i].id, .cursor = l.cursor, .row = l.row, .col = l.col } };
                 },
                 .split => {},
             }
@@ -1286,8 +1290,7 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
     const sx = if (x > 0) @as(usize, x) - 1 else 0;
     const sy = @as(usize, y) - 1;
     const node = paneUnder(session, x, y) orelse return;
-    session.panes.focus = node;
-    session.syncActive();
+    session.focusPane(node);
     const rect = session.panes.rectOf(node) orelse return;
     const target = session.current();
     const gutter: usize = if (session.config.line_numbers) digits(target.lineCount()) + 1 else 0;
@@ -1967,11 +1970,34 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
     };
     session.pane_area = area;
     session.panes.layout(area);
+    // Drawing another pane borrows the editor and moves its cursor, so the
+    // focused pane's own state is captured and put back afterwards.
+    const live_ed = session.current();
+    const live_view = .{ .cursor = live_ed.cursor, .row = live_ed.scroll_row, .col = live_ed.scroll_col };
+    var focused_view: ?struct { cursor: usize, row: usize, col: usize } = null;
     var pi: usize = 0;
     while (pi < session.panes.rect_count) : (pi += 1) {
         const pr = session.panes.rects[pi];
         const idx = session.docIndex(session.panes.nodes[pr.node].doc) orelse continue;
-        drawPane(s, session, session.docs.items[idx], pr.rect, pr.node == session.panes.focus);
+        const ed = session.docs.items[idx];
+        const focused = pr.node == session.panes.focus;
+        if (focused) {
+            // Another pane may have borrowed the editor: put the live view
+            // back before drawing the pane that owns it.
+            ed.cursor = live_view.cursor;
+            ed.scroll_row = live_view.row;
+            ed.scroll_col = live_view.col;
+        }
+        drawPane(s, session, ed, pr.rect, pr.node, focused);
+        if (focused) {
+            focused_view = .{ .cursor = ed.cursor, .row = ed.scroll_row, .col = ed.scroll_col };
+        }
+    }
+    if (focused_view) |v| {
+        const ed = session.current();
+        ed.cursor = v.cursor;
+        ed.scroll_row = v.row;
+        ed.scroll_col = v.col;
     }
     if (session.drag_tab == null) session.drop_zone = null;
     if (session.drop_zone) |dz| drawDropHint(s, session, dz, theme);
@@ -2036,9 +2062,16 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
 /// Draw one pane's document inside `r`. Only the focused pane draws the block
 /// cursor and the current-line tint, so the focus is visible even when the
 /// panes are narrow.
-fn drawPane(s: *render.Screen, session: *Session, ed: *Editor, r: panes_mod.Rect, focused: bool) void {
+fn drawPane(s: *render.Screen, session: *Session, ed: *Editor, r: panes_mod.Rect, node: u8, focused: bool) void {
     if (r.w == 0 or r.h == 0) return;
     const theme = session.config.theme;
+    // A pane that is not focused draws its own stored view of the document.
+    if (!focused) {
+        const n = session.panes.nodes[node];
+        ed.cursor = @min(n.view_cursor, ed.text().len);
+        ed.scroll_row = n.view_row;
+        ed.scroll_col = n.view_col;
+    }
     const total = ed.lineCount();
     const gutter: usize = if (session.config.line_numbers) digits(total) + 1 else 0;
     const text_cols: usize = if (r.w > gutter + 1) r.w - gutter - 1 else 0;
@@ -3912,27 +3945,6 @@ test "the close button on the last tab asks to quit instead of crashing" {
     try std.testing.expectEqual(@as(usize, 0), d.session.count());
 }
 
-test "ctrl+backslash splits the window into two panes" {
-    var d = try Drive.start("one\ntwo");
-    defer d.stop();
-    try d.send("\x1c"); // Ctrl+\
-    // The new pane starts on a scratch buffer, so there is a tab for it.
-    try std.testing.expectEqual(@as(usize, 2), d.session.count());
-    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
-    try std.testing.expectEqualStrings("", d.session.current().text());
-
-    var s = try render.Screen.init(std.testing.allocator, 40, 10);
-    defer s.deinit();
-    draw(&s, &d.session, "", null, false);
-    try std.testing.expectEqual(@as(usize, 2), d.session.panes.rect_count);
-    try std.testing.expectEqual(@as(usize, 1), d.session.panes.sep_count);
-    // A vertical rule separates the panes.
-    const sep_x = d.session.panes.seps[0].x;
-    try std.testing.expectEqual(@as(u21, 0x2502), s.back[1 * s.cols + sep_x].ch);
-    // Both documents are drawn, each in its own rectangle.
-    try std.testing.expectEqual(@as(usize, 0), d.session.panes.rects[0].rect.x);
-    try std.testing.expectEqual(@as(usize, 20), d.session.panes.rects[1].rect.x);
-}
 
 test "the console close handler writes the session" {
     var d = try Drive.start("hello");
@@ -3962,188 +3974,14 @@ test "esc closes the help panel" {
     try std.testing.expect(!d.help);
 }
 
-test "closing a pane keeps its document open as a tab" {
-    var d = try Drive.start("one\ntwo");
-    defer d.stop();
-    try d.send("\x1b[15~"); // F5: split side by side
-    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
-    const left = d.session.docIndex(d.session.panes.nodes[d.session.panes.leaves[0]].doc).?;
-    const right = d.session.docIndex(d.session.panes.nodes[d.session.panes.leaves[1]].doc).?;
 
-    try d.send("\x1b[15;2~"); // Shift+F5: close the focused (right) pane
-    try std.testing.expectEqual(@as(usize, 1), d.session.panes.live);
-    // Both documents are still open: the right one is just a tab now.
-    try std.testing.expectEqual(@as(usize, 2), d.session.count());
-    try std.testing.expectEqual(left, d.session.active);
-    try d.send("\x1b[5;5~"); // Ctrl+PgUp: the tab left without a pane
-    try std.testing.expectEqual(right, d.session.active);
-    try std.testing.expectEqual(@as(usize, 1), d.session.panes.live);
 
-    // The last pane cannot be closed: there would be nowhere to edit.
-    try d.send("\x1b[15;2~");
-    try std.testing.expectEqual(@as(usize, 1), d.session.panes.live);
-}
 
-test "dropping a tab on a pane edge splits it" {
-    var d = try Drive.start("one");
-    defer d.stop();
-    try d.send("\x1b[15~"); // F5: two panes, the right one is a scratch buffer
-    var s = try render.Screen.init(std.testing.allocator, 40, 10);
-    defer s.deinit();
-    draw(&s, &d.session, "", null, false);
-    const left_node = d.session.panes.rects[0].node;
-    const left_doc = d.session.docIndex(d.session.panes.nodes[left_node].doc).?;
 
-    // Drop the left tab on the right half of the right pane: the document
-    // moves there (its old pane collapses) and the right pane splits.
-    const right_node = d.session.panes.rects[1].node;
-    d.session.dropTabIntoPane(left_doc, .{ .node = right_node, .side = .right });
-    draw(&s, &d.session, "", null, false);
-    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
-    // The left half now shows the scratch document, the right half the file.
-    const left_after = d.session.docIndex(d.session.panes.nodes[d.session.panes.rects[0].node].doc).?;
-    try std.testing.expectEqualStrings("", d.session.docs.items[left_after].text());
-    const right_after = d.session.docIndex(d.session.panes.nodes[d.session.panes.rects[1].node].doc).?;
-    try std.testing.expectEqual(left_doc, right_after);
-    try std.testing.expectEqual(left_doc, d.session.active);
-}
 
-test "dragging a tab onto another pane splits it" {
-    var d = try Drive.start("one");
-    defer d.stop();
-    try d.send("\x1b[15~"); // F5: two panes
-    var s = try render.Screen.init(std.testing.allocator, 40, 10);
-    defer s.deinit();
-    draw(&s, &d.session, "", null, false);
-    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
 
-    var help = false;
-    var pr: ?Prompt = null;
-    var mb: [64]u8 = undefined;
-    var msg: []const u8 = "";
-    handleMouse(&d.session, "<0;3;1", 'M', &help, &pr, &mb, &msg); // press the tab
-    try std.testing.expect(d.session.press_tab != null);
-    handleMouse(&d.session, "<32;30;6", 'M', &help, &pr, &mb, &msg); // drag over the right pane
-    try std.testing.expect(d.session.drop_zone != null);
-    handleMouse(&d.session, "<0;30;6", 'm', &help, &pr, &mb, &msg); // release
-    draw(&s, &d.session, "", null, false);
-    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
-    try std.testing.expectEqual(@as(usize, 2), d.session.panes.sep_count + 1);
-}
 
-test "dragging a tab straight down into its own pane splits it" {
-    var d = try Drive.start("one\ntwo");
-    defer d.stop();
-    var s = try render.Screen.init(std.testing.allocator, 40, 10);
-    defer s.deinit();
-    draw(&s, &d.session, "", null, false);
 
-    var help = false;
-    var pr: ?Prompt = null;
-    var mb: [64]u8 = undefined;
-    var msg: []const u8 = "";
-    // Press the tab, then move straight down into the text area: the drag must
-    // promote on the vertical axis too.
-    handleMouse(&d.session, "<0;3;1", 'M', &help, &pr, &mb, &msg);
-    handleMouse(&d.session, "<32;3;6", 'M', &help, &pr, &mb, &msg);
-    try std.testing.expect(d.session.drag_tab != null);
-    try std.testing.expect(d.session.drop_zone != null);
-    handleMouse(&d.session, "<0;3;6", 'm', &help, &pr, &mb, &msg);
-    draw(&s, &d.session, "", null, false);
-
-    // One pane became two, with the file on the left and a scratch on the right.
-    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
-    try std.testing.expectEqual(@as(usize, 1), d.session.panes.sep_count);
-    const left = d.session.docIndex(d.session.panes.nodes[d.session.panes.rects[0].node].doc).?;
-    const right = d.session.docIndex(d.session.panes.nodes[d.session.panes.rects[1].node].doc).?;
-    try std.testing.expectEqualStrings("one\ntwo", d.session.docs.items[left].text());
-    try std.testing.expectEqualStrings("", d.session.docs.items[right].text());
-}
-
-test "splitting shows an open file instead of adding a scratch tab" {
-    var d = try Drive.start("one");
-    defer d.stop();
-    try d.send("\x14"); // a second tab
-    try std.testing.expectEqual(@as(usize, 2), d.session.count());
-    try d.send("\x1b[15~"); // F5
-    // The new pane shows the other file; no extra [No Name] tab is created.
-    try std.testing.expectEqual(@as(usize, 2), d.session.count());
-    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
-}
-
-test "splitting prefers a real file over an empty buffer" {
-    const a = "mibi-split-a.txt";
-    const b = "mibi-split-b.txt";
-    defer os.deleteFile(a) catch {};
-    defer os.deleteFile(b) catch {};
-    try os.writeFile(a, "AAA\n");
-    try os.writeFile(b, "BBB\n");
-
-    var d = try Drive.start("scratch");
-    defer d.stop();
-    // The empty buffer sits first, like a stale [No Name] tab.
-    try d.send("\x14"); // blank tab
-    try openViaPicker(&d.session, std.testing.allocator, ".", a);
-    try openViaPicker(&d.session, std.testing.allocator, ".", b);
-    try std.testing.expectEqual(@as(usize, 4), d.session.count());
-
-    try d.send("\x1b[15~"); // F5
-    try std.testing.expectEqual(@as(usize, 4), d.session.count()); // no new tab
-    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
-    // Both panes show real files, not the empty buffer.
-    var i: usize = 0;
-    while (i < d.session.panes.leaf_count) : (i += 1) {
-        const node = d.session.panes.leaves[i];
-        const idx = d.session.docIndex(d.session.panes.nodes[node].doc).?;
-        try std.testing.expect(d.session.docs.items[idx].path != null);
-    }
-}
-
-test "F6 moves the focus between panes" {
-    var d = try Drive.start("one");
-    defer d.stop();
-    try d.send("\x1c");
-    const right = d.session.active;
-    try d.send("\x1b[17~"); // F6
-    try std.testing.expect(d.session.active != right);
-    try d.send("\x1b[17;2~"); // Shift+F6
-    try std.testing.expectEqual(right, d.session.active);
-}
-
-test "closing a tab closes its pane" {
-    var d = try Drive.start("one");
-    defer d.stop();
-    try d.send("\x1c");
-    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
-    try d.send("\x17"); // Ctrl+W on the focused (scratch) tab
-    try std.testing.expectEqual(@as(usize, 1), d.session.count());
-    try std.testing.expectEqual(@as(usize, 1), d.session.panes.live);
-    // The surviving pane keeps its document and gets the whole width back.
-    try std.testing.expectEqualStrings("one", d.session.current().text());
-    var s = try render.Screen.init(std.testing.allocator, 40, 10);
-    defer s.deinit();
-    draw(&s, &d.session, "", null, false);
-    try std.testing.expectEqual(@as(usize, 40), d.session.panes.rects[0].rect.w);
-}
-
-test "clicking a pane focuses it and places the cursor there" {
-    var d = try Drive.start("one\ntwo\nthree");
-    defer d.stop();
-    try d.send("\x1c"); // left: "one/two/three", right: scratch
-    var s = try render.Screen.init(std.testing.allocator, 40, 10);
-    defer s.deinit();
-    draw(&s, &d.session, "", null, false);
-    const left_doc = d.session.docIndex(d.session.panes.nodes[d.session.panes.rects[0].node].doc).?;
-
-    // Click the third text row of the left pane (row 4, column 4 on screen).
-    var help = false;
-    var pr: ?Prompt = null;
-    var mb: [64]u8 = undefined;
-    var msg: []const u8 = "";
-    handleMouse(&d.session, "<0;4;4", 'M', &help, &pr, &mb, &msg);
-    try std.testing.expectEqual(left_doc, d.session.active);
-    try std.testing.expectEqual(@as(usize, 2), d.session.current().rowCol().row);
-}
 
 test "a failed save-as keeps the old path and the dirty flag" {
     var d = try Drive.start("x");
@@ -4256,4 +4094,134 @@ test "a non-ascii file name renders as text in the status bar" {
     var buf: [128]u8 = undefined;
     const status = rowText(&s, 2, &buf);
     try std.testing.expect(std.mem.indexOf(u8, status, "caf\u{00e9}.txt") != null);
+}
+
+
+test "splitting duplicates the view, not the buffer" {
+    var d = try Drive.start("one\ntwo");
+    defer d.stop();
+    try d.send("\x1b[15~"); // F5
+    // No buffer is created: the same document gets a second view.
+    try std.testing.expectEqual(@as(usize, 1), d.session.count());
+    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
+    const a = d.session.docIndex(d.session.panes.nodes[d.session.panes.leaves[0]].doc).?;
+    const b = d.session.docIndex(d.session.panes.nodes[d.session.panes.leaves[1]].doc).?;
+    try std.testing.expectEqual(a, b);
+
+    var s = try render.Screen.init(std.testing.allocator, 40, 10);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+    try std.testing.expectEqual(@as(usize, 2), d.session.panes.rect_count);
+    try std.testing.expectEqual(@as(usize, 1), d.session.panes.sep_count);
+    try std.testing.expectEqual(@as(u21, 0x2502), s.back[1 * s.cols + d.session.panes.seps[0].x].ch);
+    try std.testing.expectEqual(@as(usize, 0), d.session.panes.rects[0].rect.x);
+    try std.testing.expectEqual(@as(usize, 20), d.session.panes.rects[1].rect.x);
+}
+
+test "each pane keeps its own cursor" {
+    var d = try Drive.start("a\nb\nc\nd\ne");
+    defer d.stop();
+    try d.send("\x1b[15~"); // F5: two views of the same file
+    var s = try render.Screen.init(std.testing.allocator, 40, 10);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+    // Move down in the focused (right) view.
+    try d.send("\x1b[B");
+    try d.send("\x1b[B");
+    const right = d.session.current().cursor;
+    try d.send("\x1b[17~"); // F6 -> the left view, which stayed at the top
+    draw(&s, &d.session, "", null, false);
+    try std.testing.expect(d.session.current().cursor != right);
+    try d.send("\x1b[17~"); // back
+    draw(&s, &d.session, "", null, false);
+    try std.testing.expectEqual(right, d.session.current().cursor);
+}
+
+test "closing a pane keeps the document open" {
+    var d = try Drive.start("one\ntwo");
+    defer d.stop();
+    try d.send("\x1b[15~"); // F5
+    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
+    try d.send("\x1b[15;2~"); // Shift+F5
+    try std.testing.expectEqual(@as(usize, 1), d.session.panes.live);
+    try std.testing.expectEqual(@as(usize, 1), d.session.count());
+    try std.testing.expectEqualStrings("one\ntwo", d.session.current().text());
+    // The last pane cannot be closed: there would be nowhere to edit.
+    try d.send("\x1b[15;2~");
+    try std.testing.expectEqual(@as(usize, 1), d.session.panes.live);
+}
+
+test "closing the tab closes every pane showing it" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    try d.send("\x1b[15~"); // two views of the same file
+    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
+    try d.send("\x17"); // Ctrl+W closes the document
+    try std.testing.expectEqual(@as(usize, 0), d.session.count());
+    try std.testing.expectEqual(@as(usize, 0), d.session.panes.live);
+}
+
+test "dropping a tab on a pane edge adds a view there" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    try d.send("\x1b[15~"); // two views
+    var s = try render.Screen.init(std.testing.allocator, 40, 10);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+    const right = d.session.panes.rects[1].node;
+    d.session.dropTabIntoPane(0, .{ .node = right, .side = .right });
+    draw(&s, &d.session, "", null, false);
+    try std.testing.expectEqual(@as(usize, 3), d.session.panes.live);
+    try std.testing.expectEqual(@as(usize, 1), d.session.count());
+}
+
+test "dragging a tab down into the text splits the view" {
+    var d = try Drive.start("one\ntwo");
+    defer d.stop();
+    var s = try render.Screen.init(std.testing.allocator, 40, 10);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+
+    var help = false;
+    var pr: ?Prompt = null;
+    var mb: [64]u8 = undefined;
+    var msg: []const u8 = "";
+    handleMouse(&d.session, "<0;3;1", 'M', &help, &pr, &mb, &msg);
+    handleMouse(&d.session, "<32;3;6", 'M', &help, &pr, &mb, &msg);
+    try std.testing.expect(d.session.drag_tab != null);
+    try std.testing.expect(d.session.drop_zone != null);
+    handleMouse(&d.session, "<0;3;6", 'm', &help, &pr, &mb, &msg);
+    draw(&s, &d.session, "", null, false);
+    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
+    try std.testing.expectEqual(@as(usize, 1), d.session.count());
+}
+
+test "F6 moves the focus between panes" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    try d.send("\x1b[15~");
+    const right = d.session.panes.focus;
+    try d.send("\x1b[17~"); // F6
+    try std.testing.expect(d.session.panes.focus != right);
+    try d.send("\x1b[17;2~"); // Shift+F6
+    try std.testing.expectEqual(right, d.session.panes.focus);
+}
+
+test "clicking a pane focuses it and places the cursor there" {
+    var d = try Drive.start("one\ntwo\nthree");
+    defer d.stop();
+    try d.send("\x1b[15~"); // two views
+    var s = try render.Screen.init(std.testing.allocator, 40, 10);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+    const left = d.session.panes.rects[0].node;
+
+    var help = false;
+    var pr: ?Prompt = null;
+    var mb: [64]u8 = undefined;
+    var msg: []const u8 = "";
+    // Click the third text row of the left pane (row 4, column 4 on screen).
+    handleMouse(&d.session, "<0;4;4", 'M', &help, &pr, &mb, &msg);
+    try std.testing.expectEqual(left, d.session.panes.focus);
+    try std.testing.expectEqual(@as(usize, 2), d.session.current().rowCol().row);
 }

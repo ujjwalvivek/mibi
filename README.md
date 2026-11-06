@@ -231,6 +231,11 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 | aarch64-macos     |  181,560 |
 | x86_64-windows    |  196,608 |
 
+## Licence
+
+MIT - see [LICENSE](LICENSE). The installer copies the licence next to the
+binary, so an installed mibi always carries it.
+
 ## Session state
 
 mibi reopens your last session and keeps unsaved buffers across restarts. That
@@ -239,8 +244,8 @@ user data directory, one directory per project (an FNV-1a hash of the working
 directory):
 
 ```
-%LOCALAPPDATA%\mibi\sessions\<hash>\mibi-session
-%LOCALAPPDATA%\mibi\sessions\<hash>\mibi-session-buf-<n>.txt
+%LOCALAPPDATA%\Mibi\sessions\<hash>\mibi-session
+%LOCALAPPDATA%\Mibi\sessions\<hash>\mibi-session-buf-<n>.txt
 ```
 
 `mibi-session` lists the tabs, cursors, split layout and file-tree state;

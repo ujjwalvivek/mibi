@@ -30,8 +30,15 @@ pub const Rect = struct {
 
 pub const Node = struct {
     leaf: bool = true,
-    /// Leaf: the document shown here (a stable id, not a tab index).
+    /// Leaf: the document shown here (a stable id, not a tab index). Two
+    /// panes may show the same document: they are two views of one buffer,
+    /// each with its own cursor and scroll below.
     doc: u32 = 0,
+    /// Leaf: this pane's own cursor and scroll, so a split can look at a
+    /// different part of the same file.
+    view_cursor: usize = 0,
+    view_row: usize = 0,
+    view_col: usize = 0,
     dir: Dir = .columns,
     /// Percent of the rectangle given to `a`.
     ratio: u8 = 50,
@@ -145,13 +152,13 @@ pub const Tree = struct {
             self.putFree(na);
             return false;
         };
-        const old_doc = self.nodes[node].doc;
+        const old = self.nodes[node];
         if (first) {
-            self.nodes[na] = .{ .leaf = true, .doc = doc };
-            self.nodes[nb] = .{ .leaf = true, .doc = old_doc };
+            self.nodes[na] = .{ .leaf = true, .doc = doc, .view_cursor = old.view_cursor, .view_row = old.view_row, .view_col = old.view_col };
+            self.nodes[nb] = .{ .leaf = true, .doc = old.doc, .view_cursor = old.view_cursor, .view_row = old.view_row, .view_col = old.view_col };
         } else {
-            self.nodes[na] = .{ .leaf = true, .doc = old_doc };
-            self.nodes[nb] = .{ .leaf = true, .doc = doc };
+            self.nodes[na] = .{ .leaf = true, .doc = old.doc, .view_cursor = old.view_cursor, .view_row = old.view_row, .view_col = old.view_col };
+            self.nodes[nb] = .{ .leaf = true, .doc = doc, .view_cursor = old.view_cursor, .view_row = old.view_row, .view_col = old.view_col };
         }
         self.nodes[node] = .{ .leaf = false, .dir = dir, .ratio = 50, .a = na, .b = nb };
         self.focus = if (first) na else nb;
@@ -299,7 +306,7 @@ pub const Tree = struct {
 // subtree, then the second's.
 
 pub const Encoded = union(enum) {
-    leaf: u32,
+    leaf: struct { doc: u32, cursor: usize, row: usize, col: usize },
     split: struct { dir: Dir, ratio: u8 },
 };
 
@@ -312,7 +319,12 @@ pub fn encode(self: *const Tree, list: *std.ArrayList(Encoded), allocator: std.m
 fn encodeIn(self: *const Tree, idx: u8, list: *std.ArrayList(Encoded), allocator: std.mem.Allocator) !void {
     const n = self.nodes[idx];
     if (n.leaf) {
-        try list.append(allocator, .{ .leaf = n.doc });
+        try list.append(allocator, .{ .leaf = .{
+            .doc = n.doc,
+            .cursor = n.view_cursor,
+            .row = n.view_row,
+            .col = n.view_col,
+        } });
         return;
     }
     try list.append(allocator, .{ .split = .{ .dir = n.dir, .ratio = n.ratio } });
@@ -339,8 +351,14 @@ fn buildNode(t: *Tree, list: []const Encoded, idx: *usize) ?u8 {
     idx.* += 1;
     const slot = t.takeFree() orelse return null;
     switch (e) {
-        .leaf => |doc| {
-            t.nodes[slot] = .{ .leaf = true, .doc = doc };
+        .leaf => |l| {
+            t.nodes[slot] = .{
+                .leaf = true,
+                .doc = l.doc,
+                .view_cursor = l.cursor,
+                .view_row = l.row,
+                .view_col = l.col,
+            };
             t.live += 1;
             return slot;
         },
@@ -389,7 +407,7 @@ test "a malformed layout is rejected" {
     // A split with a single child cannot be decoded.
     try std.testing.expectEqual(@as(?Tree, null), decode(&[_]Encoded{.{ .split = .{ .dir = .columns, .ratio = 50 } }}));
     // A complete single leaf is fine.
-    const one = decode(&[_]Encoded{.{ .leaf = 9 }}).?;
+    const one = decode(&[_]Encoded{.{ .leaf = .{ .doc = 9, .cursor = 0, .row = 0, .col = 0 } }}).?;
     try std.testing.expectEqual(@as(usize, 1), one.live);
     try std.testing.expectEqual(@as(?u32, 9), one.focusedDoc());
 }

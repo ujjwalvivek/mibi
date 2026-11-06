@@ -46,6 +46,13 @@ wt.exe -p mibi "%~dp0mibi.exe" %*
 "@
 Set-Content -Path (Join-Path $Target 'mibi.cmd') -Value $launcher -Encoding ASCII
 
+# The licence ships with the binary.
+$licence = @(
+    (Join-Path $src '..\share\mibi\LICENSE'),
+    (Join-Path $Root 'LICENSE')
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($licence) { Copy-Item $licence (Join-Path $Target 'LICENSE') -Force }
+
 # The vector icon is handy for shortcuts and docs; nothing else is copied.
 $svg = @(
     (Join-Path $src '..\share\mibi\icons\mibi.svg'),

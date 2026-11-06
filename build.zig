@@ -54,6 +54,7 @@ pub fn build(b: *std.Build) void {
     });
     b.installFile("assets/mibi.ico", "share/mibi/icons/mibi.ico");
     b.installFile("assets/mibi.svg", "share/mibi/icons/mibi.svg");
+b.installFile("LICENSE", "share/mibi/LICENSE");
     b.installDirectory(.{
         .source_dir = b.path("assets/windows-terminal"),
         .install_dir = .prefix,

@@ -331,14 +331,14 @@ pub fn makeDirAll(path: []const u8) !void {
 pub fn dataDirAlloc(allocator: std.mem.Allocator) ![]u8 {
     if (is_windows) {
         if (getEnvAlloc(allocator, "LOCALAPPDATA")) |v| {
-            return std.fmt.allocPrint(allocator, "{s}/mibi", .{v});
+            return std.fmt.allocPrint(allocator, "{s}/Mibi", .{v});
         } else |_| {}
     }
     if (getEnvAlloc(allocator, "XDG_STATE_HOME")) |v| {
-        return std.fmt.allocPrint(allocator, "{s}/mibi", .{v});
+        return std.fmt.allocPrint(allocator, "{s}/Mibi", .{v});
     } else |_| {}
     if (getEnvAlloc(allocator, "HOME")) |v| {
-        return std.fmt.allocPrint(allocator, "{s}/.local/state/mibi", .{v});
+        return std.fmt.allocPrint(allocator, "{s}/.local/state/Mibi", .{v});
     } else |_| {}
     return allocator.dupe(u8, ".");
 }
