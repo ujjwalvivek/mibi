@@ -22,10 +22,10 @@ Everything is scoped to this folder; nothing is installed globally. The Zig
 toolchain (0.16.0) is fetched into `tools/zig` on first use.
 
 ```powershell
-.\build.ps1                 # -> zig-out\bin\mibi.exe (ReleaseSmall)
-.\build.ps1 run             # build and run
-.\build.ps1 test            # unit tests
-.\build.ps1 size            # build every target and check the size gate
+.\build.ps1                             # -> zig-out\bin\mibi.exe (ReleaseSmall)
+.\build.ps1 run                         # build and run
+.\build.ps1 test                        # unit tests
+.\build.ps1 size                        # build every target and check the size gate
 .\build.ps1 -Doptimize=Debug
 .\build.ps1 -Dtarget=x86_64-linux-gnu   # cross-compile
 ```
@@ -104,38 +104,38 @@ packaging.
 
 ## Controls
 
-| Key                       | Action                                                |
-| ------------------------- | ----------------------------------------------------- |
-| _type_                    | insert text                                           |
-| `Enter`                   | new line                                              |
-| `Tab`                     | insert 4 spaces                                       |
-| `Backspace` / `Delete`    | delete before / after the cursor                      |
-| arrows                    | move                                                  |
-| `Ctrl+arrows`             | move by word                                          |
-| `Home` / `End`            | start / end of line                                   |
-| `PgUp` / `PgDn`           | move a page                                           |
-| `Shift` + movement        | extend the selection                                  |
-| `Ctrl+A`                  | select all                                            |
-| `Esc`                     | clear the selection (or cancel a prompt)              |
-| `Ctrl+C` / `Ctrl+X`       | copy / cut selection (or line)                        |
-| `Ctrl+V`                  | paste from the register                               |
-| `Ctrl+D`                  | duplicate the current line                            |
-| `Ctrl+Z` / `Ctrl+Y`       | undo / redo                                           |
-| `Ctrl+Alt+Up` / `Down`    | add a cursor above / below (Esc drops them)           |
+| Key                       | Action                                                                                      |
+| ------------------------- | ------------------------------------------------------------------------------------------- |
+| _type_                    | insert text                                                                                 |
+| `Enter`                   | new line                                                                                    |
+| `Tab`                     | insert 4 spaces                                                                             |
+| `Backspace` / `Delete`    | delete before / after the cursor                                                            |
+| arrows                    | move                                                                                        |
+| `Ctrl+arrows`             | move by word                                                                                |
+| `Home` / `End`            | start / end of line                                                                         |
+| `PgUp` / `PgDn`           | move a page                                                                                 |
+| `Shift` + movement        | extend the selection                                                                        |
+| `Ctrl+A`                  | select all                                                                                  |
+| `Esc`                     | clear the selection (or cancel a prompt)                                                    |
+| `Ctrl+C` / `Ctrl+X`       | copy / cut selection (or line)                                                              |
+| `Ctrl+V`                  | paste from the register                                                                     |
+| `Ctrl+D`                  | duplicate the current line                                                                  |
+| `Ctrl+Z` / `Ctrl+Y`       | undo / redo                                                                                 |
+| `Ctrl+Alt+Up` / `Down`    | add a cursor above / below (Esc drops them)                                                 |
 | `Ctrl+F`                  | find (incremental); `F3` / `Shift+F3` next / previous; `Ctrl+R` in the prompt toggles regex |
-| `Ctrl+R`                  | replace all                                           |
-| `Ctrl+G`                  | go to `line[:column]`                                 |
-| `Ctrl+S`                  | save; asks for a name if the buffer is unnamed        |
-| `Ctrl+O`                  | fuzzy file picker: type to filter, Enter opens in a new tab |
-| `Ctrl+T` / `Ctrl+W`       | new tab / close tab (closing the last one quits)      |
-| `Ctrl+PgUp` / `Ctrl+PgDn` | previous / next tab                                   |
-| `F5` / `F7`               | split the pane side by side / stacked                 |
-| `Shift+F5` / `Shift+F7`   | close the focused pane (its file stays open as a tab)  |
-| `F6` / `Shift+F6`         | next / previous pane (or click a pane)                |
-| `F2`                      | theme picker (arrows preview live, Enter keeps and saves, Esc restores) |
-| `Ctrl+P`                  | command palette: every action, fuzzy-filtered |
-| `Ctrl+?` / `F1`           | help panel (Esc closes it); hints at the status bar's right edge |
-| `Ctrl+Q`                  | quit (asks first if any tab has unsaved edits)        |
+| `Ctrl+R`                  | replace all                                                                                 |
+| `Ctrl+G`                  | go to `line[:column]`                                                                       |
+| `Ctrl+S`                  | save; asks for a name if the buffer is unnamed                                              |
+| `Ctrl+O`                  | fuzzy file picker: type to filter, Enter opens in a new tab                                 |
+| `Ctrl+T` / `Ctrl+W`       | new tab / close tab (closing the last one quits)                                            |
+| `Ctrl+PgUp` / `Ctrl+PgDn` | previous / next tab                                                                         |
+| `F5` / `F7`               | split the pane side by side / stacked                                                       |
+| `Shift+F5` / `Shift+F7`   | close the focused pane (its file stays open as a tab)                                       |
+| `F6` / `Shift+F6`         | next / previous pane (or click a pane)                                                      |
+| `F2`                      | theme picker (arrows preview live, Enter keeps and saves, Esc restores)                     |
+| `Ctrl+P`                  | command palette: every action, fuzzy-filtered                                               |
+| `Ctrl+?` / `F1`           | help panel (Esc closes it); hints at the status bar's right edge                            |
+| `Ctrl+Q`                  | quit (asks first if any tab has unsaved edits)                                              |
 
 ## Features
 
@@ -229,15 +229,15 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu |  125,624 |
-| x86_64-linux-gnu  |  137,248 |
-| x86_64-macos      |  145,214 |
-| aarch64-macos     |  181,560 |
-| x86_64-windows    |  196,608 |
+| aarch64-linux-gnu | 125,624 |
+| x86_64-linux-gnu  | 137,248 |
+| x86_64-macos      | 145,214 |
+| aarch64-macos     | 181,560 |
+| x86_64-windows    | 196,608 |
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md); the current release is **v0.0.2**.
+See [docs/CHANGELOG.md](docs/CHANGELOG.md); the current release is **v0.0.2**.
 
 ## Licence
 
