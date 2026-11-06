@@ -869,6 +869,53 @@ def terminal_scrollback_scrolls(m, path):
 
 
 @check
+def global_keys_work_with_the_tree_focused(m, path):
+    """F-keys still reach the editor while the file tree has the focus."""
+    work = os.path.join(SHOT_DIR, "work-tree-keys")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
+        f.write("[terminal]\ncommand = cmd.exe\nheight = 8\n")
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello\nworld\n")
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        proc.send("\x02")  # Ctrl+B: the tree takes the keyboard
+        proc.wait_quiet()
+        proc.send("\x1b[19~")  # F8 must still open the terminal
+        assert proc.wait_for("cmd.exe"), "F8 was swallowed by the tree:\n" + proc.screen_text()
+        proc.shot("45-tree-keys")
+    finally:
+        proc.close()
+
+
+@check
+def selection_stays_on_its_line(m, path):
+    """A selection on one line does not paint the start of the next one."""
+    work = os.path.join(SHOT_DIR, "work-sel-line")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "two.txt"), "w", encoding="utf-8") as f:
+        f.write("alpha beta gamma\nsecond line here\n")
+    proc = Mibi(["two.txt"], cwd=work)
+    try:
+        assert proc.wait_for("alpha beta gamma"), "editor did not start"
+        proc.wait_quiet()
+        # Double click on "second" in the SECOND line (screen row 3, column 4).
+        proc.proc.write("\x1b[<0;4;3M\x1b[<0;4;3m" * 2)
+        proc.wait_quiet()
+        selected = proc.screen.bg_at(2, 4)
+        assert selected is not None, "no selection painted on the clicked line"
+        first_row = [proc.screen.bg_at(1, c) for c in range(0, 40)]
+        assert selected not in first_row, f"the selection bled onto the previous line: {first_row}"
+        proc.shot("46-selection-line")
+    finally:
+        proc.close()
+
+
+@check
 def double_and_triple_click_select(m, path):
     """Double click selects a word, triple click selects the whole line."""
     work = os.path.join(SHOT_DIR, "work-clicks")

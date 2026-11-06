@@ -287,8 +287,8 @@ ceiling 1 MB); see `experiments/README.md` for the probe data.
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu | 166,064 |
-| x86_64-linux-gnu  | 181,688 |
+| aarch64-linux-gnu | 166,016 |
+| x86_64-linux-gnu  | 181,592 |
 | x86_64-macos      | 191,083 |
 | aarch64-macos     | 220,296 |
 | x86_64-windows    | 240,640 |

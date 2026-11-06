@@ -2,6 +2,14 @@
 
 ## v0.0.3 - 2026-11-06
 
+**Selection**
+
+- The selection is painted by buffer offset, so it no longer bleeds onto the
+  first columns of the following line (it used to compare a line-relative
+  column against an absolute offset).
+- Global keys reach the editor while the file tree has the focus: `F4`..`F8`
+  were being swallowed by the tree's escape-sequence handling.
+
 **Embedded terminal (phase 5)**
 
 - `F8` opens a real shell in a panel under the panes: ConPTY on Windows,

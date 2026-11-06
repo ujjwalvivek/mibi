@@ -2808,7 +2808,9 @@ fn drawPane(s: *render.Screen, session: *Session, ed: *Editor, r: panes_mod.Rect
         while (bi < line.len) {
             const cp_start = bi;
             const cp = utf8.nextCp(line, &bi);
-            const selected = if (sel) |sr| (cp_start >= sr.start and cp_start < sr.end) else false;
+            // The selection range is in buffer offsets, so compare against the
+            // character's offset in the buffer, not its column in the line.
+            const selected = if (sel) |sr| (line_start + cp_start >= sr.start and line_start + cp_start < sr.end) else false;
             while (span_i < nspans and spans[span_i].end <= cp_start) span_i += 1;
             const cls: syntax.Class = if (span_i < nspans and cp_start >= spans[span_i].start)
                 spans[span_i].class
@@ -2992,6 +2994,10 @@ fn handleTreeInput(session: *Session, buf: []const u8, msg_buf: []u8, msg: *[]co
                     end = i + 3;
                 }
                 const seq = buf[i..end];
+                // The tree owns the arrows; every other escape sequence (F4,
+                // F5, F7, F8, ...) is a global action and must reach the editor,
+                // so hand it back instead of swallowing it.
+                var mine = true;
                 if (std.mem.eql(u8, seq, "\x1b[A") or std.mem.eql(u8, seq, "\x1bOA")) {
                     t.move(-1);
                 } else if (std.mem.eql(u8, seq, "\x1b[B") or std.mem.eql(u8, seq, "\x1bOB")) {
@@ -3004,7 +3010,10 @@ fn handleTreeInput(session: *Session, buf: []const u8, msg_buf: []u8, msg: *[]co
                     if (t.selectedEntry()) |e| {
                         if (e.is_dir and t.isExpanded(e.path)) t.toggleDir(e.path) catch {};
                     }
+                } else {
+                    mine = false;
                 }
+                if (!mine) return if (i == 0) null else i;
                 i = end;
                 continue;
             }
