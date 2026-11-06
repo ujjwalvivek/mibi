@@ -44,6 +44,9 @@ pub const Lang = struct {
     /// Delimiter that starts and ends a multi-line string (e.g. `"""`).
     ml_string_delim: []u8 = &.{},
     keywords1: [][]u8 = &.{},
+    /// Markdown gets line-oriented rules (headings, lists, fences, links)
+    /// instead of the generic token lexer.
+    markdown: bool = false,
     keywords2: [][]u8 = &.{},
 
     fn deinit(self: *Lang, allocator: std.mem.Allocator) void {
@@ -110,6 +113,10 @@ pub const Registry = struct {
 
         var reader = ini.Reader{ .text = data };
         while (reader.next()) |entry| {
+            if (std.mem.eql(u8, entry.key, "markdown")) {
+                lang.markdown = std.ascii.eqlIgnoreCase(std.mem.trim(u8, entry.value, " \t"), "true");
+                continue;
+            }
             if (std.mem.eql(u8, entry.key, "name")) {
                 self.allocator.free(lang.name);
                 lang.name = try self.allocator.dupe(u8, entry.value);
@@ -238,6 +245,9 @@ fn inList(list: []const []u8, word: []const u8) bool {
 /// Highlight one line, updating `state` for the next line. Returns the number
 /// of spans written (sorted and non-overlapping).
 pub fn highlight(lang: *const Lang, text: []const u8, state: *State, spans: []Span) usize {
+    if (lang.markdown or std.ascii.eqlIgnoreCase(lang.name, "Markdown")) {
+        return highlightMarkdown(text, state, spans);
+    }
     var ctx = Ctx{ .spans = spans };
     var i: usize = 0;
 
@@ -368,6 +378,112 @@ pub fn advance(lang: *const Lang, text: []const u8, state: *State) void {
     _ = highlight(lang, text, state, &scratch);
 }
 
+/// Markdown: line-oriented rules, with fences and HTML comments carrying
+/// state across lines.
+fn highlightMarkdown(text: []const u8, state: *State, spans: []Span) usize {
+    var ctx = Ctx{ .spans = spans };
+    var i: usize = 0;
+
+    if (state.in_ml_comment) {
+        if (std.mem.indexOfPos(u8, text, 0, "-->")) |p| {
+            ctx.add(0, p + 3, .ml_comment);
+            state.in_ml_comment = false;
+            i = p + 3;
+        } else {
+            ctx.add(0, text.len, .ml_comment);
+            return ctx.n;
+        }
+    }
+    if (state.in_ml_string) {
+        if (std.mem.indexOfPos(u8, text, 0, "```")) |p| {
+            ctx.add(0, p + 3, .ml_string);
+            state.in_ml_string = false;
+            i = p + 3;
+        } else {
+            ctx.add(0, text.len, .ml_string);
+            return ctx.n;
+        }
+    }
+
+    if (i == 0 and std.mem.startsWith(u8, text, "```")) {
+        ctx.add(0, text.len, .ml_string);
+        state.in_ml_string = true;
+        return ctx.n;
+    }
+
+    // Heading: 1-6 '#' then a space.
+    if (text.len > 0 and text[0] == '#') {
+        var h: usize = 0;
+        while (h < text.len and text[h] == '#') h += 1;
+        if (h <= 6 and h < text.len and (text[h] == ' ' or text[h] == '\t')) {
+            ctx.add(0, text.len, .keyword1);
+            return ctx.n;
+        }
+    }
+    if (text.len > 0 and text[0] == '>') {
+        ctx.add(0, text.len, .comment);
+        return ctx.n;
+    }
+
+    // List marker.
+    {
+        var k: usize = 0;
+        while (k < text.len and (text[k] == ' ' or text[k] == '\t')) k += 1;
+        if (k < text.len) {
+            const c = text[k];
+            if ((c == '-' or c == '*' or c == '+') and k + 1 < text.len and text[k + 1] == ' ') {
+                ctx.add(k, k + 2, .keyword2);
+            } else if (c >= '0' and c <= '9') {
+                var d = k;
+                while (d < text.len and text[d] >= '0' and text[d] <= '9') d += 1;
+                if (d < text.len and (text[d] == '.' or text[d] == ')') and d + 1 < text.len and text[d + 1] == ' ') {
+                    ctx.add(k, d + 2, .keyword2);
+                }
+            }
+        }
+    }
+
+    // Inline: code spans, bold, links, HTML comments.
+    var j: usize = i;
+    while (j < text.len) {
+        if (text[j] == '`') {
+            if (std.mem.indexOfPos(u8, text, j + 1, "`")) |p| {
+                ctx.add(j, p + 1, .string);
+                j = p + 1;
+                continue;
+            }
+        }
+        if (text[j] == '*' and j + 1 < text.len and text[j + 1] == '*') {
+            if (std.mem.indexOfPos(u8, text, j + 2, "**")) |p| {
+                ctx.add(j, p + 2, .keyword2);
+                j = p + 2;
+                continue;
+            }
+        }
+        if (text[j] == '[') {
+            if (std.mem.indexOfPos(u8, text, j + 1, "](")) |p| {
+                if (std.mem.indexOfPos(u8, text, p + 2, ")")) |q| {
+                    ctx.add(j, q + 1, .string);
+                    j = q + 1;
+                    continue;
+                }
+            }
+        }
+        if (text[j] == '<' and std.mem.startsWith(u8, text[j..], "<!--")) {
+            if (std.mem.indexOfPos(u8, text, j + 4, "-->")) |p| {
+                ctx.add(j, p + 3, .ml_comment);
+                j = p + 3;
+                continue;
+            }
+            ctx.add(j, text.len, .ml_comment);
+            state.in_ml_comment = true;
+            return ctx.n;
+        }
+        j += 1;
+    }
+    return ctx.n;
+}
+
 // --- tests -----------------------------------------------------------------
 
 fn classAt(spans: []const Span, off: usize) Class {
@@ -405,6 +521,34 @@ test "registry parses a definition and matches extensions" {
     try std.testing.expect(reg.find("main.C") != null); // extension match is case-insensitive
     try std.testing.expect(reg.find("notes.txt") == null);
     try std.testing.expect(reg.find(null) == null);
+}
+
+test "markdown gets headings, lists, code and links" {
+    const md = Lang{
+        .name = @constCast("Markdown"),
+        .extensions = @constCast(&[_][]u8{}),
+        .markdown = true,
+    };
+    var state = State{};
+    var spans: [MAX_SPANS]Span = undefined;
+
+    var n = highlight(&md, "# Title", &state, &spans);
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expectEqual(Class.keyword1, spans[0].class);
+
+    n = highlight(&md, "- item", &state, &spans);
+    try std.testing.expectEqual(Class.keyword2, spans[0].class);
+
+    n = highlight(&md, "see [docs](https://example.com)", &state, &spans);
+    try std.testing.expectEqual(Class.string, spans[0].class);
+
+    n = highlight(&md, "```zig", &state, &spans);
+    try std.testing.expectEqual(Class.ml_string, spans[0].class);
+    try std.testing.expect(state.in_ml_string);
+    _ = highlight(&md, "const x = 1;", &state, &spans);
+    try std.testing.expectEqual(Class.ml_string, spans[0].class);
+    _ = highlight(&md, "```", &state, &spans);
+    try std.testing.expect(!state.in_ml_string);
 }
 
 test "keywords, types, numbers and strings" {

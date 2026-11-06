@@ -877,19 +877,63 @@ def tabs_show_names_and_reveal_paths(m, path):
         proc.send("\x1b[<35;2;1M")  # hover the first tab
         proc.wait_quiet()
         status = proc.screen_text().splitlines()[-1]
-        assert "src/main.zig" in status, f"hover did not reveal the path: {status!r}"
+        assert "main.zig" in status, f"hover did not reveal the name: {status!r}"
 
         proc.send("\x1b[<0;3;1M")  # press the first tab
         proc.wait_quiet()
         proc.send("\x1b[<32;20;1M")  # drag it right
         proc.wait_quiet()
         mid = proc.screen_text().splitlines()[0]
-        assert "src/main.zig" in mid, f"drag chip missing the path: {mid!r}"
+        assert "main.zig" in mid, f"drag chip missing the name: {mid!r}"
         proc.send("\x1b[<0;20;1m")  # release
         proc.wait_quiet()
         proc.shot("28-tabs")
     finally:
         proc.close()
+
+
+@check
+def markdown_gets_highlighting(m, path):
+    """Markdown headings, list markers and inline code are coloured."""
+    work = os.path.join(SHOT_DIR, "work-md")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "notes.md"), "w", encoding="utf-8") as f:
+        f.write("# Heading\n- item\n`code` here\n")
+
+    proc = Mibi(["notes.md"], cwd=work)
+    try:
+        assert proc.wait_for("Heading"), "editor did not start"
+        proc.wait_quiet()
+        heading_fg = proc.screen.fg_at(1, 2)  # 'H' after "# "
+        item_fg = proc.screen.fg_at(2, 0)  # the list marker
+        code_fg = proc.screen.fg_at(3, 1)  # inside the backticks
+        assert heading_fg != item_fg, f"heading and list share a colour: {heading_fg}"
+        assert code_fg != item_fg, f"inline code and list share a colour: {code_fg}"
+        proc.shot("29-markdown")
+    finally:
+        proc.close()
+
+
+@check
+def tab_bar_has_new_and_close_buttons(m, path):
+    """The tab bar's + opens a tab and each tab's x closes it."""
+    m.wait_quiet()
+    bar = m.screen_text().splitlines()[0]
+    assert "+" in bar and " x" in bar, f"no tab buttons: {bar!r}"
+
+    plus = bar.index("+") + 1
+    m.send(f"\x1b[<0;{plus};1M")
+    m.wait_quiet()
+    bar = m.screen_text().splitlines()[0]
+    assert "No Name" in bar, f"the + did not open a tab: {bar!r}"
+
+    close = bar.rindex("x") + 1
+    m.send(f"\x1b[<0;{close};1M")
+    m.wait_quiet()
+    bar = m.screen_text().splitlines()[0]
+    assert "No Name" not in bar, f"the x did not close the tab: {bar!r}"
+    m.shot("30-tab-buttons")
 
 
 @check
@@ -990,12 +1034,23 @@ def main():
 
     failed = [r for r in results if not r[1]]
     print(f"\n{len(results) - len(failed)}/{len(results)} screen checks passed")
+    _clean_root_session()
     print(f"screenshots: {SHOT_DIR}")
     try:
         os.unlink(path)
     except OSError:
         pass
     return 1 if failed else 0
+
+
+def _clean_root_session():
+    """The checks run with cwd=ROOT, so remove the session they leave behind."""
+    for name in os.listdir(ROOT):
+        if name.startswith("mibi-session"):
+            try:
+                os.remove(os.path.join(ROOT, name))
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

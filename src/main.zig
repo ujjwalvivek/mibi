@@ -119,7 +119,9 @@ const Session = struct {
     /// Screen columns of each tab, filled in by drawTabBar so clicks can hit
     /// the same regions the user sees.
     tab_spans: [MAX_TABS][2]u16 = undefined,
+    tab_close_x: [MAX_TABS]u16 = undefined,
     tab_count: usize = 0,
+    new_tab_x: u16 = 0xFFFF,
     /// Syntax registry, so UI paths (the tree) can pick a language.
     registry: ?*syntax.Registry = null,
     /// Tab being dragged, where it would land, and the pointer column.
@@ -162,6 +164,17 @@ const Session = struct {
         errdefer ed.deinit();
         try self.docs.append(self.allocator, ed);
         self.active = self.docs.items.len - 1;
+    }
+
+    /// Close the tab at `index`; a dirty tab becomes active and asks first.
+    fn closeTabAt(self: *Session, index: usize, prompt: *?Prompt) void {
+        if (index >= self.docs.items.len) return;
+        self.active = index;
+        if (self.docs.items[index].dirty) {
+            prompt.* = .{ .kind = .confirm_close };
+            return;
+        }
+        self.closeActive();
     }
 
     /// Move the tab at `from` to `to`, keeping the same tab active.
@@ -633,7 +646,7 @@ fn processInput(
                 if (j >= buf.len) return i; // incomplete
                 if (buf[i + 2] == '<') {
                     // SGR mouse: ESC [ < button ; x ; y M
-                    handleMouse(session, buf[i + 2 .. j], buf[j], help, msg_buf, msg);
+                    handleMouse(session, buf[i + 2 .. j], buf[j], help, prompt, msg_buf, msg);
                 } else {
                     applyCsi(session, buf[i + 2 .. j], buf[j], view_rows, running, prompt, msg_buf, msg, help, true) catch |e| setMsg(msg_buf, msg, @errorName(e));
                 }
@@ -676,17 +689,29 @@ fn parseMouse(params: []const u8) [3]u16 {
 /// Mouse in the editor: click the tab bar to switch tabs, click the status-bar
 /// hint to toggle help, click text to place the cursor. The wheel moves one
 /// line per notch.
-fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, msg_buf: []u8, msg: *[]const u8) void {
+fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, prompt: *?Prompt, msg_buf: []u8, msg: *[]const u8) void {
     const nums = parseMouse(params);
     const button = nums[0];
     const x = nums[1];
     const y = nums[2];
     const ed = session.current();
 
-    // Dragging a tab: press on the tab bar picks it up, motion updates the
-    // drop position, release reorders the tabs.
+    // Tab bar: the "x" closes a tab, "+" opens one, the label switches (and
+    // starts a drag).
     if (button == 0 and final == 'M' and y == 1) {
+        const col = if (x > 0) @as(u16, x) - 1 else 0;
         var i: usize = 0;
+        while (i < session.tab_count) : (i += 1) {
+            if (col == session.tab_close_x[i]) {
+                session.closeTabAt(i, prompt);
+                return;
+            }
+        }
+        if (col == session.new_tab_x) {
+            session.add(null, "", null) catch {};
+            return;
+        }
+        i = 0;
         while (i < session.tab_count) : (i += 1) {
             const span = session.tab_spans[i];
             if (x >= span[0] and x < span[1]) {
@@ -1512,7 +1537,8 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
         var status_msg = msg;
     if (session.hover_tab) |hi| {
         if (hi < session.docs.items.len) {
-            if (session.docs.items[hi].path) |hp| status_msg = hp;
+            // The name only: long paths look bad in the status line.
+            if (session.docs.items[hi].path) |hp| status_msg = baseName(hp);
         }
     }
     drawStatus(s, ed, status_msg, w, h, rc, total, bar_bg, accent, hint_fg);
@@ -1692,6 +1718,7 @@ fn drawTabBar(s: *render.Screen, session: *Session, w: usize, text_fg: render.Co
     const bar_bg = theme.tab_bg;
     const active_bg = theme.tab_active_bg;
     session.tab_count = 0;
+    session.new_tab_x = 0xFFFF;
     var x: usize = 0;
     while (x < w) : (x += 1) s.put(@intCast(x), 0, .{ .bg = bar_bg });
 
@@ -1701,20 +1728,37 @@ fn drawTabBar(s: *render.Screen, session: *Session, w: usize, text_fg: render.Co
         const name = if (ed.path) |p| baseName(p) else "[No Name]";
         var buf: [160]u8 = undefined;
         const label = std.fmt.bufPrint(&buf, " {s}{s} ", .{ name, if (ed.dirty) " [+]" else "" }) catch continue;
-        if (tx + label.len > w) break;
+        // label + padding + "x" + a gap
+        if (tx + label.len + 3 > w) break;
         const active = i == session.active;
         const hovered = session.hover_tab == i;
         const dragging = session.drag_tab == i;
+        const bg = if (dragging) theme.accent else if (active) active_bg else if (hovered) theme.selection else bar_bg;
         s.putStr(@intCast(tx), 0, label, .{
-            .bg = if (dragging) theme.accent else if (active) active_bg else if (hovered) theme.selection else bar_bg,
+            .bg = bg,
             .fg = if (dragging) bar_bg else if (active or hovered) text_fg else dim_fg,
             .attr = .{ .bold = active or dragging, .underline = hovered and !active },
         });
+        const close_x = tx + label.len + 1; // one cell of padding before the x
+        s.put(@intCast(tx + label.len), 0, .{ .ch = ' ', .bg = bg });
+        s.put(@intCast(close_x), 0, .{
+            .ch = 'x',
+            .bg = bg,
+            .fg = if (dragging) bar_bg else dim_fg,
+            .attr = .{ .bold = hovered },
+        });
         if (session.tab_count < MAX_TABS) {
-            session.tab_spans[session.tab_count] = .{ @intCast(tx), @intCast(tx + label.len) };
+            session.tab_spans[session.tab_count] = .{ @intCast(tx), @intCast(close_x) };
+            session.tab_close_x[session.tab_count] = @intCast(close_x);
             session.tab_count += 1;
         }
-        tx += label.len;
+        tx = close_x + 2;
+    }
+
+    // New-tab button after the last tab.
+    if (tx + 3 <= w) {
+        session.new_tab_x = @intCast(tx + 1); // the '+' glyph, not the padding
+        s.putStr(@intCast(tx), 0, " + ", .{ .bg = bar_bg, .fg = theme.accent, .attr = .{ .bold = true } });
     }
 
     // While dragging: a drop marker where the tab would land, and the tab
@@ -1725,9 +1769,9 @@ fn drawTabBar(s: *render.Screen, session: *Session, w: usize, text_fg: render.Co
             if (marker < w) s.put(@intCast(marker), 0, .{ .ch = '\u{2502}', .bg = bar_bg, .fg = theme.accent });
         }
         const ed = session.docs.items[from];
-        const path = ed.path orelse "[No Name]";
+        const name = if (ed.path) |p| baseName(p) else "[No Name]";
         var chip_buf: [300]u8 = undefined;
-        const chip = std.fmt.bufPrint(&chip_buf, " {s} ", .{path}) catch path;
+        const chip = std.fmt.bufPrint(&chip_buf, " {s} ", .{name}) catch name;
         const start_x: usize = if (session.drag_x > 0) @as(usize, session.drag_x) - 1 else 0;
         var cx = start_x;
         var i: usize = 0;
@@ -2678,19 +2722,20 @@ test "a mouse click places the cursor and the wheel moves one line" {
     var d = try Drive.start("one\ntwo\nthree\nfour\nfive");
     defer d.stop();
     var help = false;
+    var pr: ?Prompt = null;
     var mb: [96]u8 = undefined;
     var msg: []const u8 = "";
 
     // Screen row 3 is the second text line; column 4 is after the "1 " gutter.
-    handleMouse(&d.session, "<0;4;3", 'M', &help, &mb, &msg);
+    handleMouse(&d.session, "<0;4;3", 'M', &help, &pr, &mb, &msg);
     const rc = d.ed().rowCol();
     try std.testing.expectEqual(@as(usize, 1), rc.row);
     try std.testing.expectEqual(@as(usize, 1), rc.col);
 
     // One wheel notch is one line.
-    handleMouse(&d.session, "<65;1;1", 'M', &help, &mb, &msg);
+    handleMouse(&d.session, "<65;1;1", 'M', &help, &pr, &mb, &msg);
     try std.testing.expectEqual(@as(usize, 2), d.ed().rowCol().row);
-    handleMouse(&d.session, "<64;1;1", 'M', &help, &mb, &msg);
+    handleMouse(&d.session, "<64;1;1", 'M', &help, &pr, &mb, &msg);
     try std.testing.expectEqual(@as(usize, 1), d.ed().rowCol().row);
 }
 
@@ -2939,7 +2984,7 @@ test "the tab bar shows every open document" {
     draw(&s, &d.session, "", null, false);
     var buf: [128]u8 = undefined;
     const bar = rowText(&s, 0, &buf);
-    try std.testing.expect(std.mem.indexOf(u8, bar, "[No Name]  [No Name]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bar, "[No Name]  x  [No Name]  x") != null);
 
     try d.send("\x1b[5;5~"); // Ctrl+PgUp back to the first document
     draw(&s, &d.session, "", null, false);
