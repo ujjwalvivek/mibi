@@ -48,6 +48,7 @@ pub const Action = enum {
     command_palette,
     split_columns,
     split_rows,
+    close_pane,
     next_pane,
     prev_pane,
 };

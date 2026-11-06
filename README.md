@@ -128,11 +128,12 @@ packaging.
 | `Ctrl+O`                  | fuzzy file picker: type to filter, Enter opens in a new tab |
 | `Ctrl+T` / `Ctrl+W`       | new tab / close tab (closing the last one quits)      |
 | `Ctrl+PgUp` / `Ctrl+PgDn` | previous / next tab                                   |
-| `Ctrl+\` / `F7`          | split the pane side by side / stacked                 |
+| `F5` / `F7`               | split the pane side by side / stacked                 |
+| `Shift+F5`                | close the focused pane (its file stays open as a tab)  |
 | `F6` / `Shift+F6`         | next / previous pane (or click a pane)                |
 | `F2`                      | theme picker (arrows preview live, Enter keeps and saves, Esc restores) |
 | `Ctrl+P`                  | command palette: every action, fuzzy-filtered |
-| `Ctrl+?` / `F1`           | help panel; shows your bindings, hinted at the status bar's right edge |
+| `Ctrl+?` / `F1`           | help panel (Esc closes it); hints at the status bar's right edge |
 | `Ctrl+Q`                  | quit (asks first if any tab has unsaved edits)        |
 
 ## Features
@@ -172,12 +173,15 @@ packaging.
   languages ship in the repo, and adding one is dropping in a file - no
   rebuild. Multi-line comments and strings carry state across lines.
 - Line numbers, status bar (name, dirty `[+]`, cursor, line count, size).
-- Split panes (`Ctrl+\` side by side, `F7` stacked): a binary split tree with
+- Split panes (`F5` side by side, `F7` stacked): a binary split tree with
   a `│`/`─` rule between panes, the rule glowing next to the focused
   pane. Each pane edits its own document with its own cursor, selection and
   scroll; `F6` cycles the focus and clicking inside a pane focuses it and puts
-  the cursor there. Closing a tab closes its pane, and the layout is saved in
-  the session file.
+  the cursor there. `Shift+F5` closes a pane and leaves its file open as a
+  tab, so a split can be undone without closing anything. Dragging a tab onto
+  a pane's left/right third (or top/bottom half) splits that pane with the tab,
+  with a box drawn where it would land. Closing a tab closes its pane, and the
+  layout is saved in the session file.
 - Multiple documents as tabs: file names only in the tab bar, a `+` button
   pinned to the right edge and a per-tab `x` to close (with a cell of padding
   so it does not touch the tab edge; hovering `x`, `+` or the scroll arrows

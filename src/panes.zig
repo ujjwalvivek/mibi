@@ -132,19 +132,29 @@ pub const Tree = struct {
     /// The focus moves to the new pane.
     pub fn split(self: *Tree, dir: Dir, doc: u32) bool {
         if (self.live == 0) return false;
-        if (self.leaf_count >= MAX_PANES) return false;
-        const f = self.focus;
-        if (!self.nodes[f].leaf) return false;
-        const a = self.takeFree() orelse return false;
-        const b = self.takeFree() orelse {
-            self.putFree(a);
+        return self.splitAt(self.focus, dir, doc, false);
+    }
+
+    /// Split the leaf `node` and show `doc` in the new pane. With `first` the
+    /// new pane takes the left/top half, otherwise the right/bottom half.
+    pub fn splitAt(self: *Tree, node: u8, dir: Dir, doc: u32, first: bool) bool {
+        if (self.live == 0 or self.leaf_count >= MAX_PANES) return false;
+        if (!self.nodes[node].leaf) return false;
+        const na = self.takeFree() orelse return false;
+        const nb = self.takeFree() orelse {
+            self.putFree(na);
             return false;
         };
-        const old_doc = self.nodes[f].doc;
-        self.nodes[a] = .{ .leaf = true, .doc = old_doc };
-        self.nodes[b] = .{ .leaf = true, .doc = doc };
-        self.nodes[f] = .{ .leaf = false, .dir = dir, .ratio = 50, .a = a, .b = b };
-        self.focus = b;
+        const old_doc = self.nodes[node].doc;
+        if (first) {
+            self.nodes[na] = .{ .leaf = true, .doc = doc };
+            self.nodes[nb] = .{ .leaf = true, .doc = old_doc };
+        } else {
+            self.nodes[na] = .{ .leaf = true, .doc = old_doc };
+            self.nodes[nb] = .{ .leaf = true, .doc = doc };
+        }
+        self.nodes[node] = .{ .leaf = false, .dir = dir, .ratio = 50, .a = na, .b = nb };
+        self.focus = if (first) na else nb;
         self.live += 1;
         self.collect();
         return true;

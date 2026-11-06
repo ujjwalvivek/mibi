@@ -169,9 +169,10 @@ const MOUSE_MOVED: DWORD = 0x0001;
             0x22 => return csi(out, mod, '~', 6), // page down
             0x2E => return csi(out, mod, '~', 3), // delete
             0x2D => return csi(out, mod, '~', 2), // insert
-            0x72 => return csi(out, mod, 'R', 0), // F3
+            0x72 => return csi(out, mod, 'R', 0), // F3: find next
+            0x74 => return csi(out, mod, '~', 15), // F5: split side by side
             0x75 => return csi(out, mod, '~', 17), // F6: pane focus
-            0x76 => return csi(out, mod, '~', 18), // F7: split down
+            0x76 => return csi(out, mod, '~', 18), // F7: split stacked
             else => {},
         }
 

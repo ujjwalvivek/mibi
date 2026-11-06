@@ -849,7 +849,7 @@ def split_layout_persists(m, path):
     try:
         assert proc.wait_for("hello"), "editor did not start"
         proc.wait_quiet()
-        proc.send("\x1c")  # Ctrl+\ : split
+        proc.send("\x1b[15~")  # F5: split
         proc.wait_quiet()
         proc.send("scratch")  # typed into the new pane
         proc.wait_quiet()
@@ -1017,8 +1017,8 @@ def tab_strip_scrolls_when_it_overflows(m, path):
 
 @check
 def splitting_creates_two_panes(m, path):
-    """Ctrl+\\ splits the window; each pane edits its own document."""
-    m.send("\x1c")  # Ctrl+\
+    """F5 splits the window; each pane edits its own document."""
+    m.send("\x1b[15~")  # F5
     m.wait_quiet()
     screen = m.screen_text()
     lines = screen.splitlines()
@@ -1045,6 +1045,40 @@ def splitting_creates_two_panes(m, path):
     left_text = "\n".join(row[:sep] for row in lines[1:-1])
     assert "Xhello" in left_text, f"focus did not move to the left pane:\n{left_text!r}"
     m.shot("32-split")
+
+
+@check
+def esc_closes_the_help_panel(m, path):
+    """Esc dismisses the help panel."""
+    m.send("\x1f")  # Ctrl+?
+    m.wait_quiet()
+    assert "mibi controls" in m.screen_text(), "the help panel did not open"
+    m.send("\x1b")  # Esc
+    m.wait_quiet()
+    assert "mibi controls" not in m.screen_text(), "Esc did not close the help panel"
+
+
+@check
+def dragging_a_tab_onto_a_pane_splits_it(m, path):
+    """Drag a tab onto the right third of a pane: it lands there as a split."""
+    m.send("\x1b[15~")  # F5: two panes
+    m.wait_quiet()
+    m.send("\x1b[<0;3;1M")  # press the notes.txt tab
+    m.send("\x1b[<32;72;12M")  # drag it over the right pane's right third
+    m.wait_quiet()
+    hint = m.screen_text()
+    assert "\u250c" in hint, f"no drop hint while dragging:\n{hint}"
+    m.shot("34-drop-hint")
+    m.send("\x1b[<0;72;12m")  # release
+    m.wait_quiet()
+    screen = m.screen_text()
+    lines = screen.splitlines()
+    seps = {row.index("\u2502") for row in lines if "\u2502" in row}
+    assert seps, f"the drop did not split the window:\n{screen}"
+    sep = seps.pop()
+    right = "\n".join(row[sep + 1:] for row in lines[1:-1])
+    assert "hello" in right, f"the dropped tab is not in the right pane:\n{right!r}"
+    m.shot("35-drag-split")
 
 
 @check

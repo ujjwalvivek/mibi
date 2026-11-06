@@ -54,7 +54,7 @@ const help_rows = [_]HelpRow{
     .{ .actions = &.{.command_palette}, .desc = "command palette" },
     .{ .actions = &.{ .new_tab, .close_tab }, .desc = "new / close tab" },
     .{ .actions = &.{ .next_tab, .prev_tab }, .desc = "next / previous tab" },
-    .{ .actions = &.{ .split_columns, .next_pane }, .desc = "split / next pane" },
+    .{ .actions = &.{ .split_columns, .close_pane, .next_pane }, .desc = "split / unsplit / next" },
     .{ .actions = &.{.help}, .desc = "toggle this help" },
     .{ .actions = &.{.quit}, .desc = "quit (asks if unsaved)" },
     .{ .literal = "click / wheel", .desc = "cursor, tabs, pickers / scroll" },
@@ -110,6 +110,11 @@ const MAX_TABS = 32;
 /// Cells the pointer must travel over a tab before a click turns into a drag.
 const DRAG_THRESHOLD = 3;
 
+/// Where a dragged tab would land when dropped on a pane: the half of the
+/// pane it is over, which becomes a split in that direction.
+const DropSide = enum { left, right, top, bottom };
+const DropZone = struct { node: u8, side: DropSide };
+
 const Session = struct {
     allocator: std.mem.Allocator,
     docs: std.ArrayList(*Editor),
@@ -136,6 +141,8 @@ const Session = struct {
     /// Tab pressed on but not yet dragged: a click switches, a drag reorders.
     press_tab: ?usize = null,
     press_x: u16 = 0,
+    /// Where a tab being dragged would land if dropped on a pane.
+    drop_zone: ?DropZone = null,
     /// Tab under the pointer (shows its path in the status line).
     hover_tab: ?usize = null,
     /// Pointer is over a tab's close button, the "+", or an end arrow.
@@ -161,6 +168,9 @@ const Session = struct {
     /// Split layout: each pane shows one document, by its stable id. `active`
     /// always names the focused pane's document.
     panes: panes_mod.Tree = panes_mod.Tree.empty(),
+    /// The rectangle the panes were last laid out in, so a structural change
+    /// (closing or splitting a pane from the mouse) can recompute the layout.
+    pane_area: panes_mod.Rect = .{},
     next_doc_id: u32 = 1,
 
     fn init(allocator: std.mem.Allocator) Session {
@@ -320,6 +330,45 @@ const Session = struct {
         if (n <= 1) return;
         const i: isize = @as(isize, @intCast(self.active)) + delta;
         self.focusDoc(@intCast(@mod(i, @as(isize, @intCast(n)))));
+    }
+
+    /// Close the focused pane. Its document stays open as a tab, so a split
+    /// can be undone without closing (or reopening) the file.
+    fn closePane(self: *Session) void {
+        if (self.panes.live <= 1) return; // the last pane always stays
+        self.panes.removeFocused();
+        self.ensurePaneDocs();
+    }
+
+    /// Drop a dragged tab onto a pane edge: that document moves into a new
+    /// pane split off the target.
+    fn dropTabIntoPane(self: *Session, tab: usize, dz: DropZone) void {
+        if (tab >= self.docs.items.len) return;
+        const doc = self.docs.items[tab].id;
+        var zone = dz;
+        // A document lives in one pane at a time. If it is already on screen
+        // the drag moves that pane: the old one collapses and the document
+        // lands in the new split, rather than being shown twice.
+        if (self.panes.paneWithDoc(doc)) |node| {
+            if (node == zone.node) {
+                self.panes.focus = node;
+                self.active = tab;
+                return;
+            }
+            const target = self.panes.rectOf(zone.node) orelse return;
+            if (self.panes.live <= 1) return;
+            self.panes.focus = node;
+            self.panes.removeFocused();
+            self.panes.layout(self.pane_area);
+            const cx = target.x + target.w / 2;
+            const cy = target.y + target.h / 2;
+            const again = self.panes.paneAt(cx, cy) orelse return;
+            zone = .{ .node = again, .side = zone.side };
+        }
+        const dir: panes_mod.Dir = if (zone.side == .left or zone.side == .right) .columns else .rows;
+        const first = zone.side == .left or zone.side == .top;
+        if (!self.panes.splitAt(zone.node, dir, doc, first)) return;
+        self.active = tab;
     }
 
     /// Move the focus to the next pane and follow it with the active document.
@@ -848,7 +897,16 @@ fn processInput(
         if (session.docs.items.len == 0) break;
         const b = buf[i];
         if (b == 0x1b) {
-            if (i + 1 >= buf.len) return i; // incomplete: wait for more
+            if (i + 1 >= buf.len) {
+                // A trailing Esc closes the help panel right away. Other
+                // actions still wait for the next byte, so an escape sequence
+                // split across reads is never mistaken for Esc.
+                if (help.*) {
+                    help.* = false;
+                    return i + 1;
+                }
+                return i; // incomplete: wait for more
+            }
             const k = buf[i + 1];
             if (k == '[') {
                 var j = i + 2;
@@ -910,12 +968,13 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
     if (session.panes.rect_count == 0) {
         const sz = term.size();
         const side: usize = if (session.tree != null) TREE_WIDTH else 0;
-        session.panes.layout(.{
+        session.pane_area = .{
             .x = side,
             .y = 1,
             .w = if (sz.cols > side) @as(usize, sz.cols) - side else 0,
             .h = viewRows(sz.rows),
-        });
+        };
+        session.panes.layout(session.pane_area);
     }
     const nums = parseMouse(params);
     const button = nums[0];
@@ -978,13 +1037,22 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
                 }
             }
             session.drag_to = to;
+            // Over the text area a drop means "split this pane here".
+            session.drop_zone = dropZoneAt(session, x, y);
             return;
         }
         if (final == 'm') { // release
-            if (session.drag_tab) |f| session.moveTab(f, session.drag_to);
+            if (session.drag_tab) |f| {
+                if (session.drop_zone) |dz| {
+                    session.dropTabIntoPane(f, dz);
+                } else {
+                    session.moveTab(f, session.drag_to);
+                }
+            }
             session.drag_tab = null;
             session.press_tab = null;
             session.hover_tab = null;
+            session.drop_zone = null;
             return;
         }
     }
@@ -1093,6 +1161,55 @@ fn paneUnder(session: *Session, x: u16, y: u16) ?u8 {
     return session.panes.paneAt(@as(usize, x) - 1, @as(usize, y) - 1);
 }
 
+/// Which half of which pane the pointer is over: the left and right thirds
+/// split side by side, the middle falls back to top or bottom.
+fn dropZoneAt(session: *Session, x: u16, y: u16) ?DropZone {
+    const node = paneUnder(session, x, y) orelse return null;
+    const r = session.panes.rectOf(node) orelse return null;
+    if (r.w < 2 or r.h < 2) return null;
+    const rx = (@as(usize, x) - 1) - r.x;
+    const ry = (@as(usize, y) - 1) - r.y;
+    const side: DropSide = if (rx * 3 < r.w)
+        .left
+    else if (rx * 3 >= r.w * 2)
+        .right
+    else if (ry * 2 < r.h)
+        .top
+    else
+        .bottom;
+    return .{ .node = node, .side = side };
+}
+
+/// Outline the half of the pane where a dragged tab would land.
+fn drawDropHint(s: *render.Screen, session: *Session, dz: DropZone, theme: config_mod.Theme) void {
+    const r = session.panes.rectOf(dz.node) orelse return;
+    const rect: panes_mod.Rect = switch (dz.side) {
+        .left => .{ .x = r.x, .y = r.y, .w = (r.w + 1) / 2, .h = r.h },
+        .right => .{ .x = r.x + r.w / 2, .y = r.y, .w = r.w - r.w / 2, .h = r.h },
+        .top => .{ .x = r.x, .y = r.y, .w = r.w, .h = (r.h + 1) / 2 },
+        .bottom => .{ .x = r.x, .y = r.y + r.h / 2, .w = r.w, .h = r.h - r.h / 2 },
+    };
+    if (rect.w < 2 or rect.h < 2) return;
+    const bg = theme.accent;
+    const fg = theme.background;
+    const right = rect.x + rect.w - 1;
+    const bottom = rect.y + rect.h - 1;
+    var x = rect.x;
+    while (x <= right) : (x += 1) {
+        s.put(@intCast(x), @intCast(rect.y), .{ .ch = '\u{2500}', .fg = fg, .bg = bg });
+        s.put(@intCast(x), @intCast(bottom), .{ .ch = '\u{2500}', .fg = fg, .bg = bg });
+    }
+    var yy = rect.y;
+    while (yy <= bottom) : (yy += 1) {
+        s.put(@intCast(rect.x), @intCast(yy), .{ .ch = '\u{2502}', .fg = fg, .bg = bg });
+        s.put(@intCast(right), @intCast(yy), .{ .ch = '\u{2502}', .fg = fg, .bg = bg });
+    }
+    s.put(@intCast(rect.x), @intCast(rect.y), .{ .ch = '\u{250c}', .fg = fg, .bg = bg });
+    s.put(@intCast(right), @intCast(rect.y), .{ .ch = '\u{2510}', .fg = fg, .bg = bg });
+    s.put(@intCast(rect.x), @intCast(bottom), .{ .ch = '\u{2514}', .fg = fg, .bg = bg });
+    s.put(@intCast(right), @intCast(bottom), .{ .ch = '\u{2518}', .fg = fg, .bg = bg });
+}
+
 /// Rows available for document text: everything but the tab bar and status line.
 fn viewRows(rows: u16) usize {
     return if (rows > 2) @as(usize, rows) - 2 else 0;
@@ -1148,7 +1265,8 @@ fn defaultKeyFor(action: keys.Action, shift: bool) DefaultKey {
         .find_prev => moveCsi('R', true),
         .next_tab => .{ .csi = .{ .params = "6;5", .final = '~' } },
         .prev_tab => .{ .csi = .{ .params = "5;5", .final = '~' } },
-        .split_columns => .{ .byte = 0x1c },
+        .split_columns => .{ .csi = .{ .params = "15", .final = '~' } }, // F5
+        .close_pane => .{ .csi = .{ .params = "15;2", .final = '~' } }, // Shift+F5
         .split_rows => .{ .csi = .{ .params = "18", .final = '~' } }, // F7
         .next_pane => .{ .csi = .{ .params = "17", .final = '~' } }, // F6
         .prev_pane => .{ .csi = .{ .params = if (shift) "17;2" else "17;5", .final = '~' } },
@@ -1213,6 +1331,7 @@ fn csiKeyName(buf: []u8, params_bytes: []const u8, final: u8) ?[]const u8 {
             6 => "pgdn",
             11 => "f1",
             12 => "f2",
+            15 => "f5",
             17 => "f6",
             18 => "f7",
             else => return null,
@@ -1329,7 +1448,12 @@ fn applyByte(
     } else if (b == 0x1f) {
         help.* = !help.*;
     } else if (b == 0x1b) {
-        ed.clearSelection();
+        // Esc closes the help panel first, then clears the selection.
+        if (help.*) {
+            help.* = false;
+        } else {
+            ed.clearSelection();
+        }
     } else if (b >= 0x20) {
         const one = [1]u8{b};
         try ed.insertText(&one);
@@ -1586,6 +1710,7 @@ fn applyCsi(
             11 => help.* = !help.*, // F1
             5 => if (ctrl) session.cycle(-1) else ed.movePage(-1, view_rows, shift),
             6 => if (ctrl) session.cycle(1) else ed.movePage(1, view_rows, shift),
+            15 => if (shift) session.closePane() else try session.splitFocused(.columns), // F5 / Shift+F5
             17 => session.cyclePane(if (shift) -1 else 1), // F6 / Shift+F6
             18 => try session.splitFocused(.rows), // F7
             else => {},
@@ -1699,6 +1824,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
         .w = if (w > side) w - side else 0,
         .h = h - 2,
     };
+    session.pane_area = area;
     session.panes.layout(area);
     var pi: usize = 0;
     while (pi < session.panes.rect_count) : (pi += 1) {
@@ -1706,6 +1832,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
         const idx = session.docIndex(session.panes.nodes[pr.node].doc) orelse continue;
         drawPane(s, session, session.docs.items[idx], pr.rect, pr.node == session.panes.focus);
     }
+    if (session.drop_zone) |dz| drawDropHint(s, session, dz, theme);
     // Separators; the ones beside the focused pane glow in the accent colour.
     const focus_rect = session.panes.rectOf(session.panes.focus);
     pi = 0;
@@ -3643,6 +3770,89 @@ test "ctrl+backslash splits the window into two panes" {
     // Both documents are drawn, each in its own rectangle.
     try std.testing.expectEqual(@as(usize, 0), d.session.panes.rects[0].rect.x);
     try std.testing.expectEqual(@as(usize, 20), d.session.panes.rects[1].rect.x);
+}
+
+test "esc closes the help panel" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    try d.send("\x1f"); // Ctrl+? opens help
+    try std.testing.expect(d.help);
+    try d.send("\x1b"); // Esc, alone in its chunk
+    try std.testing.expect(!d.help);
+
+    // With the panel closed, a lone Esc still waits for the next byte, so a
+    // split arrow sequence cannot be mistaken for it.
+    try d.send("\x1b");
+    try std.testing.expect(!d.help);
+}
+
+test "closing a pane keeps its document open as a tab" {
+    var d = try Drive.start("one\ntwo");
+    defer d.stop();
+    try d.send("\x1b[15~"); // F5: split side by side
+    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
+    const left = d.session.docIndex(d.session.panes.nodes[d.session.panes.leaves[0]].doc).?;
+    const right = d.session.docIndex(d.session.panes.nodes[d.session.panes.leaves[1]].doc).?;
+
+    try d.send("\x1b[15;2~"); // Shift+F5: close the focused (right) pane
+    try std.testing.expectEqual(@as(usize, 1), d.session.panes.live);
+    // Both documents are still open: the right one is just a tab now.
+    try std.testing.expectEqual(@as(usize, 2), d.session.count());
+    try std.testing.expectEqual(left, d.session.active);
+    try d.send("\x1b[5;5~"); // Ctrl+PgUp: the tab left without a pane
+    try std.testing.expectEqual(right, d.session.active);
+    try std.testing.expectEqual(@as(usize, 1), d.session.panes.live);
+
+    // The last pane cannot be closed: there would be nowhere to edit.
+    try d.send("\x1b[15;2~");
+    try std.testing.expectEqual(@as(usize, 1), d.session.panes.live);
+}
+
+test "dropping a tab on a pane edge splits it" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    try d.send("\x1b[15~"); // F5: two panes, the right one is a scratch buffer
+    var s = try render.Screen.init(std.testing.allocator, 40, 10);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+    const left_node = d.session.panes.rects[0].node;
+    const left_doc = d.session.docIndex(d.session.panes.nodes[left_node].doc).?;
+
+    // Drop the left tab on the right half of the right pane: the document
+    // moves there (its old pane collapses) and the right pane splits.
+    const right_node = d.session.panes.rects[1].node;
+    d.session.dropTabIntoPane(left_doc, .{ .node = right_node, .side = .right });
+    draw(&s, &d.session, "", null, false);
+    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
+    // The left half now shows the scratch document, the right half the file.
+    const left_after = d.session.docIndex(d.session.panes.nodes[d.session.panes.rects[0].node].doc).?;
+    try std.testing.expectEqualStrings("", d.session.docs.items[left_after].text());
+    const right_after = d.session.docIndex(d.session.panes.nodes[d.session.panes.rects[1].node].doc).?;
+    try std.testing.expectEqual(left_doc, right_after);
+    try std.testing.expectEqual(left_doc, d.session.active);
+}
+
+test "dragging a tab onto another pane splits it" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    try d.send("\x1b[15~"); // F5: two panes
+    var s = try render.Screen.init(std.testing.allocator, 40, 10);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
+
+    var help = false;
+    var pr: ?Prompt = null;
+    var mb: [64]u8 = undefined;
+    var msg: []const u8 = "";
+    handleMouse(&d.session, "<0;3;1", 'M', &help, &pr, &mb, &msg); // press the tab
+    try std.testing.expect(d.session.press_tab != null);
+    handleMouse(&d.session, "<32;30;6", 'M', &help, &pr, &mb, &msg); // drag over the right pane
+    try std.testing.expect(d.session.drop_zone != null);
+    handleMouse(&d.session, "<0;30;6", 'm', &help, &pr, &mb, &msg); // release
+    draw(&s, &d.session, "", null, false);
+    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
+    try std.testing.expectEqual(@as(usize, 2), d.session.panes.sep_count + 1);
 }
 
 test "F6 moves the focus between panes" {
