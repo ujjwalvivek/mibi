@@ -760,6 +760,18 @@ pub const Editor = struct {
         self.invalidateSyntax(self.rowCol().row);
     }
 
+    /// Free the undo/redo snapshots. They are piece lists into the current
+    /// buffer's bytes, so they must be freed before the buffer is replaced;
+    /// restoring one against a different file would silently truncate the
+    /// document (and leaving them around after a reload is a use-after-free
+    /// waiting for the next Ctrl+Z).
+    fn clearHistory(self: *Editor) void {
+        for (self.undo_stack.items) |s| self.buf.freeSnapshot(s.snap);
+        self.undo_stack.clearRetainingCapacity();
+        for (self.redo_stack.items) |s| self.buf.freeSnapshot(s.snap);
+        self.redo_stack.clearRetainingCapacity();
+    }
+
     /// Re-read the file when it changed on disk underneath us. Only clean
     /// buffers are reloaded: unsaved edits are never thrown away.
     pub fn reloadIfChanged(self: *Editor) bool {
@@ -777,8 +789,12 @@ pub const Editor = struct {
         defer self.allocator.free(data);
         self.stamp = now;
         if (std.mem.eql(u8, data, self.text())) return false;
+        // Build the new buffer before touching the old one: a failed allocation
+        // must leave the editor with a valid buffer, never a deinitialised one.
+        const next = buffer.Buffer.init(self.allocator, data) catch return false;
+        self.clearHistory();
         self.buf.deinit();
-        self.buf = buffer.Buffer.init(self.allocator, data) catch return false;
+        self.buf = next;
         if (self.cursor > self.buf.len()) self.cursor = self.buf.len();
         self.sel_anchor = null;
         self.clearCursors();
@@ -798,8 +814,10 @@ pub const Editor = struct {
             self.dirty = false;
             return false;
         }
+        const next = try buffer.Buffer.init(self.allocator, data);
+        self.clearHistory();
         self.buf.deinit();
-        self.buf = try buffer.Buffer.init(self.allocator, data);
+        self.buf = next;
         self.stamp = os.fileStamp(path);
         self.cursor = 0;
         self.sel_anchor = null;
@@ -1711,4 +1729,31 @@ test "selectionRange is ordered whichever side the anchor is on" {
     e.sel_anchor = 3;
     e.cursor = 3;
     try std.testing.expect(e.selectionRange() == null);
+}
+
+test "reloading from disk drops undo history instead of restoring stale pieces" {
+    const allocator = std.testing.allocator;
+    const tmp = os.getEnvAlloc(allocator, if (os.is_windows) "TEMP" else "TMPDIR") catch return;
+    defer allocator.free(tmp);
+    var path_buf: [1024]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/mibi-reload-{d}.txt", .{ tmp, os.ticksMs() }) catch return;
+    os.writeFile(path, "one\n") catch return;
+    defer os.deleteFile(path) catch {};
+
+    var e = try Editor.init(allocator, path, "one\n");
+    defer e.deinit();
+    e.cursor = e.text().len;
+    try e.insertText("two\n"); // an undo step against the original bytes
+    try e.save();
+    // The file changes underneath us (and gets longer, so the size+mtime stamp
+    // is guaranteed to differ even on a coarse filesystem clock).
+    try os.writeFile(path, "alpha\nbeta\n");
+    try std.testing.expect(e.reloadIfChanged());
+    try std.testing.expectEqualStrings("alpha\nbeta\n", e.text());
+    // The history pointed into the old buffer's bytes. Undo must be a no-op,
+    // never a restore of pieces from a document that no longer exists.
+    try e.undo();
+    try std.testing.expectEqualStrings("alpha\nbeta\n", e.text());
+    try e.redo();
+    try std.testing.expectEqualStrings("alpha\nbeta\n", e.text());
 }

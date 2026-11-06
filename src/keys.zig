@@ -54,8 +54,6 @@ pub const Action = enum {
     add_cursor_above,
     next_pane,
     prev_pane,
-    toggle_terminal,
-    close_terminal,
     reload_file,
 };
 

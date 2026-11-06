@@ -5,9 +5,10 @@
 A tiny, modern terminal text editor. Non-modal, in the spirit of nano/micro,
 built in Zig with no third-party dependencies.
 
-Status: **v0.0.3** - phases 0-5 are complete: piece-table editing, tabs,
-panes, search/replace, syntax highlighting, themes, an embedded terminal on
-`F8`, plus this release's selection fixes, terminal polish and panel surfaces.
+Status: **v0.0.3** - phases 0-4 are complete: piece-table editing, tabs, panes,
+search/replace, syntax highlighting, themes and configurable keybindings, plus
+the selection, focus and file-conflict fixes queued for the next release. The
+embedded terminal that phase 5 shipped has been removed (see Features).
 Cross-platform (Linux, macOS, Windows).
 
 ```
@@ -48,19 +49,14 @@ text = #d8dee9
 keyword1 = #c678dd
 comment = #6a7382
 tree_bg = #14141c      ; sidebar surface
-panel_bg = #1a1a24     ; terminal panel surface
 tab_bar_bg = #22222e   ; tab strip surface
-
-[terminal]
-command = cmd.exe     ; the shell F8 runs (default: pwsh, powershell, then cmd)
-height = 12           ; panel rows, title row included
-padding = 1           ; cells of horizontal padding inside the panel (0-4)
+panel_bg = #1a1a24     ; F1 help pill surface
 ```
 
 The theme controls the whole palette: editor text, gutter, selection, tab bar,
 status line, help panel and the syntax classes. Colours are `#rrggbb` or `#rgb`.
 Surfaces have keys of their own - `tree_bg` (sidebar), `tab_bar_bg` (tab strip),
-`panel_bg` (terminal panel) and `bar_bg` (status line). Each has an explicit
+`panel_bg` (the `F1 help` pill) and `bar_bg` (status line). Each has an explicit
 default shade, so the planes read apart even when a theme sets none of them.
 
 The current line is tinted with `line_hl` (derived from the background and
@@ -98,10 +94,6 @@ then exits.
 - `mibi <file>` from a terminal you already have open uses that window and
   profile, and sets the tab title (`mibi - notes.txt`).
 - `--in-terminal` skips the double-click check (used by scripts and tests).
-- The embedded terminal (`F8`) needs a pseudo console: ConPTY on Windows 10
-  1809 or newer (Windows Terminal and current conhost both provide it), and a
-  POSIX pty on Linux and macOS. If the shell cannot be started, the status bar
-  says why instead of leaving an empty panel.
 - `assets/windows-terminal/install.ps1` adds a Windows Terminal profile (icon,
   colour scheme, font). See
   [assets/windows-terminal/README.md](assets/windows-terminal/README.md) for
@@ -121,7 +113,7 @@ packaging.
 | Key                       | Action                                                                                      |
 | ------------------------- | ------------------------------------------------------------------------------------------- |
 | _type_                    | insert text                                                                                 |
-| _mouse_                   | click places the cursor, drag selects, wheel scrolls; right click pastes the system clipboard into the shell |
+| _mouse_                   | click places the cursor, drag selects, wheel scrolls                                        |
 | `Shift`+wheel             | scroll the editor horizontally                                                              |
 | `Enter`                   | new line                                                                                    |
 | `Tab`                     | insert 4 spaces                                                                             |
@@ -149,14 +141,7 @@ packaging.
 | `Shift+F5` / `Shift+F7`   | close the focused pane (its file stays open as a tab)                                       |
 | `F6` / `Shift+F6`         | next / previous pane (or click a pane)                                                      |
 | `F2`                      | theme picker (arrows preview live, Enter keeps and saves, Esc restores)                     |
-| `F8`                      | embedded terminal: opens it, then hands the keyboard back and forth; an exited shell restarts on `F8` |
-| `Shift+F8`                | close the terminal panel                                                                    |
 | `F9`                      | reload the file from disk (warns once if the buffer has unsaved edits)                      |
-| `▾` / `>_` (click)        | terminal panel: collapse it (the shell keeps running) / bring it back                       |
-| _terminal cursor_         | blinks while the panel owns the keyboard; `MIBI_NO_BLINK=1` keeps it still                  |
-| `Shift+PgUp` / `PgDn`     | scroll the terminal's scrollback (any key goes back to live)                                |
-| `Shift+Up` / `Down`       | scroll the terminal's scrollback a line (any key goes back to live)                         |
-| `Shift+Home` / `End`      | terminal scrollback: oldest line / back to live                                             |
 | `Ctrl+P`                  | command palette: every action, fuzzy-filtered                                               |
 | `Ctrl+?` / `F1`           | help panel (Esc closes it); the pill at the status bar's right edge                         |
 | `Ctrl+Q`                  | quit (asks first if any tab has unsaved edits)                                              |
@@ -200,13 +185,11 @@ packaging.
   (macOS) elsewhere.
 - Mouse: click text to place the cursor (a double click selects the word, a
   triple click the whole line, a drag selects a run of text), click a tab to
-  switch to it, click picker rows (click again to accept), click the status-bar
-  pills for help and the terminal; the wheel moves one line per notch and
+  switch to it, click picker rows (click again to accept), click the `F1 help`
+  pill at the status bar's right edge; the wheel moves one line per notch and
   `Shift`+wheel scrolls the text sideways. Over the tab bar the wheel scrolls
-  the strip instead, and over the terminal panel it scrolls the shell's
-  scrollback. Right click in the terminal panel pastes the system clipboard into
-  the shell (mibi's own register when the clipboard is empty). Quick-edit mode
-  is turned off so the console reports clicks to the editor.
+  the strip instead. Quick-edit mode is turned off so the console reports clicks
+  to the editor.
 - Configurable keybindings and a colour theme via `mibi.ini` (`[keys]` and
   `[theme]`), with the whole palette and every action bindable. The help
   panel renders the keys you actually bound.
@@ -242,36 +225,14 @@ packaging.
   Ctrl+T / Ctrl+W, Ctrl+PgUp / Ctrl+PgDn, and a quit that checks every tab.
 - File open/save; path prompts list the directory; Tab completes. A failed
   open or save reports the actual OS error rather than failing silently.
-- Embedded terminal (`F8`): a real shell in a pseudo terminal (ConPTY on
-  Windows, `posix_openpt` + `fork` elsewhere) drawn in a panel under the panes,
-  with its own VT parser (`src/vterm.zig`), 256-colour and true-colour SGR, a
-  scrollback of 2000 lines (wheel and `Shift+Up`/`Down` a line, `Shift+PgUp`/
-  `PgDn` a page, `Shift+Home`/`End` to the oldest line and back to live, any key
-  returns to live; new output keeps you at the bottom if you were there), and
-  the shell's window kept in step with the panel and sized to its inner width,
-  so the padding never cuts off the last columns. The shell is `pwsh.exe`, then
-  `powershell.exe`, then `cmd.exe` on Windows (`$SHELL`, then `/bin/sh`
-  elsewhere), each with `-NoLogo` and the user's profile; `[terminal] command`
-  overrides it, and `height` / `padding` size the panel. The panel has a surface
-  colour of its own, and its cursor is always visible: it blinks while the panel
-  owns the keyboard (`MIBI_NO_BLINK=1` keeps it still), a filled block while the
-  shell shows it, a dim block when the shell hides it (the alt screen restores
-  it on entry and exit). The title row names the shell, marks the keyboard owner
-  with `▌`, shows `-N lines` while you are scrolled back, and has a `▾` chevron
-  that collapses the panel (the shell keeps running); the `>_` button in the
-  status bar brings it back. A drag inside the panel selects and copies on
-  release (the register plus OSC 52); right click pastes the system clipboard,
-  bracketed when the shell asked for it, and falls back to mibi's register when
-  the clipboard is empty. Backspace is sent as DEL (`0x7f`) rather than the
-  console's `0x08`, so line editors delete one character instead of clearing the
-  line. An exited shell says so in the panel, and `F8` restarts it. `F8` hands
-  the keyboard back and `Shift+F8` closes the panel. The panel is pumped on a
-  30 ms tick, so an open terminal does not spin a core. The scrollback ring is
-  allocated when the terminal opens (~2.5 MB at 80 columns, ~6 MB at 200).
 - Cell-grid **diff renderer**: changed rows are rewritten in full.
 - Raw mode, alternate screen, resize handling, auto-wrap disabled, UTF-8
   console codepage set on Windows.
 - Cross-platform from one codebase: `src/os.zig` (kernel32 / libc), `src/term.zig`.
+- No embedded terminal: the `F8` shell panel was removed. mibi is
+  still a terminal-UI editor - it runs inside the terminal you already have -
+  and formatters (`F4`) and external commands still run tools in the background
+  through `os.runCommand`, which never used a pseudo terminal.
 
 ## Architecture
 
@@ -289,9 +250,6 @@ src/config.zig   mibi.ini: settings, theme, key bindings
 src/keys.zig     key names, actions and the key map
 src/render.zig   cell grid + ANSI diff
 src/term.zig     raw mode, alt screen, size, input
-src/terminal.zig the embedded terminal: pty + VT screen + key forwarding
-src/pty.zig      pseudo terminal (ConPTY / posix_openpt + fork)
-src/vterm.zig    VT/ANSI parser, screen buffer and scrollback
 src/os.zig       raw OS layer (no std.Io)
 src/text.zig     UTF-8 helpers
 src/width.zig    generated Unicode width table
@@ -337,10 +295,11 @@ css  = biome format --stdin-file-path {file}
 ```
 
 `{file}` becomes the file's path so tools can pick a parser. The edit is one
-undo step and keeps the cursor. Failures are reported, never silent: no
-formatter for the type, the tool missing, a non-zero exit, empty output or a
-10 second timeout all leave the buffer untouched and say so in the status line.
-`on_save = true` formats before every save.
+undo step and keeps the cursor. Formatters run in the background through
+`os.runCommand`, with no pseudo terminal involved. Failures are reported, never
+silent: no formatter for the type, the tool missing, a non-zero exit, empty
+output or a 10 second timeout all leave the buffer untouched and say so in the
+status line. `on_save = true` formats before every save.
 
 ## Session state
 
@@ -358,10 +317,6 @@ directory):
 `mibi-session-buf-<n>.txt` holds the text of a buffer that has unsaved changes.
 Set `MIBI_STATE_DIR` to put them somewhere else (the tests use it to keep each
 run isolated).
-
-The embedded terminal is deliberately not part of the session: it is a running
-process, so it starts fresh on every launch (`F8` opens one, `Shift+F8` closes
-it).
 
 A buffer with unsaved edits whose file changed on disk is flagged rather than
 overwritten: the tab shows `[!]` and the status line says

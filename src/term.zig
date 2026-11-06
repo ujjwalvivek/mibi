@@ -72,13 +72,13 @@ const win = if (is_windows) struct {
     extern "kernel32" fn ReadConsoleInputW(h: HANDLE, buf: *INPUT_RECORD, len: DWORD, read: *DWORD) callconv(.winapi) BOOL;
     extern "kernel32" fn GetNumberOfConsoleInputEvents(h: HANDLE, n: *DWORD) callconv(.winapi) BOOL;
     extern "kernel32" fn WaitForSingleObject(hHandle: HANDLE, dwMilliseconds: DWORD) callconv(.winapi) DWORD;
-    extern "kernel32" fn WaitForMultipleObjects(
-        nCount: DWORD,
-        lpHandles: [*]const HANDLE,
-        bWaitAll: BOOL,
-        dwMilliseconds: DWORD,
-    ) callconv(.winapi) DWORD;
     const WAIT_TIMEOUT: DWORD = 0x00000102;
+    /// Physical key state. Windows Terminal does not always copy the modifier
+    /// keys into the mouse record, so the wheel falls back to asking the system.
+    extern "user32" fn GetAsyncKeyState(vKey: i32) callconv(.winapi) i16;
+    const VK_SHIFT: i32 = 0x10;
+    const VK_CONTROL: i32 = 0x11;
+    const VK_MENU: i32 = 0x12;
     extern "kernel32" fn SetConsoleCtrlHandler(
         handler: ?*const fn (u32) callconv(.winapi) BOOL,
         add: BOOL,
@@ -95,12 +95,13 @@ const win = if (is_windows) struct {
     const ENABLE_ECHO_INPUT: DWORD = 0x0004;
     const ENABLE_MOUSE_INPUT: DWORD = 0x0010;
     const ENABLE_EXTENDED_FLAGS: DWORD = 0x0080;
-const ENABLE_QUICK_EDIT_MODE: DWORD = 0x0040;
+    const ENABLE_QUICK_EDIT_MODE: DWORD = 0x0040;
     const FROM_LEFT_1ST_BUTTON_PRESSED: DWORD = 0x0001;
     const FROM_LEFT_2ND_BUTTON_PRESSED: DWORD = 0x0004;
     const RIGHTMOST_BUTTON_PRESSED: DWORD = 0x0002;
     const MOUSE_WHEELED: DWORD = 0x0004;
-const MOUSE_MOVED: DWORD = 0x0001;
+    const MOUSE_HWHEELED: DWORD = 0x0008;
+    const MOUSE_MOVED: DWORD = 0x0001;
     /// `dwEventFlags` bit marking the second click of a double click.
     const DOUBLE_CLICK_FLAG: DWORD = 0x0002;
 
@@ -140,22 +141,55 @@ const MOUSE_MOVED: DWORD = 0x0001;
         return written.len;
     }
 
+    /// Set by the tests: a synthetic mouse record must not pick up whatever the
+    /// human is holding down while the suite runs.
+    var async_modifiers = true;
+
+    /// Modifier bits from a mouse record: 1 = shift, 2 = alt, 4 = ctrl.
+    fn modifiersFromState(state: u32) u16 {
+        var bits: u16 = 0;
+        if (state & SHIFT_PRESSED != 0) bits |= 1;
+        if (state & (LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED) != 0) bits |= 2;
+        if (state & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED) != 0) bits |= 4;
+        return bits;
+    }
+
+    /// The same bits from the physical keyboard, for the record that arrived
+    /// without them. `& 0x8000` is "the key is down now".
+    fn modifiersFromKeyboard() u16 {
+        const down: i16 = @bitCast(@as(u16, 0x8000));
+        var bits: u16 = 0;
+        if (GetAsyncKeyState(VK_SHIFT) & down != 0) bits |= 1;
+        if (GetAsyncKeyState(VK_MENU) & down != 0) bits |= 2;
+        if (GetAsyncKeyState(VK_CONTROL) & down != 0) bits |= 4;
+        return bits;
+    }
+
     /// Translate a mouse event into an SGR mouse sequence
     /// (`ESC [ < button ; x ; y M`), 1-based like a real terminal.
     fn translateMouse(m: MOUSE_EVENT_RECORD, out: []u8) usize {
         const x: u16 = @intCast(m.dwMousePosition.X + 1);
         const y: u16 = @intCast(m.dwMousePosition.Y + 1);
         var button: u16 = 0;
-        if (m.dwEventFlags & win.MOUSE_WHEELED != 0) {
+        if (m.dwEventFlags & (MOUSE_WHEELED | MOUSE_HWHEELED) != 0) {
+            // The high word is the signed wheel delta; the low word is the
+            // button state and carries no direction.
             const delta: i16 = @bitCast(@as(u16, @truncate(m.dwButtonState >> 16)));
-            button = if (delta > 0) 64 else 65;
+            if (m.dwEventFlags & MOUSE_HWHEELED != 0) {
+                // Horizontal wheel: 66 is left, 67 is right.
+                button = if (delta > 0) 67 else 66;
+            } else {
+                button = if (delta > 0) 64 else 65; // up / down
+            }
             // SGR mouse puts the modifiers in the button field (shift 4, alt 8,
             // ctrl 16). The editor uses shift+wheel to scroll sideways, so the
             // wheel keeps them; button presses stay plain to keep click
             // handling simple.
-            if (m.dwControlKeyState & win.SHIFT_PRESSED != 0) button += 4;
-            if (m.dwControlKeyState & (win.LEFT_ALT_PRESSED | win.RIGHT_ALT_PRESSED) != 0) button += 8;
-            if (m.dwControlKeyState & (win.LEFT_CTRL_PRESSED | win.RIGHT_CTRL_PRESSED) != 0) button += 16;
+            var mods = modifiersFromState(m.dwControlKeyState);
+            if (async_modifiers) mods |= modifiersFromKeyboard();
+            if (mods & 1 != 0) button += 4;
+            if (mods & 2 != 0) button += 8;
+            if (mods & 4 != 0) button += 16;
         } else if (m.dwButtonState & win.FROM_LEFT_1ST_BUTTON_PRESSED != 0) {
             // Dragging with the button held is reported as motion (bit 32).
             button = if (m.dwEventFlags & win.MOUSE_MOVED != 0) 32 else 0;
@@ -205,7 +239,7 @@ const MOUSE_MOVED: DWORD = 0x0001;
             0x74 => return csi(out, mod, '~', 15), // F5: split side by side
             0x75 => return csi(out, mod, '~', 17), // F6: pane focus
             0x76 => return csi(out, mod, '~', 18), // F7: split stacked
-            0x77 => return csi(out, mod, '~', 19), // F8: embedded terminal
+            0x77 => return csi(out, mod, '~', 19), // F8
             0x78 => return csi(out, mod, '~', 20), // F9
             0x79 => return csi(out, mod, '~', 21), // F10
             0x7a => return csi(out, mod, '~', 23), // F11
@@ -219,12 +253,12 @@ const MOUSE_MOVED: DWORD = 0x0001;
             return 1;
         }
         if (k.wVirtualKeyCode == 0x71) { // F2
-        out[0] = 0x1b;
-        out[1] = 'O';
-        out[2] = 'Q';
-        return 3;
-    }
-    if (k.wVirtualKeyCode == 0x70) { // F1
+            out[0] = 0x1b;
+            out[1] = 'O';
+            out[2] = 'Q';
+            return 3;
+        }
+        if (k.wVirtualKeyCode == 0x70) { // F1
             const seq = "\x1bOP";
             @memcpy(out[0..seq.len], seq);
             return seq.len;
@@ -251,35 +285,24 @@ const MOUSE_MOVED: DWORD = 0x0001;
         return std.unicode.utf8Encode(ch, out) catch 0;
     }
 
-    fn readInput(buf: []u8, extra: ?ExtraHandle, timeout_ms: u32) !Input {
+    fn readInput(buf: []u8, timeout_ms: u32) !Input {
         const h = inHandle() orelse return error.NoHandle;
         var res: Input = .{};
-        // A short wait lets the editor tick while nothing is typed. When a
-        // pseudo terminal is visible it is waited on too, so its output wakes
-        // the loop instead of waiting for the next tick.
-        if (extra) |eh| {
-            var handles = [2]HANDLE{ h, eh };
-            switch (WaitForMultipleObjects(2, &handles, 0, timeout_ms)) {
-                0 => {},
-                1 => {
-                    res.extra = true;
-                    return res;
-                },
-                else => {
-                    idle = true;
-                    return res;
-                },
-            }
-        } else if (WaitForSingleObject(h, timeout_ms) == WAIT_TIMEOUT) {
+        // A short wait lets the editor tick while nothing is typed.
+        if (WaitForSingleObject(h, timeout_ms) == WAIT_TIMEOUT) {
             idle = true;
             return res;
         }
         var n: usize = 0;
         while (true) {
-            if (n > 0) {
-                var avail: DWORD = 0;
-                if (GetNumberOfConsoleInputEvents(h, &avail) == 0 or avail == 0) break;
-            }
+            // Never block inside ReadConsoleInputW. When the queue is empty the
+            // call waits for the next record with no timeout, and after a
+            // key-up (which translates to zero bytes) that starved the idle
+            // tick forever: no status-message aging, no disk housekeeping, no
+            // autosave until the next keypress. Checking the queue first keeps
+            // the caller's timeout in charge.
+            var avail: DWORD = 0;
+            if (GetNumberOfConsoleInputEvents(h, &avail) == 0 or avail == 0) break;
             var rec: INPUT_RECORD = undefined;
             var read: DWORD = 0;
             if (ReadConsoleInputW(h, &rec, 1, &read) == 0) {
@@ -323,13 +346,13 @@ const MOUSE_MOVED: DWORD = 0x0001;
     }
 } else struct {};
 
-/// What one blocking read produced: bytes for the editor, and whether the
-/// extra handle (a pseudo terminal's output) is what woke it instead.
-pub const Input = struct { n: usize = 0, extra: bool = false };
-
-/// Handle the run loop can also wait on: a pipe on Windows, a file descriptor
-/// on Unix. The embedded terminal passes its output handle here.
-pub const ExtraHandle = if (is_windows) *anyopaque else i32;
+/// What one blocking read produced: bytes for the editor, if any.
+pub const Input = struct {
+    n: usize = 0,
+    /// True only at a real end of input (a closed stdin on Unix). A Windows
+    /// console never reports EOF: zero records just mean "nothing yet".
+    eof: bool = false,
+};
 
 /// Set when the console was resized since the last call (Windows only).
 var resized = false;
@@ -482,24 +505,19 @@ pub fn installCloseHandler(handler: *const fn () void) void {
     _ = win.SetConsoleCtrlHandler(ctrlHandlerRoutine, 1);
 }
 
-/// Blocking read of one input chunk as ANSI bytes. Returns what it read, and
-/// whether `extra` (the embedded terminal's output) is what woke it.
-pub fn readInput(buf: []u8, extra: ?ExtraHandle, timeout_ms: u32) !Input {
-    if (is_windows) return win.readInput(buf, extra, timeout_ms);
-    // Unix: poll first, so an idle editor still wakes up, and so pseudo
-    // terminal output does not have to wait for the timeout.
-    var fds = [2]std.posix.pollfd{
-        .{ .fd = os.STDIN, .events = std.posix.POLL.IN, .revents = 0 },
-        .{ .fd = (extra orelse -1), .events = std.posix.POLL.IN, .revents = 0 },
-    };
-    const count: usize = if (extra == null) 1 else 2;
-    const ready = std.posix.poll(fds[0..count], @intCast(timeout_ms)) catch 1;
+/// Blocking read of one input chunk as ANSI bytes. Returns what it read; a
+/// timeout with nothing typed sets the idle flag and returns zero bytes.
+pub fn readInput(buf: []u8, timeout_ms: u32) !Input {
+    if (is_windows) return win.readInput(buf, timeout_ms);
+    // Unix: poll first, so an idle editor still wakes up on its tick.
+    var fds = [1]std.posix.pollfd{.{ .fd = os.STDIN, .events = std.posix.POLL.IN, .revents = 0 }};
+    const ready = std.posix.poll(&fds, @intCast(timeout_ms)) catch 1;
     if (ready == 0) {
         idle = true;
         return .{};
     }
-    if (count == 2 and fds[1].revents != 0) return .{ .extra = true };
-    return .{ .n = try os.read(os.STDIN, buf) };
+    const n = try os.read(os.STDIN, buf);
+    return .{ .n = n, .eof = n == 0 };
 }
 
 /// Milliseconds between idle wake-ups (housekeeping ticks).
@@ -563,4 +581,96 @@ test "windows key translation (Windows only)" {
     const s = win.translateKey(k, &buf);
     try std.testing.expectEqual(@as(usize, 1), s);
     try std.testing.expectEqual(@as(u8, 0x1f), buf[0]);
+}
+
+test "windows mouse translation (Windows only)" {
+    if (comptime !is_windows) return;
+    var buf: [32]u8 = undefined;
+    // Synthetic records must not pick up the modifiers the human happens to be
+    // holding while the suite runs.
+    const was_async = win.async_modifiers;
+    win.async_modifiers = false;
+    defer win.async_modifiers = was_async;
+
+    var m: win.MOUSE_EVENT_RECORD = std.mem.zeroes(win.MOUSE_EVENT_RECORD);
+    m.dwMousePosition = .{ .X = 4, .Y = 6 };
+
+    // Hover: motion with nothing held, ignored by the editor but still reported.
+    m.dwEventFlags = win.MOUSE_MOVED;
+    var n = win.translateMouse(m, &buf);
+    try std.testing.expectEqualStrings("\x1b[<35;5;7M", buf[0..n]);
+
+    // Left press, then release.
+    m.dwEventFlags = 0;
+    m.dwButtonState = win.FROM_LEFT_1ST_BUTTON_PRESSED;
+    n = win.translateMouse(m, &buf);
+    try std.testing.expectEqualStrings("\x1b[<0;5;7M", buf[0..n]);
+    m.dwButtonState = 0;
+    n = win.translateMouse(m, &buf);
+    try std.testing.expectEqualStrings("\x1b[<0;5;7m", buf[0..n]);
+
+    // Right press, and the second click of a double click.
+    m.dwButtonState = win.RIGHTMOST_BUTTON_PRESSED;
+    n = win.translateMouse(m, &buf);
+    try std.testing.expectEqualStrings("\x1b[<2;5;7M", buf[0..n]);
+    m.dwButtonState = 0;
+    m.dwEventFlags = win.DOUBLE_CLICK_FLAG;
+    n = win.translateMouse(m, &buf);
+    try std.testing.expectEqualStrings("\x1b[<0;5;7M", buf[0..n]);
+
+    // Drag: left held while moving.
+    m.dwEventFlags = win.MOUSE_MOVED;
+    m.dwButtonState = win.FROM_LEFT_1ST_BUTTON_PRESSED;
+    n = win.translateMouse(m, &buf);
+    try std.testing.expectEqualStrings("\x1b[<32;5;7M", buf[0..n]);
+
+    // Vertical wheel: the signed high word is the delta, positive is up.
+    m.dwEventFlags = win.MOUSE_WHEELED;
+    m.dwButtonState = @as(u32, 1) << 16;
+    n = win.translateMouse(m, &buf);
+    try std.testing.expectEqualStrings("\x1b[<64;5;7M", buf[0..n]);
+    m.dwButtonState = @as(u32, 0xFFFF) << 16; // -1
+    n = win.translateMouse(m, &buf);
+    try std.testing.expectEqualStrings("\x1b[<65;5;7M", buf[0..n]);
+
+    // Modifiers ride in the button field on wheel events: shift 4, ctrl 16.
+    m.dwButtonState = @as(u32, 1) << 16;
+    m.dwControlKeyState = win.SHIFT_PRESSED;
+    n = win.translateMouse(m, &buf);
+    try std.testing.expectEqualStrings("\x1b[<68;5;7M", buf[0..n]);
+    m.dwControlKeyState = win.LEFT_CTRL_PRESSED;
+    n = win.translateMouse(m, &buf);
+    try std.testing.expectEqualStrings("\x1b[<80;5;7M", buf[0..n]);
+    m.dwControlKeyState = win.LEFT_ALT_PRESSED;
+    n = win.translateMouse(m, &buf);
+    try std.testing.expectEqualStrings("\x1b[<72;5;7M", buf[0..n]);
+
+    // Horizontal wheel: 67 is right, 66 is left.
+    m.dwControlKeyState = 0;
+    m.dwEventFlags = win.MOUSE_HWHEELED;
+    m.dwButtonState = @as(u32, 1) << 16;
+    n = win.translateMouse(m, &buf);
+    try std.testing.expectEqualStrings("\x1b[<67;5;7M", buf[0..n]);
+    m.dwButtonState = @as(u32, 0xFFFF) << 16;
+    n = win.translateMouse(m, &buf);
+    try std.testing.expectEqualStrings("\x1b[<66;5;7M", buf[0..n]);
+
+    // Coordinates are 1-based: cell (0,0) is reported as 1;1.
+    m.dwEventFlags = win.MOUSE_MOVED;
+    m.dwButtonState = 0;
+    m.dwMousePosition = .{ .X = 0, .Y = 0 };
+    n = win.translateMouse(m, &buf);
+    try std.testing.expectEqualStrings("\x1b[<35;1;1M", buf[0..n]);
+}
+
+test "windows mouse modifiers fall back to the keyboard (Windows only)" {
+    if (comptime !is_windows) return;
+    // The pure half: what a record's own state says, and what the fallback
+    // contributes, must combine without double counting.
+    try std.testing.expectEqual(@as(u16, 0), win.modifiersFromState(0));
+    try std.testing.expectEqual(@as(u16, 1), win.modifiersFromState(win.SHIFT_PRESSED));
+    try std.testing.expectEqual(@as(u16, 2), win.modifiersFromState(win.RIGHT_ALT_PRESSED));
+    try std.testing.expectEqual(@as(u16, 4), win.modifiersFromState(win.RIGHT_CTRL_PRESSED));
+    const both = win.modifiersFromState(win.SHIFT_PRESSED) | win.modifiersFromState(win.LEFT_CTRL_PRESSED);
+    try std.testing.expectEqual(@as(u16, 5), both);
 }

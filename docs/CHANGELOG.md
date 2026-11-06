@@ -2,12 +2,22 @@
 
 ## Unreleased
 
+**Removed**
+
+- The embedded terminal panel: `F8` / `Shift+F8`, the `[terminal] command` /
+  `height` / `padding` keys, the `>_` status button and the panel chevron are
+  gone, along with `src/pty.zig`, `src/vterm.zig` and `src/terminal.zig`. mibi
+  no longer ships a pseudo terminal, and `F8` does nothing. It is still a
+  terminal-UI editor - it runs inside the terminal you already have - and
+  formatters (`F4`) and external commands are unaffected: they run tools in the
+  background through `os.runCommand`, which never used a pty.
+
 **Keyboard focus**
 
-- The keyboard has exactly one owner: the editor, the file tree, or the terminal
-  panel, and every click sets it. Clicking the tree and then the text no longer
-  leaves the tree owning the keyboard (the arrows moved the tree selection
-  instead of the cursor).
+- The keyboard has exactly one owner: the editor or the file tree, and every
+  click sets it. Clicking the tree and then the text no longer leaves the tree
+  owning the keyboard (the arrows moved the tree selection instead of the
+  cursor).
 - Global keys (`F4`..`F9`) reach the editor while the file tree has the focus;
   the tree's escape-sequence handling used to swallow them.
 
@@ -35,45 +45,35 @@
   warning once if the buffer has unsaved edits and discarding them on the second
   press. Clean buffers still reload on their own within half a second.
 
-**Terminal**
-
-- Backspace sends `0x7f` (DEL) instead of the `0x08` the console reports, so it
-  deletes one character rather than wiping the whole typed line in `cmd.exe`.
-- Right click pastes the **system clipboard** (the Windows clipboard API;
-  `wl-paste`, `xclip` or `pbpaste` on Unix), falling back to mibi's own register
-  when the clipboard is empty or unavailable.
-- The cursor is always visible and blinks while the panel owns the keyboard
-  (`MIBI_NO_BLINK=1` turns blinking off); a shell that hides its cursor gets a
-  dim block instead.
-- Scrollback: the wheel, `Shift+PgUp`/`PgDn`, `Shift+Up`/`Down`, `Shift+Home`
-  (oldest) and `Shift+End` (live), with `-N lines` in the panel title. New
-  output keeps you at the bottom if you were there.
-- The shell gets the panel's *inner* width, so its last columns are no longer
-  cut off by the padding.
-- A shell that exits says so in the panel, and `F8` restarts it.
-
-**Terminal panel**
-
-- A chevron `▾` at the right end of the title row collapses the panel (the shell
-  keeps running), and the `>_` button in the status bar brings it back.
-- The title shows a `▌` marker when the panel owns the keyboard.
-- The panel has horizontal padding (`[terminal] padding`, 0-4).
-
 **Status bar**
 
-- The `F1 help` hint and the new `>_` terminal button are solid themed pills.
-- Status messages survive mouse motion (pointer movement used to wipe them) and
-  expire after four seconds.
+- The `F1 help` hint is a solid themed pill.
 
-**Editor**
+**Fixed**
 
-- `Shift`+wheel scrolls the editor horizontally.
-
-**Idle CPU**
-
-- With the terminal open the editor used to busy-loop (~60% of a core) because
-  the Windows pseudo-console output handle stays signalled; it now sleeps and
-  polls on a 30 ms tick.
+- The input loop no longer blocks inside `ReadConsoleInputW` after a key-up:
+  that starved the idle tick, so status messages never aged out, files changed
+  on disk were never noticed, and the session was never autosaved until the
+  next keypress. Zero-length reads are no longer treated as end of input
+  either, which used to make the editor exit under load.
+- Status messages clear after four seconds instead of lingering, and survive
+  mouse motion.
+- Reloading a file from disk drops the undo history instead of restoring piece
+  lists that point into the old buffer (undo after a reload could truncate the
+  document).
+- An escape sequence split across reads is held until it completes: a lone
+  `ESC` no longer closes the help panel or a picker and then types the rest of
+  the sequence (`F1` used to insert `OP` into the buffer).
+- `Shift`+wheel scrolls horizontally in real terminals: Windows Terminal does
+  not always put the modifiers in the mouse record, so shift is read from the
+  keyboard state as well; a real horizontal wheel (`66`/`67`) works too.
+- Every chrome cell (tab bar, status line and pane borders) is painted on the
+  first full frame, so no cell shows the terminal's own background.
+- Hover highlights are painted again: tab-bar buttons and arrows, and the
+  `F1 help` pill.
+- Editor freezes and crashes are fixed.
+- The terminal panel's invisible cursor and the chevron that collapsed the panel
+  on hover (and could take the shell down) went with the panel.
 
 ## v0.0.3 - 2026-11-06
 

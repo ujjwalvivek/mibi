@@ -24,22 +24,22 @@ if (-not (Test-Path $Zig)) {
     & (Join-Path $Root 'tools\get-zig.ps1')
 }
 
-# Per-target regression budgets, re-based after Phase 5 (embedded terminal)
-# with ~10-15% headroom. Phase gates from PLAN.md: Phase 1 <= 80 KB, Phase 2 <=
-# 150 KB, Phase 3 <= 350 KB, Phase 4 <= 700 KB, Phase 5 <= +150 KB, hard ceiling
-# 1 MB (every target is far below it).
+# Per-target regression budgets, re-based after the embedded terminal was
+# removed (the binaries are ~20-30 KB smaller than v0.0.3) with ~10-12% headroom.
+# Phase gates from PLAN.md: Phase 1 <= 80 KB, Phase 2 <= 150 KB, Phase 3 <=
+# 350 KB, Phase 4 <= 700 KB, hard ceiling 1 MB (every target is far below it).
 #
 # aarch64-macos carries one 16 KB page of slack: Apple Silicon links `__TEXT`
 # on 16 KB pages, so a few hundred bytes of new code can step the file up by a
 # whole page (adding the Unix file stamp moved it 200,616 from 184,200 while
 # the x86_64-macos build grew 65 bytes for the same change).
 $targets = [ordered]@{
-    'x86_64-linux-gnu'   = @{ budget = 192 * $KB; exe = 'mibi' }
-    'aarch64-linux-gnu'  = @{ budget = 176 * $KB; exe = 'mibi' }
-    'x86_64-macos'       = @{ budget = 208 * $KB; exe = 'mibi' }
-    'aarch64-macos'      = @{ budget = 240 * $KB; exe = 'mibi' }
-    'x86_64-windows'     = @{ budget = 256 * $KB; exe = 'mibi.exe' }
-    'x86_64-windows-gnu' = @{ budget = 256 * $KB; exe = 'mibi.exe' }
+    'x86_64-linux-gnu'   = @{ budget = 176 * $KB; exe = 'mibi' }
+    'aarch64-linux-gnu'  = @{ budget = 160 * $KB; exe = 'mibi' }
+    'x86_64-macos'       = @{ budget = 184 * $KB; exe = 'mibi' }
+    'aarch64-macos'      = @{ budget = 216 * $KB; exe = 'mibi' }
+    'x86_64-windows'     = @{ budget = 232 * $KB; exe = 'mibi.exe' }
+    'x86_64-windows-gnu' = @{ budget = 232 * $KB; exe = 'mibi.exe' }
 }
 
 $rows = @()

@@ -48,6 +48,10 @@ class Screen:
         self.bg_grid = [[None] * cols for _ in range(rows)]
         self.r = self.c = 0
         self.fg = None
+        self.bg = None
+        # SGR 7 / 27 (and 0): a terminal with reverse video on draws the text
+        # colour on the background colour and vice versa.
+        self.reverse = False
         self.title = ""
         self._pending = ""
 
@@ -61,12 +65,18 @@ class Screen:
         w = cell_width(ch)
         if self.r >= self.rows:
             return
+        fg, bg = self.fg, self.bg
+        if self.reverse:
+            fg, bg = bg, fg  # what a real terminal shows for a reversed cell
         if self.c < self.cols:
             self.grid[self.r][self.c] = ch
-            self.fg_grid[self.r][self.c] = self.fg
-        self.bg_grid[self.r][self.c] = self.bg
+            self.fg_grid[self.r][self.c] = fg
+            self.bg_grid[self.r][self.c] = bg
         if w == 2 and self.c + 1 < self.cols:
-            self.grid[self.r][self.c + 1] = ""  # continuation of a wide glyph
+            # The second half of a wide glyph is painted by the same cell.
+            self.grid[self.r][self.c + 1] = ""
+            self.fg_grid[self.r][self.c + 1] = fg
+            self.bg_grid[self.r][self.c + 1] = bg
         self.c += w
         if self.c >= self.cols:  # auto-wrap is off in mibi, but stay safe
             self.c = self.cols - 1
@@ -151,13 +161,18 @@ class Screen:
             self.title = body[2:]
 
     def _sgr(self, nums):
-        """Track foreground and background true colours for the tests."""
+        """Track foreground, background and reverse video for the tests."""
         i = 0
         while i < len(nums):
             n = nums[i]
             if n == 0:
                 self.fg = None
                 self.bg = None
+                self.reverse = False
+            elif n == 7:
+                self.reverse = True
+            elif n == 27:
+                self.reverse = False
             elif n == 39:
                 self.fg = None
             elif n == 49:
@@ -209,9 +224,6 @@ class Mibi:
             shutil.rmtree(self.state, ignore_errors=True)
         os.makedirs(self.state, exist_ok=True)
         os.environ["MIBI_STATE_DIR"] = self.state
-        # A blinking cursor would keep the screen changing and stop wait_quiet
-        # from ever settling; the blink has its own check with it turned on.
-        os.environ.setdefault("MIBI_NO_BLINK", "1")
         if cwd and not keep_session:
             for name in os.listdir(cwd) if os.path.isdir(cwd) else []:
                 if name.startswith("mibi-session"):
@@ -268,7 +280,12 @@ class Mibi:
             time.sleep(0.02)
 
     def send(self, keys, settle=0.25):
-        self.proc.write(keys)
+        try:
+            self.proc.write(keys)
+        except EOFError:
+            # The pty is gone: the editor exited underneath us. Report it with
+            # the last screen instead of an opaque "Pty is closed" traceback.
+            raise AssertionError("the editor exited while keys were sent:\n" + self.screen_text())
         self.wait_quiet(settle)
 
     def resize(self, rows, cols, settle=0.4):
@@ -367,6 +384,17 @@ def help_panel_toggles(m, path):
     m.send("\x1f")
     m.wait_quiet()
     assert_not_in(m.screen_text(), "mibi controls")
+
+
+@check
+def help_has_no_terminal_row(m, path):
+    """The help panel no longer documents a terminal."""
+    m.send("\x1bOP")  # F1
+    assert m.wait_for("mibi controls"), "help panel did not open"
+    m.wait_quiet()
+    screen = m.screen_text()
+    assert "terminal" not in screen.lower(), f"the help panel still mentions a terminal:\n{screen}"
+    m.shot("61-help-no-terminal")
 
 
 @check
@@ -493,7 +521,9 @@ def config_file_sets_theme_and_gutter(m, path):
         proc.wait_quiet()
         lines = proc.screen_text().splitlines()
         assert lines[1].startswith("hello"), f"line numbers not hidden: {lines[1]!r}"
-        fg = proc.screen.fg_at(1, 0)
+        # Column 0 is the block cursor, drawn with reverse video, so it reports
+        # the swapped colours; the second character carries the plain text one.
+        fg = proc.screen.fg_at(1, 1)
         assert fg == (255, 0, 0), f"theme text colour not applied: {fg}"
         proc.shot("12-config")
     finally:
@@ -514,7 +544,9 @@ def named_theme_is_applied(m, path):
     try:
         assert proc.wait_for("hello"), "editor did not start"
         proc.wait_quiet()
-        fg = proc.screen.fg_at(1, 2)  # first text cell: Dracula's #f8f8f2
+        # The first text cell is the block cursor (reverse video), so read the
+        # second character for Dracula's plain #f8f8f2 text colour.
+        fg = proc.screen.fg_at(1, 3)
         assert fg == (248, 248, 242), f"theme text colour not applied: {fg}"
         proc.shot("13-theme")
     finally:
@@ -553,14 +585,14 @@ def f2_theme_picker_applies_a_theme(m, path):
     try:
         assert proc.wait_for("hello"), "editor did not start"
         proc.wait_quiet()
-        before = proc.screen.fg_at(1, 2)
+        before = proc.screen.fg_at(2, 2)  # "world": clear of the block cursor
         proc.send("\x1bOQ")  # F2
         assert proc.wait_for("Theme"), "theme picker did not open"
         proc.send("\x1b[B")  # down
         proc.send("\x1b[B")
         proc.send("\r")  # accept
         proc.wait_quiet()
-        after = proc.screen.fg_at(1, 2)
+        after = proc.screen.fg_at(2, 2)
         assert after != before, f"theme preview did not change colours ({before} -> {after})"
         proc.shot("15-theme-picker")
     finally:
@@ -621,7 +653,9 @@ def theme_choice_persists(m, path):
     try:
         assert again.wait_for("hello"), "restart failed"
         again.wait_quiet()
-        fg = again.screen.fg_at(1, 2)
+        # The first text cell is the block cursor (reverse video), so read the
+        # second character for the saved theme's plain text colour.
+        fg = again.screen.fg_at(1, 3)
         assert fg == (198, 208, 245), f"saved theme not applied on restart: {fg}"
     finally:
         again.close()
@@ -666,6 +700,23 @@ def command_palette_runs_actions(m, path):
 
 
 @check
+def command_palette_has_no_terminal_actions(m, path):
+    """The command palette no longer offers any terminal action."""
+    m.send("\x10")  # Ctrl+P
+    assert m.wait_for("Commands"), "command palette did not open"
+    m.wait_quiet()
+    screen = m.screen_text()
+    assert "terminal" not in screen.lower(), f"the palette still lists a terminal action:\n{screen}"
+    # Filtering for it must not bring one back either.
+    m.send("term")
+    m.wait_quiet()
+    filtered = m.screen_text()
+    assert "Commands" in filtered, f"typing closed the palette:\n{filtered}"
+    assert "terminal" not in filtered.lower(), f"a terminal action survived the filter:\n{filtered}"
+    m.shot("62-palette-no-terminal")
+
+
+@check
 def mouse_click_places_the_cursor(m, path):
     """A left click on a text row moves the cursor to that cell."""
     m.send("\x1b[<0;5;3M")  # click: screen row 3 (second text line), column 5
@@ -676,81 +727,21 @@ def mouse_click_places_the_cursor(m, path):
 
 
 @check
-def embedded_terminal_runs_a_command(m, path):
-    """F8 opens a panel running the configured shell; its output shows up."""
-    work = os.path.join(SHOT_DIR, "work-term")
-    shutil.rmtree(work, ignore_errors=True)
-    os.makedirs(work)
-    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
-        f.write("[terminal]\ncommand = cmd.exe /c echo hello-from-pty\nheight = 8\n")
-    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
-        f.write("hello\nworld\n")
-
-    proc = Mibi(["notes.txt"], cwd=work)
-    try:
-        assert proc.wait_for("hello"), "editor did not start"
-        proc.wait_quiet()
-        assert "hello-from-pty" not in proc.screen_text()
-        proc.send("\x1b[19~")  # F8
-        assert proc.wait_for("hello-from-pty"), "the terminal did not run the command:\n" + proc.screen_text()
-        proc.shot("40-terminal")
-    finally:
-        proc.close()
-
-
-@check
-def terminal_takes_the_keyboard(m, path):
-    """Typing goes to the shell while the panel has focus; Shift+F8 closes it."""
-    work = os.path.join(SHOT_DIR, "work-term-keys")
-    shutil.rmtree(work, ignore_errors=True)
-    os.makedirs(work)
-    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
-        f.write("[terminal]\nheight = 8\n")
-    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
-        f.write("hello\nworld\n")
-
-    proc = Mibi(["notes.txt"], cwd=work)
-    try:
-        assert proc.wait_for("hello"), "editor did not start"
-        proc.wait_quiet()
-        proc.send("\x1b[19~")  # F8: open the panel and give it the keyboard
-        proc.wait_quiet()
-        proc.send("echo typed-in-terminal\r")
-        assert proc.wait_for("typed-in-terminal"), "keys did not reach the shell:\n" + proc.screen_text()
-        assert "typed-in-terminal" not in proc.screen_text().splitlines()[1], "the editor got the keys"
-
-        # The shell's window follows the panel when the console is resized.
-        proc.resize(30, 100)
-        proc.wait_quiet()
-        assert "typed-in-terminal" in proc.screen_text(), "the panel vanished on resize"
-        proc.resize(24, 80)
-        proc.wait_quiet()
-
-        # F8 hands the keyboard back to the editor; clicking the panel takes it
-        # back. The panel starts at row 16 of 24 with height 8.
-        proc.send("\x1b[19~")
-        proc.wait_quiet()
-        proc.send("Z")
-        proc.wait_quiet()
-        assert "Z" in proc.screen_text().splitlines()[1], "the editor did not get the keyboard back"
-        proc.send("\x1b[<0;6;18M")
-        proc.send("\x1b[<0;6;18m")
-        proc.wait_quiet()
-        proc.send("echo back-to-shell\r")
-        assert proc.wait_for("back-to-shell"), "the panel click did not focus the terminal"
-        lines = proc.screen_text().splitlines()
-        assert any("back-to-shell" in ln for ln in lines[15:]), f"the shell output is not in the panel:\n" + "\n".join(lines)
-        assert "back-to-shell" not in lines[1], "the editor got keys meant for the shell"
-
-        # Shift+F8 closes the panel; the file text is still on screen.
-        proc.send("\x1b[19;2~")
-        proc.wait_quiet()
-        screen = proc.screen_text()
-        assert "hello" in screen, "the editor is gone after closing the terminal"
-        assert "typed-in-terminal" not in screen, f"the panel is still there:\n{screen}"
-        proc.shot("41-terminal-keys")
-    finally:
-        proc.close()
+def f8_does_nothing(m, path):
+    """F8 is gone: it must not open a panel, a shell or a status-bar pill."""
+    m.wait_quiet()
+    before = m.screen_text()
+    m.send("\x1b[19~")  # F8
+    m.wait_quiet(settle=0.4)
+    time.sleep(0.3)
+    after = m.screen_text()
+    assert m.alive(), "the editor died on F8"
+    assert "cmd.exe" not in after.lower(), f"F8 started a shell:\n{after}"
+    assert "cmd.exe" not in m.screen.title.lower(), f"F8 set a shell title: {m.screen.title!r}"
+    assert ">_" not in after, f"an F8 terminal pill is still on the status bar: {after.splitlines()[-1]!r}"
+    assert after == before, (
+        "F8 changed the screen:\n--- before ---\n" + before + "\n--- after ---\n" + after)
+    m.shot("60-f8-nothing")
 
 
 @check
@@ -784,101 +775,11 @@ def drag_selects_text(m, path):
 
 
 @check
-def terminal_select_copies_and_pastes(m, path):
-    """Dragging in the terminal copies, and the register holds the text."""
-    work = os.path.join(SHOT_DIR, "work-term-copy")
-    shutil.rmtree(work, ignore_errors=True)
-    os.makedirs(work)
-    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
-        f.write("[terminal]\ncommand = cmd.exe\nheight = 10\n")
-    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
-        f.write("hello\nworld\n")
-
-    proc = Mibi(["notes.txt"], cwd=work)
-    try:
-        assert proc.wait_for("hello"), "editor did not start"
-        proc.wait_quiet()
-        proc.send("\x1b[19~")  # F8
-        proc.wait_quiet()
-        proc.send("echo hello-from-pty\r")
-        assert proc.wait_for("hello-from-pty"), "the shell did not echo:\n" + proc.screen_text()
-        proc.wait_quiet()
-
-        lines = proc.screen_text().splitlines()
-        row = next(i for i, ln in enumerate(lines) if "hello-from-pty" in ln)
-        screen_row = row + 1
-        # Drag across the output row inside the panel: press, motion, release.
-        proc.proc.write(f"\x1b[<0;2;{screen_row}M")
-        proc.wait_quiet()
-        proc.proc.write(f"\x1b[<32;20;{screen_row}M")
-        proc.wait_quiet()
-        proc.proc.write(f"\x1b[<0;20;{screen_row}m")
-        proc.wait_quiet()
-        status = proc.screen_text().splitlines()[-1]
-        assert "copied" in status, f"no copy notice after the drag: {status!r}"
-
-        # Back to the editor and paste: the register must hold the shell text.
-        proc.send("\x1b[19~")
-        proc.wait_quiet()
-        proc.send("\x16")  # Ctrl+V
-        proc.wait_quiet()
-        lines = proc.screen_text().splitlines()
-        assert "hello-from-pty" in lines[1], f"the copy did not reach the register:\n" + "\n".join(lines)
-        proc.shot("43-terminal-copy")
-    finally:
-        proc.close()
-
-
-@check
-def terminal_scrollback_scrolls(m, path):
-    """The wheel and Shift+PgUp walk the terminal back; a key returns to live."""
-    work = os.path.join(SHOT_DIR, "work-term-scroll")
-    shutil.rmtree(work, ignore_errors=True)
-    os.makedirs(work)
-    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
-        f.write("[terminal]\ncommand = cmd.exe\nheight = 10\n")
-    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
-        f.write("hello\n")
-
-    proc = Mibi(["notes.txt"], cwd=work)
-    try:
-        assert proc.wait_for("hello"), "editor did not start"
-        proc.wait_quiet()
-        proc.send("\x1b[19~")  # F8
-        proc.wait_quiet()
-        # Fill more lines than the panel holds, so there is a scrollback.
-        proc.send("for /l %i in (1,1,60) do @echo line%i\r")
-        assert proc.wait_for("line60"), "the shell produced no output:\n" + proc.screen_text()
-        proc.wait_quiet()
-        assert "line60" in proc.screen_text()
-
-        # The wheel over the panel walks back in time.
-        for _ in range(4):
-            proc.proc.write("\x1b[<64;6;18M")
-        proc.wait_quiet()
-        screen = proc.screen_text()
-        assert "lines" in screen, f"no scrollback indicator in the panel title:\n{screen}"
-        assert "line60" not in screen, f"the wheel did not scroll the terminal:\n{screen}"
-
-        # Shift+PgUp goes further back, Shift+End returns to live.
-        proc.send("\x1b[5;2~")
-        proc.wait_quiet()
-        proc.send("\x1b[1;2F")
-        proc.wait_quiet()
-        assert "line60" in proc.screen_text(), "Shift+End did not return to the live screen"
-        proc.shot("44-terminal-scroll")
-    finally:
-        proc.close()
-
-
-@check
 def global_keys_work_with_the_tree_focused(m, path):
     """F-keys still reach the editor while the file tree has the focus."""
     work = os.path.join(SHOT_DIR, "work-tree-keys")
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work)
-    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
-        f.write("[terminal]\ncommand = cmd.exe\nheight = 8\n")
     with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
         f.write("hello\nworld\n")
     proc = Mibi(["notes.txt"], cwd=work)
@@ -887,8 +788,13 @@ def global_keys_work_with_the_tree_focused(m, path):
         proc.wait_quiet()
         proc.send("\x02")  # Ctrl+B: the tree takes the keyboard
         proc.wait_quiet()
-        proc.send("\x1b[19~")  # F8 must still open the terminal
-        assert proc.wait_for("cmd.exe"), "F8 was swallowed by the tree:\n" + proc.screen_text()
+        assert "notes.txt" in proc.screen_text(), "the tree did not open"
+        # F9 and F1 are global actions: they must work even though the tree owns
+        # the keyboard.
+        proc.send("\x1b[20~")  # F9: reload an unchanged file
+        assert proc.wait_for("up to date"), "F9 was swallowed by the tree:\n" + proc.screen_text()
+        proc.send("\x1bOP")  # F1
+        assert proc.wait_for("mibi controls"), "F1 was swallowed by the tree:\n" + proc.screen_text()
         proc.shot("45-tree-keys")
     finally:
         proc.close()
@@ -983,44 +889,6 @@ def conflicted_file_is_flagged_and_reloads(m, path):
 
 
 @check
-def terminal_chevron_and_status_button(m, path):
-    """The chevron collapses the panel; the status-bar button brings it back."""
-    work = os.path.join(SHOT_DIR, "work-term-collapse")
-    shutil.rmtree(work, ignore_errors=True)
-    os.makedirs(work)
-    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
-        f.write("[terminal]\ncommand = cmd.exe\nheight = 8\n")
-    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
-        f.write("hello\nworld\n")
-    proc = Mibi(["notes.txt"], cwd=work)
-    try:
-        assert proc.wait_for("hello"), "editor did not start"
-        proc.wait_quiet()
-        proc.send("\x1b[19~")  # F8
-        assert proc.wait_for("cmd.exe"), "the panel did not open"
-        proc.wait_quiet()
-        lines = proc.screen_text().splitlines()
-        title_row = next(i for i, ln in enumerate(lines) if "cmd.exe" in ln)
-        # The chevron sits at the last-but-one column of the title strip.
-        proc.send(f"\x1b[<0;79;{title_row + 1}M")
-        proc.send(f"\x1b[<0;79;{title_row + 1}m")
-        proc.wait_quiet()
-        assert "cmd.exe" not in proc.screen_text(), "the chevron did not collapse the panel"
-        assert "hello" in proc.screen_text(), "the editor did not get the rows back"
-
-        # The status bar has a terminal button next to the help pill.
-        status = proc.screen_text().splitlines()[-1]
-        assert ">_" in status, f"no terminal button in the status bar: {status!r}"
-        col = status.index(">_") + 2
-        proc.send(f"\x1b[<0;{col};24M")
-        proc.send(f"\x1b[<0;{col};24m")
-        assert proc.wait_for("cmd.exe"), "the status button did not bring the panel back"
-        proc.shot("49-collapse")
-    finally:
-        proc.close()
-
-
-@check
 def shift_wheel_scrolls_sideways(m, path):
     """Shift + wheel scrolls the editor horizontally."""
     work = os.path.join(SHOT_DIR, "work-hscroll")
@@ -1068,65 +936,20 @@ def status_message_survives_mouse_motion(m, path):
 
 
 @check
-def terminal_cursor_blinks(m, path):
-    """The terminal cursor blinks while the panel has the keyboard."""
-    os.environ["MIBI_NO_BLINK"] = "0"  # the harness sets it to 1 by default
-    work = os.path.join(SHOT_DIR, "work-term-blink")
-    shutil.rmtree(work, ignore_errors=True)
-    os.makedirs(work)
-    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
-        f.write("[terminal]\ncommand = cmd.exe\nheight = 8\n")
-    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
-        f.write("hello\n")
-    proc = Mibi(["notes.txt"], cwd=work)
-    try:
-        assert proc.wait_for("hello"), "editor did not start"
-        proc.wait_quiet()
-        proc.send("\x1b[19~")
-        assert proc.wait_for("cmd.exe"), "the panel did not open"
-        proc.wait_quiet()
-        lines = proc.screen_text().splitlines()
-        prompt = next(i for i, ln in enumerate(lines) if ">" in ln and i > 10)
-        seen = set()
-        for _ in range(6):
-            row = [proc.screen.bg_at(prompt, c) for c in range(0, 78)]
-            seen.add(tuple(row))
-            time.sleep(0.3)
-        assert len(seen) > 1, "the terminal cursor never blinked"
-        proc.shot("51-blink")
-    finally:
-        os.environ.setdefault("MIBI_NO_BLINK", "1")
-        proc.close()
-
-
-@check
-def terminal_output_fits_the_panel(m, path):
-    """The shell wraps at the panel's inner width, so no column is cut off."""
-    work = os.path.join(SHOT_DIR, "work-term-fit")
-    shutil.rmtree(work, ignore_errors=True)
-    os.makedirs(work)
-    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
-        f.write("[terminal]\ncommand = cmd.exe\nheight = 8\n")
-    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
-        f.write("hello\n")
-    proc = Mibi(["notes.txt"], cwd=work)
-    try:
-        assert proc.wait_for("hello"), "editor did not start"
-        proc.wait_quiet()
-        proc.send("\x1b[19~")
-        assert proc.wait_for("cmd.exe"), "the panel did not open"
-        proc.wait_quiet()
-        # 80 characters: with the panel's inner width (78 in an 80-column
-        # window) the shell must wrap them, not lose the last two.
-        proc.send("echo " + "y" * 80 + "\r")
-        assert proc.wait_for("yyyyyyyyyy"), "no output"
-        proc.wait_quiet()
-        screen = proc.screen_text()
-        total = screen.count("y")
-        assert total >= 79, f"the shell lost columns: {total} of 80 'y' on screen\n{screen}"
-        proc.shot("52-term-fit")
-    finally:
-        proc.close()
+def status_message_expires(m, path):
+    """A status message ages out after a few seconds without input."""
+    m.send("\x1b[20~")  # F9 on an unchanged file reports "already up to date"
+    assert m.wait_for("up to date"), "no status message to test with:\n" + m.screen_text()
+    # No input from here on: the idle tick has to clear it by itself.
+    deadline = time.time() + 8
+    while time.time() < deadline and "up to date" in m.screen_text():
+        time.sleep(0.2)
+    screen = m.screen_text()
+    assert "up to date" not in screen, f"the status message never expired:\n{screen}"
+    assert m.alive(), "the editor died while the message expired"
+    status = screen.splitlines()[-1]
+    assert "mibi" in status, f"the status bar was damaged: {status!r}"
+    m.shot("64-message-expired")
 
 
 @check
@@ -1224,6 +1047,61 @@ def status_bar_fills_the_last_cell(m, path):
     bg = m.screen.bg_at(row, m.screen.cols - 1)
     assert bg is not None, "bottom-right cell has no background"
     m.shot("22-status-edge")
+
+
+def _unpainted_cells(screen):
+    """Every (row, col) whose background is still the terminal's own."""
+    return [(r, c) for r in range(screen.rows) for c in range(screen.cols)
+            if screen.bg_at(r, c) is None]
+
+
+def _assert_fully_painted(proc, what):
+    """Fail unless every cell of the frame has a background of its own.
+
+    An unpainted cell shows the terminal's own background, which is the
+    "unpainted block" the screen checks exist to catch.
+    """
+    # Let the first full frame (and any repaint after opening the tree) land.
+    proc.wait_quiet()
+    time.sleep(0.2)
+    proc.wait_quiet()
+    screen = proc.screen
+    for label, row in (("tab bar", 0), ("status bar", screen.rows - 1)):
+        gaps = [c for c in range(screen.cols) if screen.bg_at(row, c) is None]
+        if gaps:
+            raise AssertionError(
+                f"{what}: the {label} has {len(gaps)} unpainted cells (columns {gaps[:8]})")
+    missing = _unpainted_cells(screen)
+    if missing:
+        raise AssertionError(
+            f"{what}: {len(missing)} of {screen.rows * screen.cols} cells have no background "
+            f"(first: {missing[:8]}) - the terminal's own background shows through")
+
+
+@check
+def chrome_is_fully_painted(m, path):
+    """No window size leaves a cell unpainted: the whole frame gets a colour."""
+    work = os.path.join(SHOT_DIR, "work-chrome")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello\nworld\n")
+
+    for rows, cols in ((20, 40), (24, 80), (30, 120)):
+        for tree in (False, True):
+            what = f"{cols}x{rows}" + (" with tree" if tree else "")
+            proc = Mibi(["notes.txt"], cwd=work, rows=rows, cols=cols)
+            try:
+                assert proc.wait_for("hello"), f"{what}: editor did not start"
+                proc.wait_quiet()
+                if tree:
+                    proc.send("\x02")  # Ctrl+B: the file tree takes a column
+                    proc.wait_quiet()
+                    assert "notes.txt" in proc.screen_text(), f"{what}: the tree did not open"
+                _assert_fully_painted(proc, what)
+                proc.shot("63-chrome-" + what.replace(" ", "-"))
+            finally:
+                proc.close()
 
 
 @check
@@ -1704,6 +1582,72 @@ def save_writes_disk(m, path):
 
 
 @check
+def editor_survives_stress(m, path):
+    """Typing, splitting, resizing, reloading and saving keep the editor alive."""
+    work = os.path.join(SHOT_DIR, "work-stress")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    target = os.path.join(work, "notes.txt")
+    with open(target, "w", encoding="utf-8") as f:
+        f.write("hello\nworld\n")
+    typed = ("0123456789abcdef" * 10)[:150]
+
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        # Type in bursts, the way a fast keyboard (or a paste) delivers bytes.
+        for i in range(0, len(typed), 30):
+            proc.proc.write(typed[i:i + 30])
+            time.sleep(0.05)
+        proc.wait_quiet()
+        assert proc.alive(), "the editor died while typing"
+        assert "[+]" in proc.screen_text(), "the typed text did not dirty the buffer"
+
+        proc.send("\x1b[15~")  # F5: split into two panes
+        proc.wait_quiet()
+        assert "\u2502" in proc.screen_text(), "F5 did not split the panes"
+
+        proc.resize(30, 100)  # a bigger window, then back to the original size
+        assert proc.wait_for("100x30", timeout=5), "the resize was not applied"
+        proc.resize(24, 80)
+        assert proc.wait_for("80x24", timeout=5), "the second resize was not applied"
+
+        proc.send("\x1b[20~")  # F9 on a dirty buffer only warns
+        proc.wait_quiet()
+        assert "unsaved edits" in proc.screen_text(), "F9 did not warn about the unsaved text"
+
+        proc.send("\x13")  # Ctrl+S: save the typed text
+        proc.wait_quiet()
+        time.sleep(0.3)
+        assert "[+]" not in proc.screen_text(), "the buffer stayed dirty after Ctrl+S"
+
+        proc.send("\x1b[15;2~")  # Shift+F5: close the split pane
+        proc.wait_quiet()
+        assert proc.alive(), "the editor died closing the pane"
+        # The 155-column first line scrolled the view right, which hides short
+        # lines; go home to see the untouched second line again.
+        proc.send("\x1b[H")  # Home
+        proc.wait_quiet()
+        screen = proc.screen_text()
+        assert "world" in screen, f"the second line is gone:\n{screen}"
+        proc.send("\x1b[F")  # End: the tail of the first line is back in view
+        proc.wait_quiet()
+        screen = proc.screen_text()
+        assert "hello" in screen, f"the first line lost its text:\n{screen}"
+        status = screen.splitlines()[-1]
+        assert "mibi" in status, f"the status bar is gone: {status!r}"
+        proc.shot("65-stress")
+    finally:
+        proc.close()
+
+    with open(target, encoding="utf-8") as f:
+        saved = f.read()
+    assert typed in saved, f"the typed text was not saved ({len(saved)} bytes on disk)"
+    assert "hello" in saved and "world" in saved, f"the file lost its original text: {saved!r}"
+
+
+@check
 def quit_saves_nothing_and_exits(m, path):
     """A second Ctrl+Q after a dirty edit asks again; y exits."""
     m.send("!")
@@ -1747,7 +1691,10 @@ def main():
             f.write('const std = @import("std");\n\npub fn main() void {\n    const x = 1; // note\n}\n')
         m = Mibi(["notes.txt"], cwd=tmpdir)
         try:
-            if not m.wait_for("hello"):
+            # The first frame can take a while on a busy machine (ConPTY spawn
+            # plus a cold start), and every check needs it, so wait generously
+            # instead of failing the check on a slow spawn.
+            if not m.wait_for("hello", timeout=15):
                 raise AssertionError("startup timed out:\n" + m.screen_text())
             m.wait_quiet()
             fn(m, path)
