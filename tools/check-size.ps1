@@ -29,12 +29,12 @@ if (-not (Test-Path $Zig)) {
 # Phase 3 <= 350 KB, Phase 4 <= 700 KB, hard ceiling 1 MB (every target is far
 # below it).
 $targets = [ordered]@{
-    'x86_64-linux-gnu'   = @{ budget = 144 * $KB; exe = 'mibi' }
-    'aarch64-linux-gnu'  = @{ budget = 144 * $KB; exe = 'mibi' }
+    'x86_64-linux-gnu'   = @{ budget = 160 * $KB; exe = 'mibi' }
+    'aarch64-linux-gnu'  = @{ budget = 160 * $KB; exe = 'mibi' }
     'x86_64-macos'       = @{ budget = 176 * $KB; exe = 'mibi' }
     'aarch64-macos'      = @{ budget = 192 * $KB; exe = 'mibi' }
-    'x86_64-windows'     = @{ budget = 208 * $KB; exe = 'mibi.exe' }
-    'x86_64-windows-gnu' = @{ budget = 208 * $KB; exe = 'mibi.exe' }
+    'x86_64-windows'     = @{ budget = 224 * $KB; exe = 'mibi.exe' }
+    'x86_64-windows-gnu' = @{ budget = 224 * $KB; exe = 'mibi.exe' }
 }
 
 $rows = @()

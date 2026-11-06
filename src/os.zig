@@ -476,7 +476,7 @@ fn runUnix(
     }
     try vec.append(allocator, null);
 
-    const pid = std.c.fork();
+    const pid = fork();
     if (pid < 0) return error.SpawnFailed;
     if (pid == 0) {
         // Child: redirect and exec.
@@ -491,7 +491,8 @@ fn runUnix(
             _ = std.c.dup2(fd_out, 2);
             _ = std.c.close(fd_out);
         }
-        _ = std.c.execv(vec.items[0].?, @ptrCast(vec.items.ptr));
+        const argv_ptr: [*:null]const ?[*:0]const u8 = @ptrCast(vec.items.ptr);
+        _ = execvp(vec.items[0].?, argv_ptr);
         std.c._exit(127);
     }
 
@@ -500,18 +501,22 @@ fn runUnix(
     const deadline: u64 = @as(u64, timeout_ms);
     var waited: u64 = 0;
     while (true) {
-        const r = std.c.waitpid(pid, &status, 1); // WNOHANG
+        const r = waitpid(pid, &status, WNOHANG);
         if (r == pid) {
-            result.exit_code = if (std.c.W.IFEXITED(status)) @intCast(std.c.W.EXITSTATUS(status)) else -1;
+            // WIFEXITED/WEXITSTATUS without std.c.W's u32 signature.
+            const normal = (@as(u32, @bitCast(status)) & 0x7f) == 0;
+            result.exit_code = if (normal) @intCast((@as(u32, @bitCast(status)) >> 8) & 0xff) else -1;
             return result;
         }
         if (waited >= deadline) {
-            _ = std.c.kill(pid, 9);
-            _ = std.c.waitpid(pid, &status, 0);
+            _ = kill(pid, SIGKILL);
+            _ = waitpid(pid, &status, 0);
             result.timed_out = true;
             return result;
         }
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        // A short sleep without std.Thread (which needs std.Io in 0.16).
+        var ts = std.c.timespec{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
         waited += 10;
     }
 }
@@ -572,6 +577,13 @@ pub fn dataDirAlloc(allocator: std.mem.Allocator) ![]u8 {
     } else |_| {}
     return allocator.dupe(u8, ".");
 }
+
+extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn fork() c_int;
+extern "c" fn waitpid(pid: c_int, status: *c_int, options: c_int) c_int;
+extern "c" fn kill(pid: c_int, sig: c_int) c_int;
+const WNOHANG: c_int = 1;
+const SIGKILL: c_int = 9;
 
 const macos = struct {
     extern "c" fn _NSGetExecutablePath(buf: [*]u8, size: *u32) c_int;
