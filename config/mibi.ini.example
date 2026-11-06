@@ -54,7 +54,7 @@ syntax = true
 ; move_down move_left move_right move_word_left move_word_right move_home
 ; move_end page_up page_down theme_picker command_palette split_columns
 ; split_rows close_pane add_cursor_below add_cursor_above next_pane prev_pane
-; format toggle_terminal close_terminal
+; format toggle_terminal close_terminal reload_file
 ; ctrl+n = new_tab
 ; f2 = save
 ; ctrl+shift+left = move_word_left

@@ -47,7 +47,7 @@ const help_rows = [_]HelpRow{
     .{ .actions = &.{ .find, .find_next, .find_prev }, .desc = "find / next / previous" },
     .{ .actions = &.{.replace}, .desc = "replace" },
     .{ .actions = &.{.goto}, .desc = "go to line[:col]" },
-    .{ .actions = &.{.save}, .desc = "save" },
+    .{ .actions = &.{ .save, .reload_file }, .desc = "save / reload from disk" },
     .{ .actions = &.{.open}, .desc = "open file picker" },
     .{ .actions = &.{.theme_picker}, .desc = "theme picker (live preview)" },
     .{ .actions = &.{.command_palette}, .desc = "command palette" },
@@ -169,6 +169,15 @@ const Session = struct {
     /// goes to it instead of the editor.
     terminal: ?terminal_mod.Terminal = null,
     terminal_focus: bool = false,
+    /// The panel can be collapsed with the chevron in its title row and brought
+    /// back from the status bar; the shell keeps running while it is hidden.
+    terminal_open: bool = false,
+    /// Hit boxes for the title-row chevron and the two status-bar pills.
+    term_chevron_x: u16 = 0xFFFF,
+    term_chevron_hover: bool = false,
+    help_pill_hover: bool = false,
+    help_pill_x: u16 = 0xFFFF,
+    term_pill_x: u16 = 0xFFFF,
     /// Terminal selection, in content cells (0,0 = first content row/column).
     /// A drag inside the panel selects, and releasing copies.
     term_sel_anchor: ?[2]u16 = null,
@@ -614,6 +623,11 @@ fn run(init: std.process.Init.Minimal) !void {
     term.installCloseHandler(saveSessionOnClose);
     var last_save_ms = os.ticksMs();
     var last_housekeeping = os.ticksMs();
+    var last_blink: u64 = (os.ticksMs() / 500) % 2;
+    if (os.getEnvAlloc(allocator, "MIBI_NO_BLINK")) |v| {
+        blink_enabled = v.len == 0 or v[0] == '0';
+        allocator.free(v);
+    } else |_| {}
     var unsaved = false;
     var input: [256]u8 = undefined;
     var msg_buf: [96]u8 = undefined;
@@ -653,8 +667,11 @@ fn run(init: std.process.Init.Minimal) !void {
         // console is resized or the panel is opened.
         if (session.terminal) |*t| {
             const g = terminalRect(&session, now.cols, now.rows);
-            const want_cols: u16 = @intCast(@max(g.w, 20));
-            const want_rows: u16 = @intCast(@max(g.h - 1, 3));
+            // The padding belongs to the panel, not to the shell: the child is
+            // sized to the inner width so no column of its output is cut off.
+            const pad: usize = @min(session.config.terminal_padding, g.w / 4);
+            const want_cols: u16 = @intCast(@max(g.w - 2 * pad, 1));
+            const want_rows: u16 = @intCast(@max(g.h - 1, 1));
             if (want_cols != t.vt.cols() or want_rows != t.vt.rows()) {
                 t.resize(want_cols, want_rows) catch {};
                 needs_redraw = true;
@@ -686,7 +703,7 @@ fn run(init: std.process.Init.Minimal) !void {
             var title_buf: [160]u8 = undefined;
             const title = std.fmt.bufPrint(&title_buf, "mibi - {s}{s}", .{
                 name,
-                if (ed.dirty) " [+]" else "",
+                if (ed.conflict) " [!]" else if (ed.dirty) " [+]" else "",
             }) catch "mibi";
             if (!std.mem.eql(u8, title, last_title[0..last_title_len])) {
                 const n = @min(title.len, last_title.len);
@@ -703,10 +720,18 @@ fn run(init: std.process.Init.Minimal) !void {
             needs_redraw = false;
         }
 
-        const extra: ?term.ExtraHandle = if (session.terminal) |*t| t.outputHandle() else null;
-        // A visible terminal is pumped often so its output feels live; without
-        // one the loop only needs to wake for the idle tick.
-        const wait_ms: u32 = if (extra != null) 100 else term.IDLE_MS;
+        // The shell's output is pumped on every turn of the loop. Waiting on
+        // the ConPTY pipe itself is not an option on Windows: that handle stays
+        // signalled while the pipe is empty, which turns the wait into a busy
+        // loop (it burned ~60% of a core). A short timeout instead gives the
+        // panel ~33 frames a second, which is plenty for a terminal, and Unix
+        // keeps the extra descriptor because poll() is trustworthy there.
+        const term_visible = session.terminal != null and session.terminal_open;
+        const extra: ?term.ExtraHandle = if (term_visible and !os.is_windows)
+            session.terminal.?.outputHandle()
+        else
+            null;
+        const wait_ms: u32 = if (term_visible) 30 else term.IDLE_MS;
         const read = try term.readInput(&input, extra, wait_ms);
         if (read.extra) {
             zero_reads = 0;
@@ -714,6 +739,11 @@ fn run(init: std.process.Init.Minimal) !void {
                 if (t.pump()) needs_redraw = true;
             }
             continue;
+        }
+        if (term_visible) {
+            if (session.terminal) |*t| {
+                if (t.pump()) needs_redraw = true;
+            }
         }
         const n = read.n;
         if (n == 0) {
@@ -738,6 +768,18 @@ fn run(init: std.process.Init.Minimal) !void {
             if (term.takeIdle()) {
                 zero_reads = 0;
                 const now_ms = os.ticksMs();
+                // The terminal cursor blinks, and a status message ages out.
+                if (session.terminal != null and session.terminal_open and session.terminal_focus and blink_enabled) {
+                    const phase = (now_ms / 500) % 2;
+                    if (phase != last_blink) {
+                        last_blink = phase;
+                        needs_redraw = true;
+                    }
+                }
+                if (msg.len > 0 and now_ms - g_msg_ms >= 4000) {
+                    msg = "";
+                    needs_redraw = true;
+                }
                 if (now_ms - last_housekeeping >= term.IDLE_MS) {
                     last_housekeeping = now_ms;
                     if (refreshFromDisk(&session, &msg_buf, &msg)) {
@@ -758,7 +800,6 @@ fn run(init: std.process.Init.Minimal) !void {
         @memcpy(pending[pending_len .. pending_len + n], input[0..n]);
         pending_len += n;
 
-        msg = "";
         needs_redraw = true;
         const view_rows = viewRows(screen.rows);
         // Consume whole tokens. A prompt can close in the middle of a chunk
@@ -767,6 +808,9 @@ fn run(init: std.process.Init.Minimal) !void {
         while (off < pending_len and running) {
             if (session.quit_requested) break;
             const chunk = pending[off..pending_len];
+            // A status message is cleared by typing, not by mouse motion: the
+            // pointer moves constantly and used to wipe messages instantly.
+            if (!isMouseReport(chunk)) msg = "";
             // The terminal owns the keyboard while it has focus: its keys go
             // to the shell, not to the editor. Mouse reports are the exception:
             // they belong to the mouse handler, which routes clicks inside the
@@ -1088,10 +1132,17 @@ fn loadSession(allocator: std.mem.Allocator, exe_dir: ?[]const u8, registry: *sy
     return true;
 }
 
+/// When the status message was last set, so the loop can age it out.
+var g_msg_ms: u64 = 0;
+
+/// False when `MIBI_NO_BLINK` is set: no cursor blinking (tests, recordings).
+var blink_enabled: bool = true;
+
 fn setMsg(buf: []u8, out: *[]const u8, text: []const u8) void {
     const n = @min(buf.len, text.len);
     @memcpy(buf[0..n], text[0..n]);
     out.* = buf[0..n];
+    g_msg_ms = os.ticksMs();
 }
 
 /// `prefix: ErrorName` in the status line, e.g. "Save failed: AccessDenied".
@@ -1186,6 +1237,16 @@ fn parseMouse(params: []const u8) [3]u16 {
 /// Mouse in the editor: click the tab bar to switch tabs, click the status-bar
 /// hint to toggle help, click text to place the cursor. The wheel moves one
 /// line per notch.
+/// The keyboard has exactly one owner: the editor, the file tree, or the
+/// terminal panel. Setting one clears the others, so a stale flag can never
+/// keep swallowing the arrow keys after the pointer moved somewhere else.
+const Focus = enum { editor, tree, terminal };
+
+fn setFocus(session: *Session, who: Focus) void {
+    session.tree_focus = who == .tree;
+    session.terminal_focus = who == .terminal;
+}
+
 fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, prompt: *?Prompt, msg_buf: []u8, msg: *[]const u8) void {
     // Closing the last tab empties the session; the run loop quits right after,
     // so any further event in the same chunk must not touch the editor.
@@ -1294,6 +1355,16 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
         }
     }
     const size = term.size();
+    // The chevron at the end of the terminal title collapses the panel. It is
+    // checked before the panel's own press handling, which owns the rest of the
+    // panel's rows.
+    if (session.terminal != null and session.terminal_open and session.term_chevron_x != 0xFFFF and y > 0 and x > 0) {
+        const g = terminalRect(session, size.cols, size.rows);
+        if (y - 1 == g.y and x - 1 == session.term_chevron_x) {
+            collapseTerminal(session);
+            return;
+        }
+    }
     // The terminal panel owns its rows: a click focuses it and starts a
     // selection, dragging extends it and releasing copies, right click pastes,
     // the wheel scrolls the scrollback. None of it disturbs the editor.
@@ -1309,12 +1380,12 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
                 return;
             }
             if (button == 2 and final == 'M') { // right click: paste
-                session.terminal_focus = true;
+                setFocus(session, .terminal);
                 terminalPaste(session);
                 return;
             }
             if (button == 0 and final == 'M') { // press: focus, start selecting
-                session.terminal_focus = true;
+                setFocus(session, .terminal);
                 session.term_press = true;
                 if (terminalCellAt(session, size.cols, size.rows, x, y)) |cell| {
                     session.term_sel_anchor = cell;
@@ -1355,6 +1426,10 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
     // Releasing the button ends the drag (and keeps the selection).
     if (final == 'm' and session.press_text) {
         session.press_text = false;
+        return;
+    }
+    if (button == 68 or button == 69) { // shift + wheel: scroll sideways
+        hscroll(session, if (button == 68) -4 else 4);
         return;
     }
     if (button == 64 or button == 65) { // wheel up / down
@@ -1400,6 +1475,17 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
                 }
             }
         }
+        // The status-bar pills and the panel chevron light up under the pointer.
+        session.help_pill_hover = false;
+        session.term_chevron_hover = false;
+        if (button == 35 and x > 0) {
+            const col = @as(usize, x) - 1;
+            session.help_pill_hover = y == size.rows and session.help_pill_x != 0xFFFF and col >= session.help_pill_x;
+            if (session.terminal != null and session.terminal_open and y > 0 and session.term_chevron_x != 0xFFFF) {
+                const g = terminalRect(session, size.cols, size.rows);
+                session.term_chevron_hover = (y - 1 == g.y and col == session.term_chevron_x);
+            }
+        }
         if (button == 35) return;
     }
 
@@ -1417,7 +1503,7 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
             if (idx < t.count()) {
                 const was = idx == t.selected;
                 t.selected = idx;
-                session.tree_focus = true;
+                setFocus(session, .tree);
                 if (was) openTreeSelection(session, msg_buf, msg);
             }
             return;
@@ -1437,9 +1523,19 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
         return;
     }
 
-    // Status line: the right-hand help hint toggles the panel.
-    if (y == size.rows and size.cols > 10 and x + 10 > size.cols) {
-        help.* = !help.*;
+    // Status line: the two pills on the right are buttons - the terminal
+    // button brings the panel up (or takes the keyboard) and the help hint
+    // toggles the panel.
+    if (y == size.rows) {
+        const col = if (x > 0) @as(usize, x) - 1 else 0;
+        if (session.help_pill_x != 0xFFFF and col >= session.help_pill_x) {
+            help.* = !help.*;
+            return;
+        }
+        if (session.term_pill_x != 0xFFFF and col >= session.term_pill_x) {
+            showTerminal(session, msg_buf, msg);
+            return;
+        }
         return;
     }
 
@@ -1449,7 +1545,7 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
     const sy = @as(usize, y) - 1;
     const node = paneUnder(session, x, y) orelse return;
     session.focusPane(node);
-    session.terminal_focus = false; // the click went to the editor
+    setFocus(session, .editor); // the click went to the editor
     const rect = session.panes.rectOf(node) orelse return;
     const target = session.current();
     const gutter: usize = if (session.config.line_numbers) digits(target.lineCount()) + 1 else 0;
@@ -1476,6 +1572,27 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
     }
 }
 
+/// Shift+wheel: scroll the focused pane sideways. The cursor is moved into the
+/// new view, because the next frame's scrollToCursor would otherwise undo the
+/// scroll (it keeps the cursor visible, which is the whole point).
+fn hscroll(session: *Session, delta: isize) void {
+    const ed = session.current();
+    const sz = term.size();
+    const gutter: usize = if (session.config.line_numbers) digits(ed.lineCount()) + 1 else 0;
+    const text_cols: usize = if (sz.cols > gutter + 1) @as(usize, sz.cols) - gutter - 1 else 0;
+    const cur: isize = @intCast(ed.scroll_col);
+    var want = cur + delta;
+    if (want < 0) want = 0;
+    ed.scroll_col = @intCast(want);
+    const rc = ed.rowCol();
+    const dcol = ed.cursorDisplayCol();
+    if (dcol < ed.scroll_col) {
+        ed.gotoLineCol(rc.row, ed.scroll_col);
+    } else if (text_cols > 0 and dcol >= ed.scroll_col + text_cols) {
+        ed.gotoLineCol(rc.row, ed.scroll_col + text_cols - 1);
+    }
+}
+
 /// Housekeeping on an idle tick: the file tree follows the disk, and clean
 /// buffers reload when their file changes underneath us.
 // --- embedded terminal -----------------------------------------------------
@@ -1491,7 +1608,7 @@ fn terminalPanelRows(session: *Session, rows: u16) usize {
 
 /// The same, but zero while no terminal is open, so the panes get the room.
 fn terminalRows(session: *Session, rows: u16) usize {
-    if (session.terminal == null) return 0;
+    if (session.terminal == null or !session.terminal_open) return 0;
     return terminalPanelRows(session, rows);
 }
 
@@ -1525,11 +1642,31 @@ fn terminalRect(session: *Session, cols: u16, rows: u16) TermRect {
 /// F8: start the shell the first time, then hand the keyboard back and forth.
 fn toggleTerminal(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
     if (session.terminal != null) {
+        // A shell that exited stays on screen with its last output; F8 starts a
+        // fresh one instead of focusing a dead panel.
+        if (session.terminal.?.exited() != null) {
+            restartTerminal(session, msg_buf, msg);
+            return;
+        }
+        if (!session.terminal_open) {
+            session.terminal_open = true;
+            setFocus(session, .terminal);
+            return;
+        }
         // No status message: the panel title already shows where the keyboard
         // is, and the status line is for the editor's own news.
-        session.terminal_focus = !session.terminal_focus;
+        if (session.terminal_focus) {
+            setFocus(session, .editor);
+        } else {
+            setFocus(session, .terminal);
+        }
         return;
     }
+    spawnTerminal(session, msg_buf, msg);
+}
+
+/// Start a shell in the panel and give it the keyboard.
+fn spawnTerminal(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
     const sz = term.size();
     const side = sidebarWidth(session);
     const panel_h = terminalPanelRows(session, sz.rows);
@@ -1538,14 +1675,64 @@ fn toggleTerminal(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
         return;
     }
     const panel_w = if (sz.cols > side) @as(usize, sz.cols) - side else 0;
-    const cols: u16 = @intCast(@max(panel_w, 20));
-    const rows: u16 = @intCast(@max(panel_h - 1, 3));
+    // The shell gets the *inner* size: the panel's padding is ours, not the
+    // shell's, so no column of its output is ever cut off.
+    const pad: usize = @min(session.config.terminal_padding, panel_w / 4);
+    const cols: u16 = @intCast(@max(panel_w - 2 * pad, 1));
+    const rows: u16 = @intCast(@max(panel_h - 1, 1));
     session.terminal = terminal_mod.Terminal.spawn(session.allocator, session.config.terminalCommand(), cols, rows) catch |e| {
         var why: [96]u8 = undefined;
         setMsg(msg_buf, msg, std.fmt.bufPrint(&why, "cannot start the terminal ({s})", .{@errorName(e)}) catch "cannot start the terminal");
         return;
     };
-    session.terminal_focus = true;
+    session.terminal_open = true;
+    setFocus(session, .terminal);
+}
+
+/// Throw the dead shell away and start a new one in its place.
+fn restartTerminal(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
+    closeTerminal(session);
+    spawnTerminal(session, msg_buf, msg);
+}
+
+/// The chevron in the panel title: hide the panel, keep the shell running.
+fn collapseTerminal(session: *Session) void {
+    if (session.terminal == null) return;
+    session.terminal_open = false;
+    setFocus(session, .editor);
+}
+
+/// Bring the panel back (the status-bar button).
+fn showTerminal(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
+    if (session.terminal == null) {
+        spawnTerminal(session, msg_buf, msg);
+        return;
+    }
+    session.terminal_open = true;
+    setFocus(session, .terminal);
+}
+
+/// F9: throw the buffer away and take what is on disk. With unsaved edits the
+/// first press only warns, so a stray F9 cannot lose work.
+fn reloadActive(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
+    const ed = session.current();
+    if (ed.path == null) {
+        setMsg(msg_buf, msg, "nothing to reload: the buffer has no file");
+        return;
+    }
+    if ((ed.dirty or ed.conflict) and !ed.reload_armed) {
+        ed.reload_armed = true;
+        setMsg(msg_buf, msg, "unsaved edits - F9 again discards them and reloads");
+        return;
+    }
+    ed.reload_armed = false;
+    const name = baseName(ed.path.?);
+    if (ed.reloadFromDisk() catch false) {
+        var line: [96]u8 = undefined;
+        setMsg(msg_buf, msg, std.fmt.bufPrint(&line, "reloaded {s} from disk", .{name}) catch "reloaded from disk");
+    } else {
+        setMsg(msg_buf, msg, "already up to date");
+    }
 }
 
 /// Shift+F8: stop the shell and drop the panel.
@@ -1555,7 +1742,8 @@ fn closeTerminal(session: *Session) void {
         t.deinit();
         session.terminal = null;
     }
-    session.terminal_focus = false;
+    session.terminal_open = false;
+    setFocus(session, .editor);
     session.term_sel_anchor = null;
     session.term_sel_head = null;
     session.term_press = false;
@@ -1641,24 +1829,39 @@ fn drawTerminal(s: *render.Screen, session: *Session, t: *terminal_mod.Terminal,
         while (xx < g.w) : (xx += 1) s.put(@intCast(g.x + xx), @intCast(g.y + yy), .{ .ch = ' ', .bg = theme.panel_bg });
     }
 
-    // Title row: the shell's name, and how far back the scrollback view is.
+    // Title row: a marker for who owns the keyboard, the shell's name, how far
+    // back the scrollback view is, and a chevron that collapses the panel.
     // Shells often set the title to their full path, so show the last part.
     var code_buf: [32]u8 = undefined;
     var title_buf: [220]u8 = undefined;
     const reported = t.titleText();
     const name = if (reported.len > 0) baseName(reported) else "terminal";
+    const marker: []const u8 = if (session.terminal_focus) "\u{258c} " else "\u{00b7} ";
     const state: []const u8 = if (t.exit_code) |code| blk: {
         if (code == 0) break :blk "  exited";
         break :blk std.fmt.bufPrint(&code_buf, "  exited ({d})", .{code}) catch "  exited";
     } else if (t.view != 0) blk: {
         break :blk std.fmt.bufPrint(&code_buf, "  -{d} lines", .{t.view}) catch "";
     } else "";
-    const head = std.fmt.bufPrint(&title_buf, " {s}{s}", .{ name, state }) catch " terminal";
+    const head = std.fmt.bufPrint(&title_buf, " {s}{s}{s}", .{ marker, name, state }) catch " terminal";
     var x: usize = 0;
     while (x < g.w) : (x += 1) {
         const ch: u21 = if (x < head.len) head[x] else ' ';
         const fg = if (session.terminal_focus) theme.accent else theme.hint_fg;
         s.put(@intCast(g.x + x), @intCast(g.y), .{ .ch = ch, .fg = fg, .bg = theme.tab_bar_bg, .attr = .{ .bold = true } });
+    }
+    // Chevron at the right end of the strip: click to collapse the panel.
+    if (g.w >= 4) {
+        const cx = g.x + g.w - 2;
+        session.term_chevron_x = @intCast(cx);
+        s.put(@intCast(cx), @intCast(g.y), .{
+            .ch = '\u{25be}',
+            .fg = if (session.term_chevron_hover) theme.bar_bg else theme.accent,
+            .bg = if (session.term_chevron_hover) theme.accent else theme.tab_bar_bg,
+            .attr = .{ .bold = true },
+        });
+    } else {
+        session.term_chevron_x = 0xFFFF;
     }
 
     // Content: the grid, offset by the scrollback view, inside the padding.
@@ -1687,10 +1890,33 @@ fn drawTerminal(s: *render.Screen, session: *Session, t: *terminal_mod.Terminal,
         }
     }
 
-    // The cursor is always visible: a filled block when the shell shows it, a
-    // hollow (underlined) cell when the shell hid it, which is what most
-    // terminals do and what makes a hidden-cursor prompt obvious.
-    if (t.view == 0) {
+    // A dead shell keeps its last screen but says so, so the panel never looks
+    // like a working prompt that ignores you.
+    if (t.exit_code) |code| {
+        var line: [96]u8 = undefined;
+        const text = std.fmt.bufPrint(&line, " shell exited ({d}) - F8 restarts it, Shift+F8 closes ", .{code}) catch " shell exited ";
+        const row = g.y + 1 + content_rows / 2;
+        if (row < g.y + g.h) {
+            const start = if (g.w > text.len) g.x + (g.w - text.len) / 2 else g.x;
+            var i: usize = 0;
+            while (i < text.len and start + i < g.x + g.w) : (i += 1) {
+                s.put(@intCast(start + i), @intCast(row), .{
+                    .ch = text[i],
+                    .fg = theme.text,
+                    .bg = theme.selection,
+                    .attr = .{ .bold = true },
+                });
+            }
+        }
+    }
+
+    // The cursor blinks while the panel has the keyboard, like a terminal's: a
+    // filled block when the shell shows it, a hollow cell when the shell hid
+    // it, so there is always feedback that the panel is live and who owns the
+    // keyboard. `MIBI_NO_BLINK` turns it off (screen tests and screen
+    // recordings both prefer a still picture).
+    const blink_on = !blink_enabled or !session.terminal_focus or (os.ticksMs() / 500) % 2 == 0;
+    if (t.view == 0 and blink_on) {
         const cur = t.vt.cursor();
         if (cur.x < inner_w and cur.y < content_rows) {
             const cells = t.vt.line(cur.y);
@@ -1707,11 +1933,13 @@ fn drawTerminal(s: *render.Screen, session: *Session, t: *terminal_mod.Terminal,
                     .attr = .{ .reverse = true },
                 });
             } else {
+                // The shell hid its cursor (?25l). A dim block still marks the
+                // spot: without it a prompt looks dead and the panel gives no
+                // feedback about where the keyboard goes.
                 s.put(@intCast(inner_x + cur.x), @intCast(g.y + 1 + cur.y), .{
                     .ch = under.ch,
-                    .fg = under.fg,
-                    .bg = under.bg,
-                    .attr = .{ .underline = true },
+                    .fg = theme.panel_bg,
+                    .bg = theme.gutter,
                 });
             }
         }
@@ -1776,10 +2004,14 @@ fn terminalCopy(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
 /// bracketed-paste markers when the shell asked for them.
 fn terminalPaste(session: *Session) void {
     const t = if (session.terminal) |*tp| tp else return;
+    // The system clipboard first (that is what a terminal pastes), then mibi's
+    // own register when the clipboard is empty or unavailable.
+    var scratch: [4096]u8 = undefined;
+    if (t.pasteClipboard(session.allocator, &scratch)) return;
     const text = session.current().register.items;
     if (text.len == 0) return;
-    var buf: [4096]u8 = undefined;
-    t.sendKeys(t.pasteBytes(text, &buf));
+    var framed: [4096]u8 = undefined;
+    t.sendKeys(t.pasteBytes(text, &framed));
 }
 
 /// Screen cell -> terminal content cell, or null when the pointer is outside the
@@ -1824,6 +2056,7 @@ fn refreshFromDisk(session: *Session, msg_buf: []u8, msg: *[]const u8) bool {
         if (t.refreshIfChanged()) changed = true;
     }
     for (session.docs.items) |ed| {
+        const was_conflict = ed.conflict;
         if (ed.reloadIfChanged()) {
             changed = true;
             // Say so in the status line: a reload that happened while the
@@ -1831,6 +2064,13 @@ fn refreshFromDisk(session: *Session, msg_buf: []u8, msg: *[]const u8) bool {
             // user looks back at it.
             var line: [96]u8 = undefined;
             const text = std.fmt.bufPrint(&line, "reloaded {s} from disk", .{baseName(ed.path orelse "")}) catch "reloaded from disk";
+            setMsg(msg_buf, msg, text);
+        } else if (ed.conflict and !was_conflict) {
+            // Unsaved edits and a changed file: never silently overwritten, and
+            // never silently ignored either.
+            changed = true;
+            var line: [110]u8 = undefined;
+            const text = std.fmt.bufPrint(&line, "{s} changed on disk - F9 reloads, Ctrl+S overwrites", .{baseName(ed.path orelse "")}) catch "file changed on disk";
             setMsg(msg_buf, msg, text);
         }
     }
@@ -2042,6 +2282,7 @@ fn defaultKeyFor(action: keys.Action, shift: bool) DefaultKey {
         .prev_pane => .{ .csi = .{ .params = if (shift) "17;2" else "17;5", .final = '~' } },
         .toggle_terminal => .{ .csi = .{ .params = "19", .final = '~' } }, // F8
         .close_terminal => .{ .csi = .{ .params = "19;2", .final = '~' } }, // Shift+F8
+        .reload_file => .{ .csi = .{ .params = "20", .final = '~' } }, // F9
     };
 }
 
@@ -2157,6 +2398,13 @@ fn applyByte(
     }
     const ed = session.current();
     if (b == 0x13) { // Ctrl+S: save, or ask for a name
+        if (ed.conflict) {
+            // Never overwrite a file that changed under us without saying so:
+            // the first Ctrl+S warns, a second one goes ahead.
+            ed.conflict = false;
+            setMsg(msg_buf, msg, "file changed on disk - Ctrl+S again overwrites, F9 reloads");
+            return;
+        }
         if (session.config.format_on_save and ed.path != null) formatBuffer(session, msg_buf, msg);
         if (ed.path == null) {
             prompt.* = .{ .kind = .save_as };
@@ -2178,13 +2426,13 @@ fn applyByte(
         setMsg(msg_buf, msg, "Split");
     } else if (b == 0x02) { // Ctrl+B: file tree
         if (session.tree != null) {
-            session.tree_focus = false;
+            setFocus(session, .editor);
             session.tree.?.deinit();
             session.tree = null;
         } else {
             const dir = if (session.current().path) |p| promptDir(p) else ".";
             session.tree = tree_mod.Tree.init(session.allocator, dir) catch null;
-            session.tree_focus = session.tree != null;
+            if (session.tree != null) setFocus(session, .tree);
         }
     } else if (b == 0x10) { // Ctrl+P: command palette
         session.ui_request = .command_palette;
@@ -2502,6 +2750,7 @@ fn applyCsi(
             17 => session.cyclePane(if (shift) -1 else 1), // F6 / Shift+F6
             18 => if (shift) session.closePane() else try session.splitFocused(.rows), // F7 / Shift+F7
             19 => if (shift) closeTerminal(session) else toggleTerminal(session, msg_buf, msg), // F8 / Shift+F8
+            20 => reloadActive(session, msg_buf, msg), // F9: reload from disk
             else => {},
         },
         else => {},
@@ -2693,7 +2942,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
         }
         // The status line always describes the focused pane's document.
         const active = session.current();
-        drawStatus(s, active, status_msg, w, h, active.rowCol(), active.lineCount(), bar_bg, accent, hint_fg);
+        drawStatus(s, session, active, status_msg, w, h, active.rowCol(), active.lineCount());
     }
 
     // The help panel covers the bottom rows, so a prompt (which lives on the
@@ -3069,7 +3318,7 @@ fn openTreeSelection(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
         if (doc.path) |p| {
             if (pathsEqual(p, path)) {
                 session.focusDoc(i);
-                session.tree_focus = false;
+                setFocus(session, .editor);
                 return;
             }
         }
@@ -3084,7 +3333,7 @@ fn openTreeSelection(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
         setErrMsg(msg_buf, msg, "Cannot open", e);
         return;
     };
-    session.tree_focus = false;
+    setFocus(session, .editor);
 }
 
 // --- tab strip -------------------------------------------------------------
@@ -3094,7 +3343,10 @@ fn openTreeSelection(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
 /// A tab's text: " name " (plus " [+]" while the buffer is unsaved).
 fn tabLabel(ed: *Editor, buf: []u8) []const u8 {
     const name = if (ed.path) |p| baseName(p) else "[No Name]";
-    return std.fmt.bufPrint(buf, " {s}{s} ", .{ name, if (ed.dirty) " [+]" else "" }) catch name;
+    // `[!]` means the file changed on disk under unsaved edits: the buffer and
+    // the disk disagree, and saving would overwrite what is on disk.
+    const mark: []const u8 = if (ed.conflict) " [!]" else if (ed.dirty) " [+]" else "";
+    return std.fmt.bufPrint(buf, " {s}{s} ", .{ name, mark }) catch name;
 }
 
 /// Cells a tab takes: the label, a pad, the close `x`, and a right pad so the
@@ -3790,17 +4042,17 @@ fn drawPrompt(
 
 fn drawStatus(
     s: *render.Screen,
+    session: *Session,
     ed: *Editor,
     msg: []const u8,
     w: usize,
     h: usize,
     rc: anytype,
     total: usize,
-    bar_bg: render.Color,
-    accent: render.Color,
-    hint_fg: render.Color,
 ) void {
-    const hint = "F1 help";
+    const theme = session.config.theme;
+    const bar_bg = theme.bar_bg;
+    const accent = theme.accent;
     var st_buf: [192]u8 = undefined;
     const name = ed.path orelse "[No Name]";
     const status = std.fmt.bufPrint(&st_buf, " mibi {s}  {s}{s}  {d}:{d}  {d}L  {d}x{d}  {s}", .{
@@ -3816,12 +4068,32 @@ fn drawStatus(
     }) catch " mibi";
     var x: usize = 0;
     while (x < w) : (x += 1) s.put(@intCast(x), @intCast(h - 1), .{ .bg = bar_bg });
-    // Keep the hint on the right edge and clip the status text before it.
-    const hint_x = if (w > hint.len + 2) w - hint.len - 1 else w;
-    const status_max = if (hint_x > 0) hint_x - 1 else w;
+
+    // The right edge holds two pills: a terminal button (it brings the panel up
+    // or takes the keyboard) and the help hint. Both sit on their own solid
+    // surface so they read as buttons instead of as more status text.
+    const hint = " F1 help ";
+    const term_btn = " >_ ";
+    const hint_x = if (w > hint.len + 1) w - hint.len else w;
+    const term_x = if (hint_x > term_btn.len + 1) hint_x - term_btn.len else hint_x;
+    session.help_pill_x = if (hint_x < w) @intCast(hint_x) else 0xFFFF;
+    session.term_pill_x = if (term_x < w) @intCast(term_x) else 0xFFFF;
+
+    const status_max = if (term_x > 1) term_x - 1 else w;
     const shown = status[0..@min(status.len, status_max)];
     s.putStr(0, @intCast(h - 1), shown, .{ .bg = bar_bg, .fg = accent });
-    if (hint_x < w) s.putStr(@intCast(hint_x), @intCast(h - 1), hint, .{ .bg = bar_bg, .fg = hint_fg });
+
+    if (term_x < w) {
+        const live = session.terminal != null and session.terminal_open;
+        const bg = if (live) theme.accent else theme.panel_bg;
+        const fg = if (live) theme.bar_bg else theme.text;
+        s.putStr(@intCast(term_x), @intCast(h - 1), term_btn, .{ .bg = bg, .fg = fg, .attr = .{ .bold = true } });
+    }
+    if (hint_x < w) {
+        const bg = if (session.help_pill_hover) theme.accent else theme.panel_bg;
+        const fg = if (session.help_pill_hover) theme.bar_bg else theme.text;
+        s.putStr(@intCast(hint_x), @intCast(h - 1), hint, .{ .bg = bg, .fg = fg, .attr = .{ .bold = true } });
+    }
 }
 
 test "an escape sequence split across reads is not typed as text" {

@@ -209,6 +209,9 @@ class Mibi:
             shutil.rmtree(self.state, ignore_errors=True)
         os.makedirs(self.state, exist_ok=True)
         os.environ["MIBI_STATE_DIR"] = self.state
+        # A blinking cursor would keep the screen changing and stop wait_quiet
+        # from ever settling; the blink has its own check with it turned on.
+        os.environ.setdefault("MIBI_NO_BLINK", "1")
         if cwd and not keep_session:
             for name in os.listdir(cwd) if os.path.isdir(cwd) else []:
                 if name.startswith("mibi-session"):
@@ -911,6 +914,217 @@ def selection_stays_on_its_line(m, path):
         first_row = [proc.screen.bg_at(1, c) for c in range(0, 40)]
         assert selected not in first_row, f"the selection bled onto the previous line: {first_row}"
         proc.shot("46-selection-line")
+    finally:
+        proc.close()
+
+
+@check
+def focus_returns_to_the_editor(m, path):
+    """Clicking the tree and then the text hands the keyboard back to the editor."""
+    work = os.path.join(SHOT_DIR, "work-focus")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "one.txt"), "w", encoding="utf-8") as f:
+        f.write("alpha\nbeta\ngamma\n")
+    proc = Mibi(["one.txt"], cwd=work)
+    try:
+        assert proc.wait_for("alpha"), "editor did not start"
+        proc.wait_quiet()
+        proc.send("\x02")  # Ctrl+B: tree takes the keyboard
+        proc.wait_quiet()
+        proc.send("\x1b[<0;3;3M")  # click a tree row
+        proc.send("\x1b[<0;3;3m")
+        proc.wait_quiet()
+        proc.send("\x1b[<0;30;2M")  # click the text area
+        proc.send("\x1b[<0;30;2m")
+        proc.wait_quiet()
+        proc.send("\x1b[B")  # down arrow must move the editor cursor
+        proc.wait_quiet()
+        status = proc.screen_text().splitlines()[-1]
+        assert "2:" in status, f"arrow keys still go to the tree: {status!r}"
+        proc.shot("47-focus")
+    finally:
+        proc.close()
+
+
+@check
+def conflicted_file_is_flagged_and_reloads(m, path):
+    """A file changed under unsaved edits is flagged, and F9 takes the disk copy."""
+    work = os.path.join(SHOT_DIR, "work-conflict")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    target = os.path.join(work, "conf.txt")
+    with open(target, "w", encoding="utf-8") as f:
+        f.write("alpha\n")
+    proc = Mibi(["conf.txt"], cwd=work)
+    try:
+        assert proc.wait_for("alpha"), "editor did not start"
+        proc.wait_quiet()
+        proc.send("X")  # unsaved edit
+        proc.wait_quiet()
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("beta\n")  # the file moves on underneath
+        deadline = time.time() + 5
+        while time.time() < deadline and "[!]" not in proc.screen_text():
+            time.sleep(0.1)
+        screen = proc.screen_text()
+        assert "[!]" in screen, f"no conflict marker on the tab:\n{screen}"
+
+        proc.send("\x1b[20~")  # F9: first press only warns
+        proc.wait_quiet()
+        assert "unsaved edits" in proc.screen_text(), "F9 did not warn before discarding edits"
+
+        proc.send("\x1b[20~")  # F9 again: take the disk copy
+        assert proc.wait_for("beta"), "F9 did not reload the file:\n" + proc.screen_text()
+        assert "[!]" not in proc.screen_text(), "the conflict marker survived the reload"
+        proc.shot("48-conflict")
+    finally:
+        proc.close()
+
+
+@check
+def terminal_chevron_and_status_button(m, path):
+    """The chevron collapses the panel; the status-bar button brings it back."""
+    work = os.path.join(SHOT_DIR, "work-term-collapse")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
+        f.write("[terminal]\ncommand = cmd.exe\nheight = 8\n")
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello\nworld\n")
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        proc.send("\x1b[19~")  # F8
+        assert proc.wait_for("cmd.exe"), "the panel did not open"
+        proc.wait_quiet()
+        lines = proc.screen_text().splitlines()
+        title_row = next(i for i, ln in enumerate(lines) if "cmd.exe" in ln)
+        # The chevron sits at the last-but-one column of the title strip.
+        proc.send(f"\x1b[<0;79;{title_row + 1}M")
+        proc.send(f"\x1b[<0;79;{title_row + 1}m")
+        proc.wait_quiet()
+        assert "cmd.exe" not in proc.screen_text(), "the chevron did not collapse the panel"
+        assert "hello" in proc.screen_text(), "the editor did not get the rows back"
+
+        # The status bar has a terminal button next to the help pill.
+        status = proc.screen_text().splitlines()[-1]
+        assert ">_" in status, f"no terminal button in the status bar: {status!r}"
+        col = status.index(">_") + 2
+        proc.send(f"\x1b[<0;{col};24M")
+        proc.send(f"\x1b[<0;{col};24m")
+        assert proc.wait_for("cmd.exe"), "the status button did not bring the panel back"
+        proc.shot("49-collapse")
+    finally:
+        proc.close()
+
+
+@check
+def shift_wheel_scrolls_sideways(m, path):
+    """Shift + wheel scrolls the editor horizontally."""
+    work = os.path.join(SHOT_DIR, "work-hscroll")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "wide.txt"), "w", encoding="utf-8") as f:
+        f.write("start-" + "x" * 200 + "-end\n")
+    proc = Mibi(["wide.txt"], cwd=work)
+    try:
+        assert proc.wait_for("start-"), "editor did not start"
+        proc.wait_quiet()
+        assert "start-" in proc.screen_text()
+        for _ in range(3):
+            proc.proc.write("\x1b[<69;20;3M")  # shift + wheel down
+        proc.wait_quiet()
+        screen = proc.screen_text()
+        assert "start-" not in screen, f"the view did not scroll sideways:\n{screen}"
+        assert "xxx" in screen, f"the line scrolled out entirely:\n{screen}"
+        proc.shot("50-hscroll")
+    finally:
+        proc.close()
+
+
+@check
+def status_message_survives_mouse_motion(m, path):
+    """Moving the pointer must not wipe a status message."""
+    work = os.path.join(SHOT_DIR, "work-msg")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "msg.txt"), "w", encoding="utf-8") as f:
+        f.write("hello\nworld\n")
+    proc = Mibi(["msg.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        proc.send("\x1b[20~")  # F9: reload, which reports "already up to date"
+        proc.wait_quiet()
+        assert "up to date" in proc.screen_text(), "no message to test with"
+        for _ in range(6):
+            proc.proc.write("\x1b[<35;10;5M")  # pointer motion, no buttons
+        proc.wait_quiet()
+        assert "up to date" in proc.screen_text(), "a mouse move cleared the message"
+    finally:
+        proc.close()
+
+
+@check
+def terminal_cursor_blinks(m, path):
+    """The terminal cursor blinks while the panel has the keyboard."""
+    os.environ["MIBI_NO_BLINK"] = "0"  # the harness sets it to 1 by default
+    work = os.path.join(SHOT_DIR, "work-term-blink")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
+        f.write("[terminal]\ncommand = cmd.exe\nheight = 8\n")
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello\n")
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        proc.send("\x1b[19~")
+        assert proc.wait_for("cmd.exe"), "the panel did not open"
+        proc.wait_quiet()
+        lines = proc.screen_text().splitlines()
+        prompt = next(i for i, ln in enumerate(lines) if ">" in ln and i > 10)
+        seen = set()
+        for _ in range(6):
+            row = [proc.screen.bg_at(prompt, c) for c in range(0, 78)]
+            seen.add(tuple(row))
+            time.sleep(0.3)
+        assert len(seen) > 1, "the terminal cursor never blinked"
+        proc.shot("51-blink")
+    finally:
+        os.environ.setdefault("MIBI_NO_BLINK", "1")
+        proc.close()
+
+
+@check
+def terminal_output_fits_the_panel(m, path):
+    """The shell wraps at the panel's inner width, so no column is cut off."""
+    work = os.path.join(SHOT_DIR, "work-term-fit")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    with open(os.path.join(work, "mibi.ini"), "w", encoding="utf-8") as f:
+        f.write("[terminal]\ncommand = cmd.exe\nheight = 8\n")
+    with open(os.path.join(work, "notes.txt"), "w", encoding="utf-8") as f:
+        f.write("hello\n")
+    proc = Mibi(["notes.txt"], cwd=work)
+    try:
+        assert proc.wait_for("hello"), "editor did not start"
+        proc.wait_quiet()
+        proc.send("\x1b[19~")
+        assert proc.wait_for("cmd.exe"), "the panel did not open"
+        proc.wait_quiet()
+        # 80 characters: with the panel's inner width (78 in an 80-column
+        # window) the shell must wrap them, not lose the last two.
+        proc.send("echo " + "y" * 80 + "\r")
+        assert proc.wait_for("yyyyyyyyyy"), "no output"
+        proc.wait_quiet()
+        screen = proc.screen_text()
+        total = screen.count("y")
+        assert total >= 79, f"the shell lost columns: {total} of 80 'y' on screen\n{screen}"
+        proc.shot("52-term-fit")
     finally:
         proc.close()
 

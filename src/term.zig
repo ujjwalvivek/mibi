@@ -149,6 +149,13 @@ const MOUSE_MOVED: DWORD = 0x0001;
         if (m.dwEventFlags & win.MOUSE_WHEELED != 0) {
             const delta: i16 = @bitCast(@as(u16, @truncate(m.dwButtonState >> 16)));
             button = if (delta > 0) 64 else 65;
+            // SGR mouse puts the modifiers in the button field (shift 4, alt 8,
+            // ctrl 16). The editor uses shift+wheel to scroll sideways, so the
+            // wheel keeps them; button presses stay plain to keep click
+            // handling simple.
+            if (m.dwControlKeyState & win.SHIFT_PRESSED != 0) button += 4;
+            if (m.dwControlKeyState & (win.LEFT_ALT_PRESSED | win.RIGHT_ALT_PRESSED) != 0) button += 8;
+            if (m.dwControlKeyState & (win.LEFT_CTRL_PRESSED | win.RIGHT_CTRL_PRESSED) != 0) button += 16;
         } else if (m.dwButtonState & win.FROM_LEFT_1ST_BUTTON_PRESSED != 0) {
             // Dragging with the button held is reported as motion (bit 32).
             button = if (m.dwEventFlags & win.MOUSE_MOVED != 0) 32 else 0;

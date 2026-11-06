@@ -56,6 +56,7 @@ pub const Action = enum {
     prev_pane,
     toggle_terminal,
     close_terminal,
+    reload_file,
 };
 
 pub fn actionFromName(name: []const u8) ?Action {

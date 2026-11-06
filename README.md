@@ -121,7 +121,8 @@ packaging.
 | Key                       | Action                                                                                      |
 | ------------------------- | ------------------------------------------------------------------------------------------- |
 | _type_                    | insert text                                                                                 |
-| _mouse_                   | click places the cursor, drag selects, wheel scrolls; right click pastes into the shell     |
+| _mouse_                   | click places the cursor, drag selects, wheel scrolls; right click pastes the system clipboard into the shell |
+| `Shift`+wheel             | scroll the editor horizontally                                                              |
 | `Enter`                   | new line                                                                                    |
 | `Tab`                     | insert 4 spaces                                                                             |
 | `Backspace` / `Delete`    | delete before / after the cursor                                                            |
@@ -140,7 +141,7 @@ packaging.
 | `Ctrl+F`                  | find (incremental); `F3` / `Shift+F3` next / previous; `Ctrl+R` in the prompt toggles regex |
 | `Ctrl+R`                  | replace all                                                                                 |
 | `Ctrl+G`                  | go to `line[:column]`                                                                       |
-| `Ctrl+S`                  | save; asks for a name if the buffer is unnamed                                              |
+| `Ctrl+S`                  | save; asks for a name if the buffer is unnamed, and warns once if the file changed on disk  |
 | `Ctrl+O`                  | fuzzy file picker: type to filter, Enter opens in a new tab                                 |
 | `Ctrl+T` / `Ctrl+W`       | new tab / close tab (closing the last one quits)                                            |
 | `Ctrl+PgUp` / `Ctrl+PgDn` | previous / next tab                                                                         |
@@ -148,13 +149,16 @@ packaging.
 | `Shift+F5` / `Shift+F7`   | close the focused pane (its file stays open as a tab)                                       |
 | `F6` / `Shift+F6`         | next / previous pane (or click a pane)                                                      |
 | `F2`                      | theme picker (arrows preview live, Enter keeps and saves, Esc restores)                     |
-| `F8`                      | embedded terminal: opens it, then hands the keyboard back and forth                         |
+| `F8`                      | embedded terminal: opens it, then hands the keyboard back and forth; an exited shell restarts on `F8` |
 | `Shift+F8`                | close the terminal panel                                                                    |
+| `F9`                      | reload the file from disk (warns once if the buffer has unsaved edits)                      |
+| `▾` / `>_` (click)        | terminal panel: collapse it (the shell keeps running) / bring it back                       |
+| _terminal cursor_         | blinks while the panel owns the keyboard; `MIBI_NO_BLINK=1` keeps it still                  |
 | `Shift+PgUp` / `PgDn`     | scroll the terminal's scrollback (any key goes back to live)                                |
 | `Shift+Up` / `Down`       | scroll the terminal's scrollback a line (any key goes back to live)                         |
 | `Shift+Home` / `End`      | terminal scrollback: oldest line / back to live                                             |
 | `Ctrl+P`                  | command palette: every action, fuzzy-filtered                                               |
-| `Ctrl+?` / `F1`           | help panel (Esc closes it); hints at the status bar's right edge                            |
+| `Ctrl+?` / `F1`           | help panel (Esc closes it); the pill at the status bar's right edge                         |
 | `Ctrl+Q`                  | quit (asks first if any tab has unsaved edits)                                              |
 
 ## Features
@@ -177,16 +181,19 @@ packaging.
   expand `$0`..`$9` from the captured groups. Backtracking is step-capped and
   there are no backreferences yet.
 - File tree sidebar (`Ctrl+B`): directories expand with Enter/`j`/`k` or a
-  click, files open in a tab. The open folders and the selected entry are
-  restored with the session, so it comes back where you left it. Icons are Nerd Font glyphs: see
+  click, files open in a tab. Opening it or clicking it gives the tree the
+  keyboard (arrows and `j`/`k` move its selection); a click in the text takes it
+  back. The open folders and the selected entry are restored with the session,
+  so it comes back where you left it. Icons are Nerd Font glyphs: see
   [assets/fonts/README.md](assets/fonts/README.md) for installing Maple Mono NF
   and `tools/install-font.ps1`; `icons = ascii` in `[editor]` falls back to
   letter markers.
 - Hot reload: a half-second idle tick re-lists the tree and re-stamps every
   open file, so a file created or rewritten by another tool shows up without
   touching the keyboard. A reload is announced in the status bar
-  (`reloaded notes.txt from disk`) and never overwrites a buffer with unsaved
-  edits. Nothing is written to the terminal while the editor is idle, and a
+  (`reloaded notes.txt from disk`). A buffer with unsaved edits is never
+  overwritten: when its file changes on disk its tab shows `[!]` (see Session
+  state). Nothing is written to the terminal while the editor is idle, and a
   window that regains focus repaints every cell, so a terminal that held
   painting back while it was in the background catches up at once. The file
   stamp is `FindFirstFileW` on Windows and `statx` (Linux) / `fstatat`
@@ -194,10 +201,12 @@ packaging.
 - Mouse: click text to place the cursor (a double click selects the word, a
   triple click the whole line, a drag selects a run of text), click a tab to
   switch to it, click picker rows (click again to accept), click the status-bar
-  hint for help; the wheel moves one line per notch. Over the tab bar the wheel
-  scrolls the strip instead, and over the terminal panel it scrolls the shell's
-  scrollback. Right click in the terminal panel pastes into the shell.
-  Quick-edit mode is turned off so the console reports clicks to the editor.
+  pills for help and the terminal; the wheel moves one line per notch and
+  `Shift`+wheel scrolls the text sideways. Over the tab bar the wheel scrolls
+  the strip instead, and over the terminal panel it scrolls the shell's
+  scrollback. Right click in the terminal panel pastes the system clipboard into
+  the shell (mibi's own register when the clipboard is empty). Quick-edit mode
+  is turned off so the console reports clicks to the editor.
 - Configurable keybindings and a colour theme via `mibi.ini` (`[keys]` and
   `[theme]`), with the whole palette and every action bindable. The help
   panel renders the keys you actually bound.
@@ -229,8 +238,8 @@ packaging.
   lights them up). When the tabs do not fit, `‹` / `›` arrows appear at both
   ends and the wheel over the bar scrolls the strip; the active tab is always
   scrolled into view. Closing the last tab quits, exactly like `Ctrl+W`.
-  Per-document dirty markers, Ctrl+T / Ctrl+W, Ctrl+PgUp / Ctrl+PgDn, and a
-  quit that checks every tab.
+  Per-document dirty markers (`[+]`, and `[!]` when the file changed on disk),
+  Ctrl+T / Ctrl+W, Ctrl+PgUp / Ctrl+PgDn, and a quit that checks every tab.
 - File open/save; path prompts list the directory; Tab completes. A failed
   open or save reports the actual OS error rather than failing silently.
 - Embedded terminal (`F8`): a real shell in a pseudo terminal (ConPTY on
@@ -238,18 +247,27 @@ packaging.
   with its own VT parser (`src/vterm.zig`), 256-colour and true-colour SGR, a
   scrollback of 2000 lines (wheel and `Shift+Up`/`Down` a line, `Shift+PgUp`/
   `PgDn` a page, `Shift+Home`/`End` to the oldest line and back to live, any key
-  returns to live), and the shell's window kept in step with the panel. The
-  shell is `pwsh.exe`, then `powershell.exe`, then `cmd.exe` on Windows
-  (`$SHELL`, then `/bin/sh` elsewhere), each with `-NoLogo` and the user's
-  profile; `[terminal] command` overrides it, and `height` / `padding` size the
-  panel. The panel has a surface colour of its own, and its cursor is always
-  visible: a filled block while the shell shows it, hollow when the shell hides
-  it (the alt screen restores it on entry and exit). The title row names the
-  shell and shows `-N lines` while you are scrolled back. A drag inside the
-  panel selects and copies on release (the register plus OSC 52); right click
-  pastes, bracketed when the shell asked for it. `F8` hands the keyboard back
-  and `Shift+F8` closes the panel. The scrollback ring is allocated when the
-  terminal opens (~2.5 MB at 80 columns, ~6 MB at 200).
+  returns to live; new output keeps you at the bottom if you were there), and
+  the shell's window kept in step with the panel and sized to its inner width,
+  so the padding never cuts off the last columns. The shell is `pwsh.exe`, then
+  `powershell.exe`, then `cmd.exe` on Windows (`$SHELL`, then `/bin/sh`
+  elsewhere), each with `-NoLogo` and the user's profile; `[terminal] command`
+  overrides it, and `height` / `padding` size the panel. The panel has a surface
+  colour of its own, and its cursor is always visible: it blinks while the panel
+  owns the keyboard (`MIBI_NO_BLINK=1` keeps it still), a filled block while the
+  shell shows it, a dim block when the shell hides it (the alt screen restores
+  it on entry and exit). The title row names the shell, marks the keyboard owner
+  with `▌`, shows `-N lines` while you are scrolled back, and has a `▾` chevron
+  that collapses the panel (the shell keeps running); the `>_` button in the
+  status bar brings it back. A drag inside the panel selects and copies on
+  release (the register plus OSC 52); right click pastes the system clipboard,
+  bracketed when the shell asked for it, and falls back to mibi's register when
+  the clipboard is empty. Backspace is sent as DEL (`0x7f`) rather than the
+  console's `0x08`, so line editors delete one character instead of clearing the
+  line. An exited shell says so in the panel, and `F8` restarts it. `F8` hands
+  the keyboard back and `Shift+F8` closes the panel. The panel is pumped on a
+  30 ms tick, so an open terminal does not spin a core. The scrollback ring is
+  allocated when the terminal opens (~2.5 MB at 80 columns, ~6 MB at 200).
 - Cell-grid **diff renderer**: changed rows are rewritten in full.
 - Raw mode, alternate screen, resize handling, auto-wrap disabled, UTF-8
   console codepage set on Windows.
@@ -344,6 +362,13 @@ run isolated).
 The embedded terminal is deliberately not part of the session: it is a running
 process, so it starts fresh on every launch (`F8` opens one, `Shift+F8` closes
 it).
+
+A buffer with unsaved edits whose file changed on disk is flagged rather than
+overwritten: the tab shows `[!]` and the status line says
+`<file> changed on disk - F9 reloads, Ctrl+S overwrites`. The first `Ctrl+S`
+warns and a second one saves over the file; `F9` reloads from disk, warning once
+if the buffer has unsaved edits. Clean buffers still reload on their own within
+half a second.
 
 ## Not yet
 

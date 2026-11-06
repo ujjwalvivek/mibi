@@ -92,6 +92,10 @@ pub const Terminal = struct {
         var buf: [8192]u8 = undefined;
         var changed = false;
         var rounds: usize = 0;
+        // The autoscroll policy needs to know what the reader was looking at
+        // before the shell wrote anything.
+        const sb_before = self.vt.scrollbackLen();
+        const view_before = self.vt.viewOffset();
         // Bounded: a chatty program must not starve the editor's input.
         while (rounds < 16) : (rounds += 1) {
             const n = self.child.read(&buf) catch |e| switch (e) {
@@ -108,6 +112,13 @@ pub const Terminal = struct {
             if (reply.len > 0) self.child.write(reply) catch {};
         }
         if (self.vt.title().len > 0) self.setTitle(self.vt.title());
+        // Autoscroll: a reader parked in the history keeps the same lines under
+        // their eyes (the offset moves with the lines that just scrolled off),
+        // while a reader at the bottom simply follows the output. Anything that
+        // resets the screen (RIS, `ED 3`, alt-screen) drops the offset, and the
+        // mirror below picks that up.
+        const added = self.vt.scrollbackLen() -| sb_before;
+        if (view_before > 0 and added > 0) self.vt.setViewOffset(anchoredView(view_before, added));
         // The shell can drop the scrollback (`ED 3`) or reset the screen
         // (`RIS`); those park the view at live, so mirror it for the renderer.
         self.view = self.vt.viewOffset();
@@ -118,13 +129,44 @@ pub const Terminal = struct {
         return changed;
     }
 
-    /// Bytes from the keyboard go straight to the shell: the input layer has
-    /// already turned them into the same escape sequences a terminal sends.
+    /// Bytes from the keyboard go straight to the shell, with one translation:
+    /// the console reports Backspace as 0x08 (Ctrl+H), but a terminal sends DEL
+    /// (0x7f) and every line editor expects that. cmd.exe treats 0x08 as "clear
+    /// the rest of the line", which is why one Backspace wiped a typed command.
     pub fn sendKeys(self: *Terminal, bytes: []const u8) void {
         if (bytes.len == 0) return;
-        self.child.write(bytes) catch {};
+        if (std.mem.indexOfScalar(u8, bytes, backspace_from_console)) |_| {
+            var buf: [256]u8 = undefined;
+            var off: usize = 0;
+            while (off < bytes.len) {
+                const n = @min(bytes.len - off, buf.len);
+                const used = translateKeys(buf[0..n], bytes[off .. off + n]);
+                self.child.write(buf[0..used]) catch {};
+                off += used;
+            }
+        } else {
+            self.child.write(bytes) catch {};
+        }
         // Typing means "back to the live screen", like every other terminal.
         self.scrollToLive();
+    }
+
+    /// The system clipboard's text, clipped into `buf`, or null when there is
+    /// none. This is what a right click pastes: mibi's own register only holds
+    /// what was copied inside mibi, so a fresh editor would paste nothing.
+    pub fn clipboardText(self: *Terminal, allocator: std.mem.Allocator, buf: []u8) ?[]const u8 {
+        _ = self; // the clipboard is the platform's, not the terminal's
+        return systemClipboardText(allocator, buf);
+    }
+
+    /// Paste the system clipboard into the shell, framed for bracketed paste
+    /// when the shell asked for it. Returns false when the clipboard is empty
+    /// or unavailable, so the caller can leave the status line alone.
+    pub fn pasteClipboard(self: *Terminal, allocator: std.mem.Allocator, scratch: []u8) bool {
+        const text = self.clipboardText(allocator, scratch) orelse return false;
+        var framed: [4096]u8 = undefined;
+        self.sendKeys(self.pasteBytes(text, &framed));
+        return true;
     }
 
     pub fn outputHandle(self: *const Terminal) pty.Handle {
@@ -211,6 +253,115 @@ pub const Terminal = struct {
         return framePaste(self.vt.bracketedPaste(), text, buf);
     }
 };
+
+/// What the console reports for the Backspace key (Ctrl+H), and what a terminal
+/// has to send instead.
+const backspace_from_console: u8 = 0x08;
+const backspace_to_shell: u8 = 0x7f;
+
+/// Copy `src` into `dst` mapping the console's Backspace to DEL. Returns the
+/// number of bytes written (the caller hands the same length back).
+fn translateKeys(dst: []u8, src: []const u8) usize {
+    const n = @min(dst.len, src.len);
+    for (src[0..n], 0..) |b, i| dst[i] = if (b == backspace_from_console) backspace_to_shell else b;
+    return n;
+}
+
+/// Where the scrollback view should sit after `added` new lines landed while
+/// the reader was `view` lines above the live screen: the same lines stay under
+/// their eyes, so the offset grows with the scrollback. A reader at live (0)
+/// stays at live and simply follows the output.
+fn anchoredView(view: usize, added: usize) usize {
+    if (view == 0 or added == 0) return view;
+    return view + added;
+}
+
+const win = if (pty.is_windows) struct {
+    extern "user32" fn OpenClipboard(hwnd: ?*anyopaque) callconv(.winapi) i32;
+    extern "user32" fn CloseClipboard() callconv(.winapi) i32;
+    extern "user32" fn GetClipboardData(uFormat: u32) callconv(.winapi) ?*anyopaque;
+    extern "kernel32" fn GlobalLock(hMem: *anyopaque) callconv(.winapi) ?*anyopaque;
+    extern "kernel32" fn GlobalUnlock(hMem: *anyopaque) callconv(.winapi) i32;
+    const CF_UNICODETEXT: u32 = 13;
+} else struct {};
+
+/// The system clipboard's text, clipped into `buf`, or null when the clipboard
+/// is empty or unavailable. Free-standing so it can be called (and probed)
+/// without a running shell.
+pub fn systemClipboardText(allocator: std.mem.Allocator, buf: []u8) ?[]const u8 {
+    if (buf.len == 0) return null;
+    if (pty.is_windows) return clipboardWindows(buf);
+    return clipboardUnix(allocator, buf);
+}
+
+/// The Windows clipboard as UTF-8. Every step can fail (another process may
+/// hold the clipboard), and a failure is "no text", never an error the caller
+/// has to handle.
+fn clipboardWindows(buf: []u8) ?[]const u8 {
+    if (win.OpenClipboard(null) == 0) return null;
+    defer _ = win.CloseClipboard();
+    const handle = win.GetClipboardData(win.CF_UNICODETEXT) orelse return null;
+    const raw = win.GlobalLock(handle) orelse return null;
+    defer _ = win.GlobalUnlock(handle);
+    const units: [*]const u16 = @ptrCast(@alignCast(raw));
+    var n: usize = 0;
+    while (units[n] != 0) n += 1;
+    return utf16ToUtf8(units[0..n], buf);
+}
+
+/// UTF-16 code units to UTF-8, clamped to `buf`. A clamp never splits a
+/// codepoint, and a lone surrogate becomes U+FFFD instead of failing the paste.
+fn utf16ToUtf8(src: []const u16, buf: []u8) ?[]const u8 {
+    var out: usize = 0;
+    var i: usize = 0;
+    while (i < src.len) {
+        const cp: u21 = blk: {
+            const u = src[i];
+            if (u >= 0xD800 and u <= 0xDBFF and i + 1 < src.len and
+                src[i + 1] >= 0xDC00 and src[i + 1] <= 0xDFFF)
+            {
+                const pair = [_]u16{ u, src[i + 1] };
+                i += 2;
+                break :blk std.unicode.utf16DecodeSurrogatePair(&pair) catch 0xFFFD;
+            }
+            i += 1;
+            if (u >= 0xD800 and u <= 0xDFFF) break :blk 0xFFFD;
+            break :blk @intCast(u);
+        };
+        var tmp: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(cp, &tmp) catch continue;
+        if (out + n > buf.len) break; // keep the clamp on a codepoint boundary
+        @memcpy(buf[out..][0..n], tmp[0..n]);
+        out += n;
+    }
+    if (out == 0) return null;
+    return buf[0..out];
+}
+
+/// The Unix clipboard, through whichever helper is installed. The commands are
+/// tried in order and the first one that exits 0 with output wins; a missing
+/// tool just falls through. `os.runCommand` already bounds the wait, so a
+/// wedged helper cannot freeze the editor.
+fn clipboardUnix(allocator: std.mem.Allocator, buf: []u8) ?[]const u8 {
+    const commands = [_][]const []const u8{
+        &.{ "wl-paste", "--no-newline" },
+        &.{ "xclip", "-selection", "clipboard", "-o" },
+        &.{"pbpaste"},
+    };
+    const data_dir = os.dataDirAlloc(allocator) catch null;
+    defer if (data_dir) |d| allocator.free(d);
+    const state_dir = data_dir orelse ".";
+    for (commands) |argv| {
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(allocator);
+        const res = os.runCommand(allocator, state_dir, argv, "", &out, 800) catch continue;
+        if (res.timed_out or res.exit_code != 0 or out.items.len == 0) continue;
+        const n = @min(out.items.len, buf.len);
+        @memcpy(buf[0..n], out.items[0..n]);
+        return buf[0..n];
+    }
+    return null;
+}
 
 /// The pure half of `pasteBytes`, so the framing rules are testable without a
 /// running shell. When the buffer cannot hold both markers, the raw text is the
@@ -334,3 +485,95 @@ test "pasteBytes frames bracketed pastes and clamps to the buffer" {
     try std.testing.expectEqualStrings("ab", framePaste(false, "abcdef", &small));
 }
 
+test "keys forward untouched except the console's Backspace" {
+    var buf: [16]u8 = undefined;
+    // Backspace from the console becomes DEL, which is what shells expect.
+    try std.testing.expectEqual(@as(usize, 1), translateKeys(&buf, "\x08"));
+    try std.testing.expectEqual(@as(u8, 0x7f), buf[0]);
+    // Everything else is byte-for-byte: DEL stays DEL, Ctrl+C stays Ctrl+C.
+    try std.testing.expectEqual(@as(usize, 2), translateKeys(&buf, "\x7f\x03"));
+    try std.testing.expectEqual(@as(u8, 0x7f), buf[0]);
+    try std.testing.expectEqual(@as(u8, 0x03), buf[1]);
+    // A word with a Backspace in the middle keeps its other bytes.
+    const used = translateKeys(&buf, "ab\x08c");
+    try std.testing.expectEqual(@as(usize, 4), used);
+    try std.testing.expectEqualSlices(u8, "ab\x7fc", buf[0..used]);
+    // The destination clamps.
+    var small: [2]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), translateKeys(&small, "abc"));
+}
+
+test "autoscroll keeps a reader's place and follows at live" {
+    // At live, new output keeps the view at live: the panel follows the shell.
+    try std.testing.expectEqual(@as(usize, 0), anchoredView(0, 7));
+    // Reading history: the offset moves with the lines that scrolled off, so
+    // the same lines stay on screen.
+    try std.testing.expectEqual(@as(usize, 5), anchoredView(3, 2));
+    // No new lines: nothing moves.
+    try std.testing.expectEqual(@as(usize, 3), anchoredView(3, 0));
+}
+
+test "utf16 clipboard text becomes utf8, clamped on codepoint boundaries" {
+    var buf: [16]u8 = undefined;
+    // Plain ASCII.
+    try std.testing.expectEqualStrings("hello", utf16ToUtf8(&[_]u16{ 'h', 'e', 'l', 'l', 'o' }, &buf).?);
+    // A non-BMP character (emoji) is a surrogate pair in UTF-16.
+    const emoji = [_]u16{ 0xD83D, 0xDE00 };
+    try std.testing.expectEqualStrings("\u{1F600}", utf16ToUtf8(&emoji, &buf).?);
+    // A lone surrogate becomes the replacement character rather than failing.
+    try std.testing.expectEqualStrings("\u{FFFD}", utf16ToUtf8(&[_]u16{0xD83D}, &buf).?);
+    // Empty text is "no clipboard".
+    try std.testing.expect(utf16ToUtf8(&[_]u16{}, &buf) == null);
+    // A buffer that cannot hold a whole codepoint stops before it: two cells
+    // for the emoji do not fit in three bytes.
+    var tight: [3]u8 = undefined;
+    try std.testing.expect(utf16ToUtf8(&emoji, &tight) == null);
+    // ... but the ASCII before it is kept.
+    const mixed = [_]u16{ 'a', 'b', 0xD83D, 0xDE00 };
+    try std.testing.expectEqualStrings("ab", utf16ToUtf8(&mixed, &tight).?);
+}
+
+test "resize honours a grid smaller than the panel and keeps the scrollback" {
+    var vt = try vterm.Vt.init(std.testing.allocator, 40, 10);
+    defer vt.deinit();
+    // Push more lines than fit, so there is scrollback to preserve.
+    var i: usize = 0;
+    while (i < 20) : (i += 1) vt.feed("line\r\n");
+    try std.testing.expect(vt.scrollbackLen() > 0);
+    const before = vt.scrollbackLen();
+    // The panel passes the inner size, which is smaller than the panel itself.
+    try vt.resize(30, 8);
+    try std.testing.expectEqual(@as(u16, 30), vt.cols());
+    try std.testing.expectEqual(@as(u16, 8), vt.rows());
+    // The cursor stays inside the new grid and the history survives.
+    const cur = vt.cursor();
+    try std.testing.expect(cur.x < vt.cols());
+    try std.testing.expect(cur.y < vt.rows());
+    try std.testing.expect(vt.scrollbackLen() >= before);
+}
+
+test "resize survives a tiny inner size" {
+    var vt = try vterm.Vt.init(std.testing.allocator, 40, 10);
+    defer vt.deinit();
+    vt.feed("hello world\r\nsecond line\r\n");
+    // The panel can be squeezed very small; the grid must stay valid and the
+    // cursor inside it, or the renderer would read out of bounds.
+    for ([_]struct { c: u16, r: u16 }{
+        .{ .c = 20, .r = 3 },
+        .{ .c = 1, .r = 1 },
+        .{ .c = 2, .r = 2 },
+        .{ .c = 80, .r = 12 },
+    }) |size| {
+        try vt.resize(size.c, size.r);
+        try std.testing.expectEqual(size.c, vt.cols());
+        try std.testing.expectEqual(size.r, vt.rows());
+        const cur = vt.cursor();
+        try std.testing.expect(cur.x < vt.cols());
+        try std.testing.expect(cur.y < vt.rows());
+        // Every visible row is exactly `cols` cells: the renderer indexes them.
+        var row: u16 = 0;
+        while (row < vt.rows()) : (row += 1) {
+            try std.testing.expectEqual(@as(usize, vt.cols()), vt.line(row).len);
+        }
+    }
+}

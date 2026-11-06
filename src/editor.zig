@@ -79,6 +79,12 @@ pub const Editor = struct {
     scroll_col: usize = 0,
     path: ?[]u8 = null,
     dirty: bool = false,
+    /// The file changed on disk while this buffer had unsaved edits, so the
+    /// buffer and the disk disagree. Never silently overwritten: the tab shows
+    /// `[!]` and saving asks first.
+    conflict: bool = false,
+    /// F9 was pressed once and warned; the next press goes ahead.
+    reload_armed: bool = false,
     /// Size+mtime stamp of the file when it was read or written, so an idle
     /// tick can notice that it changed on disk.
     stamp: u64 = 0,
@@ -758,9 +764,15 @@ pub const Editor = struct {
     /// buffers are reloaded: unsaved edits are never thrown away.
     pub fn reloadIfChanged(self: *Editor) bool {
         const path = self.path orelse return false;
-        if (self.dirty) return false;
         const now = os.fileStamp(path);
         if (now == 0 or now == self.stamp) return false;
+        if (self.dirty) {
+            // The file moved on under unsaved edits. Do not touch the buffer
+            // (that would throw the edits away), but say so: the tab marks the
+            // conflict and the status line offers a reload.
+            self.conflict = true;
+            return false;
+        }
         const data = os.readFileAlloc(self.allocator, path, 16 * 1024 * 1024) catch return false;
         defer self.allocator.free(data);
         self.stamp = now;
@@ -770,6 +782,30 @@ pub const Editor = struct {
         if (self.cursor > self.buf.len()) self.cursor = self.buf.len();
         self.sel_anchor = null;
         self.clearCursors();
+        self.invalidateSyntax(0);
+        return true;
+    }
+
+    /// Reload the file from disk, discarding the buffer: the explicit "I want
+    /// what is on disk" action behind F9 and the conflict prompt.
+    pub fn reloadFromDisk(self: *Editor) !bool {
+        const path = self.path orelse return false;
+        const data = try os.readFileAlloc(self.allocator, path, 16 * 1024 * 1024);
+        defer self.allocator.free(data);
+        if (std.mem.eql(u8, data, self.text())) {
+            self.stamp = os.fileStamp(path);
+            self.conflict = false;
+            self.dirty = false;
+            return false;
+        }
+        self.buf.deinit();
+        self.buf = try buffer.Buffer.init(self.allocator, data);
+        self.stamp = os.fileStamp(path);
+        self.cursor = 0;
+        self.sel_anchor = null;
+        self.clearCursors();
+        self.dirty = false;
+        self.conflict = false;
         self.invalidateSyntax(0);
         return true;
     }

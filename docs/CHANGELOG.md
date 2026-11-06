@@ -1,14 +1,81 @@
 # Changelog
 
-## v0.0.3 - 2026-11-06
+## Unreleased
+
+**Keyboard focus**
+
+- The keyboard has exactly one owner: the editor, the file tree, or the terminal
+  panel, and every click sets it. Clicking the tree and then the text no longer
+  leaves the tree owning the keyboard (the arrows moved the tree selection
+  instead of the cursor).
+- Global keys (`F4`..`F9`) reach the editor while the file tree has the focus;
+  the tree's escape-sequence handling used to swallow them.
 
 **Selection**
 
 - The selection is painted by buffer offset, so it no longer bleeds onto the
-  first columns of the following line (it used to compare a line-relative
-  column against an absolute offset).
-- Global keys reach the editor while the file tree has the focus: `F4`..`F8`
-  were being swallowed by the tree's escape-sequence handling.
+  first columns of the following line.
+- A theme whose `selection` colour sits too close to its background is blended
+  towards the text colour, so the band is always visible.
+- Double click selects the word under the pointer, triple click the whole line,
+  and click-drag selects a range in both directions.
+
+**Undo**
+
+- An edit that consumed a selection records the far edge of the edit, so undo
+  leaves the cursor after the restored text (redo returns to where the edit left
+  it). Typing is still grouped into one undo step.
+
+**Files changed on disk**
+
+- A file that changes on disk while its buffer has unsaved edits is no longer
+  ignored silently: the tab shows `[!]`, the status line says
+  `<file> changed on disk - F9 reloads, Ctrl+S overwrites`, and the first
+  `Ctrl+S` only warns (a second one overwrites). `F9` reloads from disk,
+  warning once if the buffer has unsaved edits and discarding them on the second
+  press. Clean buffers still reload on their own within half a second.
+
+**Terminal**
+
+- Backspace sends `0x7f` (DEL) instead of the `0x08` the console reports, so it
+  deletes one character rather than wiping the whole typed line in `cmd.exe`.
+- Right click pastes the **system clipboard** (the Windows clipboard API;
+  `wl-paste`, `xclip` or `pbpaste` on Unix), falling back to mibi's own register
+  when the clipboard is empty or unavailable.
+- The cursor is always visible and blinks while the panel owns the keyboard
+  (`MIBI_NO_BLINK=1` turns blinking off); a shell that hides its cursor gets a
+  dim block instead.
+- Scrollback: the wheel, `Shift+PgUp`/`PgDn`, `Shift+Up`/`Down`, `Shift+Home`
+  (oldest) and `Shift+End` (live), with `-N lines` in the panel title. New
+  output keeps you at the bottom if you were there.
+- The shell gets the panel's *inner* width, so its last columns are no longer
+  cut off by the padding.
+- A shell that exits says so in the panel, and `F8` restarts it.
+
+**Terminal panel**
+
+- A chevron `▾` at the right end of the title row collapses the panel (the shell
+  keeps running), and the `>_` button in the status bar brings it back.
+- The title shows a `▌` marker when the panel owns the keyboard.
+- The panel has horizontal padding (`[terminal] padding`, 0-4).
+
+**Status bar**
+
+- The `F1 help` hint and the new `>_` terminal button are solid themed pills.
+- Status messages survive mouse motion (pointer movement used to wipe them) and
+  expire after four seconds.
+
+**Editor**
+
+- `Shift`+wheel scrolls the editor horizontally.
+
+**Idle CPU**
+
+- With the terminal open the editor used to busy-loop (~60% of a core) because
+  the Windows pseudo-console output handle stays signalled; it now sleeps and
+  polls on a 30 ms tick.
+
+## v0.0.3 - 2026-11-06
 
 **Embedded terminal (phase 5)**
 
@@ -26,11 +93,9 @@
 
 **Selection**
 
-- Double click selects the word under the pointer, triple click the whole line,
-  and click-drag now selects a run of text instead of only placing the cursor.
-- The selection band is kept visible on every theme: when a theme's `selection`
-  colour sits too close to the background it is blended towards the text colour,
-  so a selection never disappears into the tint.
+- Double click selects the word under the pointer and triple click the whole
+  line (the drag-select and contrast work landed after this release; see
+  Unreleased).
 - Undo after deleting a selection leaves the cursor after the restored text,
   and redo puts it back where the edit left it; typing is still grouped into one
   undo step.
