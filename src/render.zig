@@ -105,6 +105,12 @@ pub const Screen = struct {
     /// bytes are dropped, wide characters take two cells (the second is marked
     /// `cont`), and combining marks share the previous cell.
     pub fn putStr(self: *Screen, x: u16, y: u16, s: []const u8, cell: Cell) void {
+        self.putStrTo(x, y, self.cols, s, cell);
+    }
+
+    /// `putStr`, clipped: nothing is written at or past `max_x`. Used by the
+    /// tab bar, where a tab can be cut off by the right edge of the strip.
+    pub fn putStrTo(self: *Screen, x: u16, y: u16, max_x: u16, s: []const u8, cell: Cell) void {
         var cx: usize = x;
         var i: usize = 0;
         while (i < s.len) {
@@ -112,11 +118,11 @@ pub const Screen = struct {
             if (cp < 0x20) continue;
             const w = width.cellWidth(cp);
             if (w == 0) continue;
-            if (cx >= self.cols) break;
+            if (cx >= self.cols or cx >= max_x) break;
             var c = cell;
             c.ch = cp;
             self.put(@intCast(cx), y, c);
-            if (w == 2 and cx + 1 < self.cols) {
+            if (w == 2 and cx + 1 < self.cols and cx + 1 < max_x) {
                 var cont = cell;
                 cont.ch = ' ';
                 cont.cont = true;

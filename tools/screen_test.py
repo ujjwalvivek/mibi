@@ -917,23 +917,66 @@ def markdown_gets_highlighting(m, path):
 
 @check
 def tab_bar_has_new_and_close_buttons(m, path):
-    """The tab bar's + opens a tab and each tab's x closes it."""
+    """The tab bar's + opens a tab, each tab's x closes it, hover lights them."""
     m.wait_quiet()
     bar = m.screen_text().splitlines()[0]
     assert "+" in bar and " x" in bar, f"no tab buttons: {bar!r}"
+    # The close button keeps a cell of padding before the tab's edge.
+    assert "x " in bar, f"no padding after the close button: {bar!r}"
 
     plus = bar.index("+") + 1
+    plain = m.screen.bg_at(0, plus - 1)
+    m.send(f"\x1b[<35;{plus};1M")  # hover the +
+    m.wait_quiet()
+    assert m.screen.bg_at(0, plus - 1) != plain, "hovering the + did not highlight it"
+
     m.send(f"\x1b[<0;{plus};1M")
     m.wait_quiet()
     bar = m.screen_text().splitlines()[0]
     assert "No Name" in bar, f"the + did not open a tab: {bar!r}"
 
     close = bar.rindex("x") + 1
+    plain = m.screen.bg_at(0, close - 1)
+    m.send(f"\x1b[<35;{close};1M")  # hover the x
+    m.wait_quiet()
+    assert m.screen.bg_at(0, close - 1) != plain, "hovering the x did not highlight it"
+
     m.send(f"\x1b[<0;{close};1M")
     m.wait_quiet()
     bar = m.screen_text().splitlines()[0]
     assert "No Name" not in bar, f"the x did not close the tab: {bar!r}"
     m.shot("30-tab-buttons")
+
+
+@check
+def tab_strip_scrolls_when_it_overflows(m, path):
+    """Too many tabs: arrows appear at both ends and the wheel scrolls them."""
+    m.wait_quiet()
+    for _ in range(6):
+        m.send("\x14")  # Ctrl+T
+    m.wait_quiet()
+    bar = m.screen_text().splitlines()[0]
+    assert "\u2039" in bar and "\u203a" in bar, f"no scroll arrows: {bar!r}"
+    assert bar.startswith("\u2039"), f"the left arrow is not at the left edge: {bar!r}"
+    assert bar.rstrip().endswith("+"), f"the + is not pinned right: {bar!r}"
+    assert "[No Name]" in bar, f"the active tab is not visible: {bar!r}"
+    # The strip starts at its end (the active tab is the last one), so the
+    # right arrow is dim and the first tab is scrolled out of sight.
+    assert "notes.txt" not in bar, f"the strip did not follow the active tab: {bar!r}"
+    next_col = bar.index("\u203a")
+    dim = m.screen.fg_at(0, next_col)
+
+    m.send("\x1b[<64;20;1M")  # wheel up over the tab bar
+    m.wait_quiet()
+    bar = m.screen_text().splitlines()[0]
+    assert m.screen.fg_at(0, next_col) != dim, f"the wheel did not scroll the strip: {bar!r}"
+
+    for _ in range(8):
+        m.send("\x1b[<64;20;1M")
+    m.wait_quiet()
+    first = m.screen_text().splitlines()[0]
+    assert "notes.txt" in first, f"the strip did not scroll back to the start: {first!r}"
+    m.shot("31-tab-scroll")
 
 
 @check

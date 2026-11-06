@@ -107,6 +107,9 @@ const UiRequest = enum { open_picker, theme_picker, command_palette };
 
 const MAX_TABS = 32;
 
+/// Cells the pointer must travel over a tab before a click turns into a drag.
+const DRAG_THRESHOLD = 3;
+
 const Session = struct {
     allocator: std.mem.Allocator,
     docs: std.ArrayList(*Editor),
@@ -114,6 +117,8 @@ const Session = struct {
     config: config_mod.Config = .{},
     /// Set by an action that needs the UI layer to open a picker.
     ui_request: ?UiRequest = null,
+    /// Set when the last tab is closed from the mouse: the run loop quits.
+    quit_requested: bool = false,
     /// Set by the command palette: the run loop executes it like a key press.
     ui_action: ?keys.Action = null,
     /// Screen columns of each tab, filled in by drawTabBar so clicks can hit
@@ -128,8 +133,28 @@ const Session = struct {
     drag_tab: ?usize = null,
     drag_to: usize = 0,
     drag_x: u16 = 0,
+    /// Tab pressed on but not yet dragged: a click switches, a drag reorders.
+    press_tab: ?usize = null,
+    press_x: u16 = 0,
     /// Tab under the pointer (shows its path in the status line).
     hover_tab: ?usize = null,
+    /// Pointer is over a tab's close button, the "+", or an end arrow.
+    hover_close: ?usize = null,
+    hover_plus: bool = false,
+    hover_prev: bool = false,
+    hover_next: bool = false,
+    /// Tab strip scroll, in cells, snapped to a tab start. `tab_scroll_max` is
+    /// the furthest scroll the current width allows; the strip layout is cached
+    /// so the wheel and the end arrows can move by whole tabs.
+    tab_scroll: usize = 0,
+    tab_scroll_max: usize = 0,
+    tab_starts: [MAX_TABS]usize = undefined,
+    tab_widths: [MAX_TABS]usize = undefined,
+    /// End arrows (0xFFFF when the strip fits and no arrows are drawn).
+    tab_prev_x: u16 = 0xFFFF,
+    tab_next_x: u16 = 0xFFFF,
+    /// Active tab at the last draw, so a change scrolls it back into view.
+    drawn_active: usize = MAX_TABS,
     /// File tree sidebar; null when closed.
     tree: ?tree_mod.Tree = null,
     tree_focus: bool = false,
@@ -175,6 +200,8 @@ const Session = struct {
             return;
         }
         self.closeActive();
+        // Closing the last tab quits, exactly like Ctrl+W.
+        if (self.docs.items.len == 0) self.quit_requested = true;
     }
 
     /// Move the tab at `from` to `to`, keeping the same tab active.
@@ -205,6 +232,34 @@ const Session = struct {
         if (n <= 1) return;
         const i: isize = @as(isize, @intCast(self.active)) + delta;
         self.active = @intCast(@mod(i, @as(isize, @intCast(n))));
+    }
+
+    /// Scroll the tab strip by one tab. Manual scrolling pins the strip, so the
+    /// next draw does not jump back to the active tab.
+    fn scrollTabs(self: *Session, dir: i8) void {
+        if (self.tab_scroll_max == 0) return;
+        var target = self.tab_scroll;
+        if (dir > 0) {
+            var i: usize = 0;
+            while (i < self.tab_count) : (i += 1) {
+                if (self.tab_starts[i] > self.tab_scroll) {
+                    target = self.tab_starts[i];
+                    break;
+                }
+            }
+        } else {
+            var i: usize = self.tab_count;
+            while (i > 0) {
+                i -= 1;
+                if (self.tab_starts[i] < self.tab_scroll) {
+                    target = self.tab_starts[i];
+                    break;
+                }
+            }
+        }
+        if (target > self.tab_scroll_max) target = self.tab_scroll_max;
+        self.tab_scroll = target;
+        self.drawn_active = self.active;
     }
 
     fn anyDirty(self: *Session) bool {
@@ -432,6 +487,7 @@ fn run(init: std.process.Init.Minimal) !void {
         // (Enter), after which the remaining bytes are ordinary editing input.
         var off: usize = 0;
         while (off < pending_len and running) {
+            if (session.quit_requested) break;
             const chunk = pending[off..pending_len];
             if (session.tree_focus and session.tree != null and prompt == null and picker_state == null) {
                 if (handleTreeInput(&session, chunk, &msg_buf, &msg)) |consumed| {
@@ -467,6 +523,11 @@ fn run(init: std.process.Init.Minimal) !void {
                 openPicker(&session, &picker_state, mode, &theme_before, exe_dir);
                 picker_mode = mode;
             }
+        }
+        // The tab bar's close button quits when it closes the last tab.
+        if (session.quit_requested) {
+            session.quit_requested = false;
+            running = false;
         }
         const rem = pending_len - off;
         if (rem > 0) std.mem.copyForwards(u8, pending[0..rem], pending[off..pending_len]);
@@ -634,6 +695,9 @@ fn processInput(
     var i: usize = 0;
     while (i < buf.len) {
         if (!running.*) break;
+        // The last tab can close inside this chunk (its close button): stop
+        // before another token asks for the now-missing document.
+        if (session.docs.items.len == 0) break;
         const b = buf[i];
         if (b == 0x1b) {
             if (i + 1 >= buf.len) return i; // incomplete: wait for more
@@ -690,16 +754,27 @@ fn parseMouse(params: []const u8) [3]u16 {
 /// hint to toggle help, click text to place the cursor. The wheel moves one
 /// line per notch.
 fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, prompt: *?Prompt, msg_buf: []u8, msg: *[]const u8) void {
+    // Closing the last tab empties the session; the run loop quits right after,
+    // so any further event in the same chunk must not touch the editor.
+    if (session.docs.items.len == 0) return;
     const nums = parseMouse(params);
     const button = nums[0];
     const x = nums[1];
     const y = nums[2];
     const ed = session.current();
 
-    // Tab bar: the "x" closes a tab, "+" opens one, the label switches (and
-    // starts a drag).
+    // Tab bar: the "x" closes a tab, "+" opens one, the arrows scroll the
+    // strip, the label switches (and starts a drag).
     if (button == 0 and final == 'M' and y == 1) {
         const col = if (x > 0) @as(u16, x) - 1 else 0;
+        if (col == session.tab_prev_x) {
+            session.scrollTabs(-1);
+            return;
+        }
+        if (col == session.tab_next_x) {
+            session.scrollTabs(1);
+            return;
+        }
         var i: usize = 0;
         while (i < session.tab_count) : (i += 1) {
             if (col == session.tab_close_x[i]) {
@@ -716,14 +791,22 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
             const span = session.tab_spans[i];
             if (x >= span[0] and x < span[1]) {
                 session.active = i; // a plain click switches
-                session.drag_tab = i;
+                // A press only becomes a drag once the pointer really moves,
+                // so clicking a tab never flashes the drag chip.
+                session.press_tab = i;
+                session.press_x = x;
                 session.drag_to = i;
                 return;
             }
         }
     }
-    if (session.drag_tab) |from| {
+    if (session.press_tab) |from| {
         if (button == 32) { // motion while held
+            if (session.drag_tab == null) {
+                const moved = if (x > session.press_x) x - session.press_x else session.press_x - x;
+                if (moved < DRAG_THRESHOLD) return; // still a click
+                session.drag_tab = from;
+            }
             session.drag_x = x;
             var to = from;
             var i: usize = 0;
@@ -738,22 +821,44 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
             return;
         }
         if (final == 'm') { // release
-            session.moveTab(from, session.drag_to);
+            if (session.drag_tab) |f| session.moveTab(f, session.drag_to);
             session.drag_tab = null;
+            session.press_tab = null;
             session.hover_tab = null;
             return;
         }
     }
     const size = term.size();
     if (button == 64 or button == 65) { // wheel up / down
+        // Over the tab bar the wheel scrolls the strip instead of the text.
+        if (y == 1) {
+            session.scrollTabs(if (button == 64) -1 else 1);
+            return;
+        }
         ed.movePage(if (button == 64) -1 else 1, 1, false);
         return;
     }
-    // Hovering the tab bar shows that tab's path in the status line.
+    // Hovering the tab bar shows that tab's name in the status line, and
+    // lights up the button under the pointer.
     if (button == 35 or button == 32) {
         session.hover_tab = null;
+        session.hover_close = null;
+        session.hover_plus = false;
+        session.hover_prev = false;
+        session.hover_next = false;
         if (y == 1) {
+            const col = if (x > 0) @as(u16, x) - 1 else 0;
+            if (col == session.tab_prev_x) session.hover_prev = true;
+            if (col == session.tab_next_x) session.hover_next = true;
+            if (col == session.new_tab_x) session.hover_plus = true;
             var hi: usize = 0;
+            while (hi < session.tab_count) : (hi += 1) {
+                if (col == session.tab_close_x[hi]) {
+                    session.hover_close = hi;
+                    break;
+                }
+            }
+            hi = 0;
             while (hi < session.tab_count) : (hi += 1) {
                 const span = session.tab_spans[hi];
                 if (x >= span[0] and x < span[1]) {
@@ -1713,58 +1818,206 @@ fn openTreeSelection(session: *Session, msg_buf: []u8, msg: *[]const u8) void {
     session.tree_focus = false;
 }
 
+// --- tab strip -------------------------------------------------------------
+// The bar is `[<] tabs... [>] [ + ]`: the arrows only appear when the tabs do
+// not fit, and `+` stays pinned to the right edge so it is always reachable.
+
+/// A tab's text: " name " (plus " [+]" while the buffer is unsaved).
+fn tabLabel(ed: *Editor, buf: []u8) []const u8 {
+    const name = if (ed.path) |p| baseName(p) else "[No Name]";
+    return std.fmt.bufPrint(buf, " {s}{s} ", .{ name, if (ed.dirty) " [+]" else "" }) catch name;
+}
+
+/// Cells a tab takes: the label, a pad, the close `x`, and a right pad so the
+/// `x` never sits on the tab's edge.
+fn tabWidth(ed: *Editor) usize {
+    var buf: [200]u8 = undefined;
+    return tabLabel(ed, &buf).len + 3;
+}
+
+const TabLayout = struct {
+    /// True when the tabs do not fit and the strip scrolls.
+    overflow: bool = false,
+    /// First column of the tab area (1 when the left arrow is drawn).
+    x0: usize = 0,
+    /// Columns available for tabs.
+    avail: usize = 0,
+    /// Strip offset of the first visible tab.
+    scroll: usize = 0,
+    /// The " + " button, and the arrows (0xFFFF when absent).
+    plus_x: u16 = 0xFFFF,
+    prev_x: u16 = 0xFFFF,
+    next_x: u16 = 0xFFFF,
+};
+
+/// Work out the strip geometry for a bar `w` columns wide, caching each tab's
+/// offset and width on the session and clamping the scroll. Scrolling always
+/// lands on a tab start, so a tab is never cut off on its left edge.
+fn layoutTabs(session: *Session, w: usize) TabLayout {
+    const n = @min(session.docs.items.len, MAX_TABS);
+    session.tab_count = n;
+    var total: usize = 0;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        session.tab_widths[i] = tabWidth(session.docs.items[i]);
+        session.tab_starts[i] = total;
+        total += session.tab_widths[i];
+        if (i + 1 < n) total += 1; // one blank cell between tabs
+    }
+
+    var layout = TabLayout{};
+    if (w < 8) {
+        session.tab_scroll = 0;
+        session.tab_scroll_max = 0;
+        return layout;
+    }
+    layout.plus_x = @intCast(w - 3);
+    var avail = w - 4; // the tab area ends one cell before " + "
+    if (total > avail) {
+        layout.overflow = true;
+        layout.x0 = 1;
+        layout.prev_x = 0;
+        layout.next_x = @intCast(w - 5);
+        avail -= 2; // an arrow at each end
+    }
+    layout.avail = avail;
+
+    // Furthest scroll: the first tab whose remainder still fills the strip.
+    var max_scroll: usize = 0;
+    if (n > 0) {
+        max_scroll = session.tab_starts[n - 1];
+        i = 0;
+        while (i < n) : (i += 1) {
+            if (total - session.tab_starts[i] <= avail) {
+                max_scroll = session.tab_starts[i];
+                break;
+            }
+        }
+    }
+    session.tab_scroll_max = if (layout.overflow) max_scroll else 0;
+
+    var scroll = snapScrollUp(session, @min(session.tab_scroll, session.tab_scroll_max));
+    // A change of active tab scrolls it into view; a manual scroll stays put.
+    if (layout.overflow and session.active != session.drawn_active and session.active < n) {
+        const a = session.active;
+        const a0 = session.tab_starts[a];
+        const a1 = a0 + session.tab_widths[a];
+        if (session.tab_widths[a] >= avail or a0 < scroll) {
+            scroll = a0;
+        } else if (a1 > scroll + avail) {
+            scroll = snapScrollUp(session, @min(a1 - avail, session.tab_scroll_max));
+        }
+    }
+    session.tab_scroll = scroll;
+    session.drawn_active = session.active;
+    layout.scroll = scroll;
+    return layout;
+}
+
+/// The tab start at or after `target`; scroll targets always land on a tab.
+fn snapScrollUp(session: *Session, target: usize) usize {
+    const n = session.tab_count;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        if (session.tab_starts[i] >= target) return session.tab_starts[i];
+    }
+    return if (n > 0) session.tab_starts[n - 1] else 0;
+}
+
 fn drawTabBar(s: *render.Screen, session: *Session, w: usize, text_fg: render.Color, dim_fg: render.Color) void {
     const theme = session.config.theme;
     const bar_bg = theme.tab_bg;
     const active_bg = theme.tab_active_bg;
     session.tab_count = 0;
     session.new_tab_x = 0xFFFF;
+    session.tab_prev_x = 0xFFFF;
+    session.tab_next_x = 0xFFFF;
+    var i: usize = 0;
+    while (i < MAX_TABS) : (i += 1) {
+        session.tab_spans[i] = .{ 0xFFFF, 0 };
+        session.tab_close_x[i] = 0xFFFF;
+    }
     var x: usize = 0;
     while (x < w) : (x += 1) s.put(@intCast(x), 0, .{ .bg = bar_bg });
 
-    var tx: usize = 0;
-    for (session.docs.items, 0..) |ed, i| {
-        // File name only; the full path shows on hover and while dragging.
-        const name = if (ed.path) |p| baseName(p) else "[No Name]";
-        var buf: [160]u8 = undefined;
-        const label = std.fmt.bufPrint(&buf, " {s}{s} ", .{ name, if (ed.dirty) " [+]" else "" }) catch continue;
-        // label + padding + "x" + a gap
-        if (tx + label.len + 3 > w) break;
+    const layout = layoutTabs(session, w);
+    const strip_end = layout.x0 + layout.avail;
+
+    // " + " pinned to the right edge.
+    if (layout.plus_x != 0xFFFF) {
+        const hot = session.hover_plus;
+        s.putStr(layout.plus_x, 0, " + ", .{
+            .bg = if (hot) theme.accent else bar_bg,
+            .fg = if (hot) bar_bg else theme.accent,
+            .attr = .{ .bold = true },
+        });
+        session.new_tab_x = layout.plus_x + 1;
+    }
+    if (layout.overflow) {
+        const can_prev = layout.scroll > 0;
+        const can_next = layout.scroll < session.tab_scroll_max;
+        const hot_prev = session.hover_prev and can_prev;
+        const hot_next = session.hover_next and can_next;
+        s.put(layout.prev_x, 0, .{
+            .ch = '\u{2039}',
+            .bg = if (hot_prev) theme.accent else bar_bg,
+            .fg = if (hot_prev) bar_bg else if (can_prev) theme.accent else dim_fg,
+            .attr = .{ .bold = can_prev },
+        });
+        s.put(layout.next_x, 0, .{
+            .ch = '\u{203a}',
+            .bg = if (hot_next) theme.accent else bar_bg,
+            .fg = if (hot_next) bar_bg else if (can_next) theme.accent else dim_fg,
+            .attr = .{ .bold = can_next },
+        });
+        session.tab_prev_x = layout.prev_x;
+        session.tab_next_x = layout.next_x;
+    }
+
+    const n = session.tab_count;
+    i = 0;
+    while (i < n) : (i += 1) {
+        const start = session.tab_starts[i];
+        const tab_w = session.tab_widths[i];
+        if (start + tab_w <= layout.scroll) continue; // scrolled off to the left
+        if (start < layout.scroll) continue; // unreachable: scroll is a tab start
+        const tx = layout.x0 + (start - layout.scroll);
+        if (tx >= strip_end) break;
+        const tab_end = @min(tx + tab_w, strip_end);
+        const ed = session.docs.items[i];
         const active = i == session.active;
         const hovered = session.hover_tab == i;
         const dragging = session.drag_tab == i;
         const bg = if (dragging) theme.accent else if (active) active_bg else if (hovered) theme.selection else bar_bg;
-        s.putStr(@intCast(tx), 0, label, .{
+        const fg = if (dragging) bar_bg else if (active or hovered) text_fg else dim_fg;
+        // Fill the tab first so the padding cells carry its background.
+        var cx = tx;
+        while (cx < tab_end) : (cx += 1) s.put(@intCast(cx), 0, .{ .ch = ' ', .bg = bg });
+        var buf: [200]u8 = undefined;
+        const label = tabLabel(ed, &buf);
+        s.putStrTo(@intCast(tx), 0, @intCast(tab_end), label, .{
             .bg = bg,
-            .fg = if (dragging) bar_bg else if (active or hovered) text_fg else dim_fg,
+            .fg = fg,
             .attr = .{ .bold = active or dragging, .underline = hovered and !active },
         });
         const close_x = tx + label.len + 1; // one cell of padding before the x
-        s.put(@intCast(tx + label.len), 0, .{ .ch = ' ', .bg = bg });
-        s.put(@intCast(close_x), 0, .{
-            .ch = 'x',
-            .bg = bg,
-            .fg = if (dragging) bar_bg else dim_fg,
-            .attr = .{ .bold = hovered },
-        });
-        if (session.tab_count < MAX_TABS) {
-            session.tab_spans[session.tab_count] = .{ @intCast(tx), @intCast(close_x) };
-            session.tab_close_x[session.tab_count] = @intCast(close_x);
-            session.tab_count += 1;
+        if (close_x + 1 < tab_end) { // the x and the cell after it both fit
+            const hot = session.hover_close == i;
+            s.put(@intCast(close_x), 0, .{
+                .ch = 'x',
+                .bg = if (hot) theme.accent else bg,
+                .fg = if (hot or dragging) bar_bg else dim_fg,
+                .attr = .{ .bold = hot or hovered },
+            });
+            session.tab_close_x[i] = @intCast(close_x);
         }
-        tx = close_x + 2;
-    }
-
-    // New-tab button after the last tab.
-    if (tx + 3 <= w) {
-        session.new_tab_x = @intCast(tx + 1); // the '+' glyph, not the padding
-        s.putStr(@intCast(tx), 0, " + ", .{ .bg = bar_bg, .fg = theme.accent, .attr = .{ .bold = true } });
+        session.tab_spans[i] = .{ @intCast(tx), @intCast(tab_end) };
     }
 
     // While dragging: a drop marker where the tab would land, and the tab
     // itself following the pointer.
     if (session.drag_tab) |from| {
-        if (session.drag_to < session.tab_count) {
+        if (session.drag_to < n and session.tab_spans[session.drag_to][0] != 0xFFFF) {
             const marker = session.tab_spans[session.drag_to][0];
             if (marker < w) s.put(@intCast(marker), 0, .{ .ch = '\u{2502}', .bg = bar_bg, .fg = theme.accent });
         }
@@ -1774,10 +2027,10 @@ fn drawTabBar(s: *render.Screen, session: *Session, w: usize, text_fg: render.Co
         const chip = std.fmt.bufPrint(&chip_buf, " {s} ", .{name}) catch name;
         const start_x: usize = if (session.drag_x > 0) @as(usize, session.drag_x) - 1 else 0;
         var cx = start_x;
-        var i: usize = 0;
-        while (i < chip.len and cx < w) : (i += 1) {
+        var ci: usize = 0;
+        while (ci < chip.len and cx < w) : (ci += 1) {
             s.put(@intCast(cx), 0, .{
-                .ch = chip[i],
+                .ch = chip[ci],
                 .bg = theme.accent,
                 .fg = bar_bg,
                 .attr = .{ .bold = true },
@@ -2732,10 +2985,10 @@ test "a mouse click places the cursor and the wheel moves one line" {
     try std.testing.expectEqual(@as(usize, 1), rc.row);
     try std.testing.expectEqual(@as(usize, 1), rc.col);
 
-    // One wheel notch is one line.
-    handleMouse(&d.session, "<65;1;1", 'M', &help, &pr, &mb, &msg);
+    // One wheel notch is one line (over the text area; the tab bar scrolls).
+    handleMouse(&d.session, "<65;1;3", 'M', &help, &pr, &mb, &msg);
     try std.testing.expectEqual(@as(usize, 2), d.ed().rowCol().row);
-    handleMouse(&d.session, "<64;1;1", 'M', &help, &pr, &mb, &msg);
+    handleMouse(&d.session, "<64;1;3", 'M', &help, &pr, &mb, &msg);
     try std.testing.expectEqual(@as(usize, 1), d.ed().rowCol().row);
 }
 
@@ -2984,13 +3237,152 @@ test "the tab bar shows every open document" {
     draw(&s, &d.session, "", null, false);
     var buf: [128]u8 = undefined;
     const bar = rowText(&s, 0, &buf);
-    try std.testing.expect(std.mem.indexOf(u8, bar, "[No Name]  x  [No Name]  x") != null);
-
+    // " name " + pad + x + pad, then one blank cell before the next tab.
+    try std.testing.expect(std.mem.indexOf(u8, bar, " [No Name]  x   [No Name]  x ") != null);
     try d.send("\x1b[5;5~"); // Ctrl+PgUp back to the first document
     draw(&s, &d.session, "", null, false);
     // The first document row starts one line below the tab bar.
     const text_row = rowText(&s, 1, &buf);
     try std.testing.expect(std.mem.indexOf(u8, text_row, "1 one") != null);
+}
+
+test "a tab keeps a cell of padding after its close button" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    var s = try render.Screen.init(std.testing.allocator, 40, 6);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+
+    var buf: [128]u8 = undefined;
+    const bar = rowText(&s, 0, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, bar, " [No Name]  x ") != null);
+    // The x is not the tab's last cell: one cell of the tab's background
+    // follows it, so it does not touch the edge.
+    const close_x = d.session.tab_close_x[0];
+    try std.testing.expect(close_x != 0xFFFF);
+    try std.testing.expect(close_x + 1 < d.session.tab_spans[0][1]);
+    try std.testing.expectEqual(@as(u16, 14), d.session.tab_spans[0][1]);
+}
+
+test "the tab strip scrolls to keep the active tab visible" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    var i: usize = 0;
+    while (i < 12) : (i += 1) try d.send("\x14"); // Ctrl+T: many tabs
+    var s = try render.Screen.init(std.testing.allocator, 40, 6);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+
+    // Too many tabs for 40 columns: the strip scrolls and shows both arrows.
+    try std.testing.expect(d.session.tab_scroll_max > 0);
+    try std.testing.expectEqual(@as(u16, 0), d.session.tab_prev_x);
+    try std.testing.expect(d.session.tab_next_x != 0xFFFF);
+    // The last tab (the active one) is visible; the first one is scrolled off.
+    try std.testing.expect(d.session.tab_spans[12][0] != 0xFFFF);
+    try std.testing.expect(d.session.tab_spans[0][0] == 0xFFFF);
+    try std.testing.expect(d.session.tab_scroll > 0);
+
+    // Scrolling left by hand walks back one tab at a time.
+    const before = d.session.tab_scroll;
+    d.session.scrollTabs(-1);
+    try std.testing.expect(d.session.tab_scroll < before);
+    while (d.session.tab_scroll > 0) d.session.scrollTabs(-1);
+    draw(&s, &d.session, "", null, false);
+    try std.testing.expectEqual(@as(usize, 0), d.session.tab_scroll);
+    try std.testing.expect(d.session.tab_spans[0][0] != 0xFFFF);
+
+    // Cycling tabs scrolls the strip back to the active one.
+    try d.send("\x1b[5;5~"); // Ctrl+PgUp
+    draw(&s, &d.session, "", null, false);
+    try std.testing.expect(d.session.tab_spans[d.session.active][0] != 0xFFFF);
+}
+
+test "hovering a tab button highlights it" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    var s = try render.Screen.init(std.testing.allocator, 40, 6);
+    defer s.deinit();
+    var help = false;
+    var pr: ?Prompt = null;
+    var mb: [64]u8 = undefined;
+    var msg: []const u8 = "";
+
+    draw(&s, &d.session, "", null, false);
+    const close_x = d.session.tab_close_x[0];
+    const plus_x = d.session.new_tab_x;
+    const plain_x = s.back[close_x].bg;
+    const plain_plus = s.back[plus_x].bg;
+
+    var params_buf: [32]u8 = undefined;
+    var params = try std.fmt.bufPrint(&params_buf, "<35;{d};1", .{close_x + 1});
+    handleMouse(&d.session, params, 'M', &help, &pr, &mb, &msg);
+    try std.testing.expectEqual(@as(?usize, 0), d.session.hover_close);
+    draw(&s, &d.session, "", null, false);
+    try std.testing.expect(!std.meta.eql(s.back[close_x].bg, plain_x));
+
+    params = try std.fmt.bufPrint(&params_buf, "<35;{d};1", .{plus_x + 1});
+    handleMouse(&d.session, params, 'M', &help, &pr, &mb, &msg);
+    try std.testing.expect(d.session.hover_plus);
+    draw(&s, &d.session, "", null, false);
+    try std.testing.expect(!std.meta.eql(s.back[plus_x].bg, plain_plus));
+    try std.testing.expectEqual(@as(?usize, null), d.session.hover_close); // moved away
+
+    // Leaving the bar clears the highlight.
+    handleMouse(&d.session, "<35;5;5", 'M', &help, &pr, &mb, &msg);
+    try std.testing.expect(!d.session.hover_plus);
+    draw(&s, &d.session, "", null, false);
+    try std.testing.expect(std.meta.eql(plain_plus, s.back[plus_x].bg));
+}
+
+test "a click on a tab is not a drag" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    try d.send("\x14"); // a second tab
+    var s = try render.Screen.init(std.testing.allocator, 40, 6);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+    var help = false;
+    var pr: ?Prompt = null;
+    var mb: [64]u8 = undefined;
+    var msg: []const u8 = "";
+
+    // Press on the second tab and jiggle by one cell: still just a click.
+    handleMouse(&d.session, "<0;18;1", 'M', &help, &pr, &mb, &msg);
+    try std.testing.expect(d.session.press_tab != null);
+    try std.testing.expect(d.session.drag_tab == null);
+    handleMouse(&d.session, "<32;19;1", 'M', &help, &pr, &mb, &msg);
+    try std.testing.expect(d.session.drag_tab == null);
+    handleMouse(&d.session, "<0;19;1", 'm', &help, &pr, &mb, &msg);
+    try std.testing.expect(d.session.drag_tab == null);
+    try std.testing.expect(d.session.press_tab == null);
+
+    // A real move promotes the press to a drag.
+    handleMouse(&d.session, "<0;18;1", 'M', &help, &pr, &mb, &msg);
+    handleMouse(&d.session, "<32;22;1", 'M', &help, &pr, &mb, &msg);
+    try std.testing.expect(d.session.drag_tab != null);
+}
+
+test "the close button on the last tab asks to quit instead of crashing" {
+    var d = try Drive.start("one");
+    defer d.stop();
+    var s = try render.Screen.init(std.testing.allocator, 40, 6);
+    defer s.deinit();
+    draw(&s, &d.session, "", null, false);
+    var help = false;
+    var pr: ?Prompt = null;
+    var mb: [64]u8 = undefined;
+    var msg: []const u8 = "";
+
+    var params_buf: [32]u8 = undefined;
+    const params = try std.fmt.bufPrint(&params_buf, "<0;{d};1", .{d.session.tab_close_x[0] + 1});
+    handleMouse(&d.session, params, 'M', &help, &pr, &mb, &msg);
+    try std.testing.expectEqual(@as(usize, 0), d.session.count());
+    try std.testing.expect(d.session.quit_requested);
+
+    // The release (or any other event) in the same chunk must not reach the
+    // document that is now gone.
+    handleMouse(&d.session, "<0;5;3", 'M', &help, &pr, &mb, &msg);
+    try std.testing.expectEqual(@as(usize, 0), d.session.count());
 }
 
 test "a failed save-as keeps the old path and the dirty flag" {

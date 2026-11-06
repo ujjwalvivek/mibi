@@ -156,8 +156,9 @@ packaging.
   letter markers.
 - Mouse: click text to place the cursor, click a tab to switch to it, click
   picker rows (click again to accept), click the status-bar hint for help;
-  the wheel moves one line per notch. Quick-edit mode is turned off so the
-  console reports clicks to the editor.
+  the wheel moves one line per notch. Over the tab bar the wheel scrolls the
+  strip instead. Quick-edit mode is turned off so the console reports clicks
+  to the editor.
 - Configurable keybindings and a colour theme via `mibi.ini` (`[keys]` and
   `[theme]`), with the whole palette and every action bindable. The help
   panel renders the keys you actually bound.
@@ -169,9 +170,14 @@ packaging.
   languages ship in the repo, and adding one is dropping in a file - no
   rebuild. Multi-line comments and strings carry state across lines.
 - Line numbers, status bar (name, dirty `[+]`, cursor, line count, size).
-- Multiple documents as tabs: file names only in the tab bar, a `+` button and a
-  per-tab `x` to close, per-document dirty markers,
-  Ctrl+T / Ctrl+W, Ctrl+PgUp / Ctrl+PgDn, and a quit that checks every tab.
+- Multiple documents as tabs: file names only in the tab bar, a `+` button
+  pinned to the right edge and a per-tab `x` to close (with a cell of padding
+  so it does not touch the tab edge; hovering `x`, `+` or the scroll arrows
+  lights them up). When the tabs do not fit, `‹` / `›` arrows appear at both
+  ends and the wheel over the bar scrolls the strip; the active tab is always
+  scrolled into view. Closing the last tab quits, exactly like `Ctrl+W`.
+  Per-document dirty markers, Ctrl+T / Ctrl+W, Ctrl+PgUp / Ctrl+PgDn, and a
+  quit that checks every tab.
 - File open/save; path prompts list the directory; Tab completes. A failed
   open or save reports the actual OS error rather than failing silently.
 - Cell-grid **diff renderer**: changed rows are rewritten in full.
@@ -204,12 +210,12 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu |  108,608 |
-| x86_64-linux-gnu  |  118,984 |
-| x86_64-macos      |  128,508 |
-| aarch64-macos     | 162,680 |
-| x86_64-windows    | 178,688 |
+| aarch64-linux-gnu |  111,216 |
+| x86_64-linux-gnu  |  121,160 |
+| x86_64-macos      |  132,604 |
+| aarch64-macos     |  162,952 |
+| x86_64-windows    |  180,736 |
 
 ## Not yet
 
-Splits, file tree, multi-cursor, macros, regex, embedded terminal.
+Splits, multi-cursor, macros, embedded terminal.

@@ -32,14 +32,14 @@ boundary; never print via `std.debug` or `std.Io.Threaded`.
 
 ## mibi binary size by phase, cross-compiled
 
-| Target | Phase 1 (skeleton) | Phase 2 (editing) | Current (Phase 2 hardened + Phase 3 features) |
+| Target | Phase 1 (skeleton) | Phase 2 (editing) | Current (Phase 3 + Phase 4 features) |
 | --- | ---: | ---: | ---: |
-| `x86_64-linux-gnu` | 8,960 | 26,168 | 118,984 |
-| `aarch64-linux-gnu` | 8,816 | 24,752 | 108,608 |
-| `x86_64-macos` | 16,994 | 33,922 | 128,508 |
-| `aarch64-macos` | 50,304 | 69,392 | 162,680 |
-| `x86_64-windows-gnu` | 50,176 | 71,680 | 178,688 |
-| `x86_64-windows` | 55,808 | 69,632 | 178,688 |
+| `x86_64-linux-gnu` | 8,960 | 26,168 | 121,160 |
+| `aarch64-linux-gnu` | 8,816 | 24,752 | 111,216 |
+| `x86_64-macos` | 16,994 | 33,922 | 132,604 |
+| `aarch64-macos` | 50,304 | 69,392 | 162,952 |
+| `x86_64-windows-gnu` | 50,176 | 71,680 | 180,736 |
+| `x86_64-windows` | 55,808 | 69,632 | 180,736 |
 
 The hardening pass (cached line index, UTF-8 `putStr`, file-safety guards,
 richer error reporting) cost ~1.5-2 KB per target. Current numbers are explicit
