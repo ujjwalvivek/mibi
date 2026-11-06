@@ -953,6 +953,22 @@ def status_message_expires(m, path):
 
 
 @check
+def status_message_expires_while_the_mouse_moves(m, path):
+    """The cleared message must be repainted even when only mouse motion comes."""
+    m.send("\x1b[20~")  # F9 on an unchanged file reports "already up to date"
+    assert m.wait_for("up to date"), "no status message to test with:\n" + m.screen_text()
+    deadline = time.time() + 8
+    while time.time() < deadline and "up to date" in m.screen_text():
+        m.proc.write("\x1b[<35;10;5M")  # pointer motion, no buttons
+        time.sleep(0.5)
+    screen = m.screen_text()
+    assert "up to date" not in screen, (
+        "the message expired internally but the screen was never repainted:\n" + screen)
+    assert m.alive(), "the editor died while the message expired"
+    m.shot("66-message-expired-mouse")
+
+
+@check
 def double_and_triple_click_select(m, path):
     """Double click selects a word, triple click selects the whole line."""
     work = os.path.join(SHOT_DIR, "work-clicks")

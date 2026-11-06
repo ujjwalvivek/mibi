@@ -281,6 +281,73 @@ pub const Editor = struct {
         self.pref_col = null;
     }
 
+    // --- brackets --------------------------------------------------------
+
+    /// The partner of a bracket byte, or null when `c` is not a bracket.
+    fn bracketPartner(c: u8) ?u8 {
+        return switch (c) {
+            '(' => ')',
+            ')' => '(',
+            '[' => ']',
+            ']' => '[',
+            '{' => '}',
+            '}' => '{',
+            else => null,
+        };
+    }
+
+    fn isBracketByte(c: u8) bool {
+        return bracketPartner(c) != null;
+    }
+
+    /// The bracket the cursor is on, or the one just before it: right after you
+    /// type a bracket the cursor sits behind it, not on it. Cheap (O(1)) and
+    /// clamped to the buffer, so a cursor at or past the end is safe.
+    pub fn bracketNear(self: *Editor, pos: usize) ?usize {
+        const f = self.buf.flat();
+        if (pos < f.len and isBracketByte(f[pos])) return pos;
+        if (pos > 0 and pos - 1 < f.len and isBracketByte(f[pos - 1])) return pos - 1;
+        return null;
+    }
+
+    /// The matching partner of the bracket at `pos`, or of the one just before
+    /// it when `pos` itself is not a bracket. Nesting counts brackets of the
+    /// same type, so `(a (b) c)` pairs the outer parentheses; a closer of a
+    /// different type is not a partner, and an unbalanced bracket returns null.
+    pub fn matchingBracket(self: *Editor, pos: usize) ?usize {
+        const src = self.bracketNear(pos) orelse return null;
+        const f = self.buf.flat();
+        const c = f[src];
+        const partner = bracketPartner(c) orelse return null;
+        // Openers scan forward, closers scan back. Only same-type brackets
+        // change the depth, so nested pairs of the same type are skipped.
+        const forward = c == '(' or c == '[' or c == '{';
+        var depth: usize = 0;
+        if (forward) {
+            var i = src + 1;
+            while (i < f.len) : (i += 1) {
+                if (f[i] == c) {
+                    depth += 1;
+                } else if (f[i] == partner) {
+                    if (depth == 0) return i;
+                    depth -= 1;
+                }
+            }
+        } else {
+            var i = src;
+            while (i > 0) {
+                i -= 1;
+                if (f[i] == c) {
+                    depth += 1;
+                } else if (f[i] == partner) {
+                    if (depth == 0) return i;
+                    depth -= 1;
+                }
+            }
+        }
+        return null;
+    }
+
     // --- movement --------------------------------------------------------
 
     pub fn moveLeft(self: *Editor, extend: bool) void {
@@ -1756,4 +1823,106 @@ test "reloading from disk drops undo history instead of restoring stale pieces" 
     try std.testing.expectEqualStrings("alpha\nbeta\n", e.text());
     try e.redo();
     try std.testing.expectEqualStrings("alpha\nbeta\n", e.text());
+}
+
+// --- matching brackets -------------------------------------------------------
+
+test "matchingBracket pairs nested brackets" {
+    var e = try Editor.init(std.testing.allocator, null, "(a (b) c)");
+    defer e.deinit();
+
+    // Outer pair: 0 and 8; the nested pair: 3 and 5.
+    try std.testing.expectEqual(@as(?usize, 8), e.matchingBracket(0));
+    try std.testing.expectEqual(@as(?usize, 0), e.matchingBracket(8));
+    try std.testing.expectEqual(@as(?usize, 5), e.matchingBracket(3));
+    try std.testing.expectEqual(@as(?usize, 3), e.matchingBracket(5));
+}
+
+test "matchingBracket pairs every bracket type" {
+    var e = try Editor.init(std.testing.allocator, null, "{[()]}");
+    defer e.deinit();
+
+    try std.testing.expectEqual(@as(?usize, 5), e.matchingBracket(0)); // { }
+    try std.testing.expectEqual(@as(?usize, 4), e.matchingBracket(1)); // [ ]
+    try std.testing.expectEqual(@as(?usize, 3), e.matchingBracket(2)); // ( )
+    try std.testing.expectEqual(@as(?usize, 2), e.matchingBracket(3));
+    try std.testing.expectEqual(@as(?usize, 1), e.matchingBracket(4));
+    try std.testing.expectEqual(@as(?usize, 0), e.matchingBracket(5));
+}
+
+test "matchingBracket returns null for mismatched types" {
+    var e = try Editor.init(std.testing.allocator, null, "(a]");
+    defer e.deinit();
+
+    // A closer of another type is not a partner, and the opener has none.
+    try std.testing.expectEqual(@as(?usize, null), e.matchingBracket(0));
+    try std.testing.expectEqual(@as(?usize, null), e.matchingBracket(2));
+
+    var unbalanced = try Editor.init(std.testing.allocator, null, "((a)");
+    defer unbalanced.deinit();
+    // The outer '(' never closes; the inner one still pairs with ')' at 3.
+    try std.testing.expectEqual(@as(?usize, null), unbalanced.matchingBracket(0));
+    try std.testing.expectEqual(@as(?usize, 3), unbalanced.matchingBracket(1));
+}
+
+test "matchingBracket works in the middle of text" {
+    var e = try Editor.init(std.testing.allocator, null, "x = (a + b) * 2");
+    defer e.deinit();
+
+    try std.testing.expectEqual(@as(?usize, 10), e.matchingBracket(4));
+    try std.testing.expectEqual(@as(?usize, 4), e.matchingBracket(10));
+    // A cursor inside the group (on 'a') still uses the bracket before it.
+    try std.testing.expectEqual(@as(?usize, 4), e.bracketNear(5));
+    try std.testing.expectEqual(@as(?usize, 10), e.matchingBracket(5));
+    // 'x' at the start is not a bracket.
+    try std.testing.expectEqual(@as(?usize, null), e.matchingBracket(0));
+}
+
+test "matchingBracket looks at the bracket just before the cursor" {
+    var e = try Editor.init(std.testing.allocator, null, "ab()cd");
+    defer e.deinit();
+
+    // Right after typing "()" the cursor sits behind the ')': the byte before
+    // it is the bracket that gets matched.
+    try std.testing.expectEqual(@as(?usize, 3), e.bracketNear(4));
+    try std.testing.expectEqual(@as(?usize, 2), e.matchingBracket(4));
+    // On the '(' itself.
+    try std.testing.expectEqual(@as(?usize, 2), e.bracketNear(2));
+    try std.testing.expectEqual(@as(?usize, 3), e.matchingBracket(2));
+
+    // At the very end of "ab()" the cursor sits after the ')', past the last
+    // byte, and the bracket before it is still matched.
+    var end = try Editor.init(std.testing.allocator, null, "ab()");
+    defer end.deinit();
+    try std.testing.expectEqual(@as(?usize, 2), end.matchingBracket(4));
+}
+
+test "matchingBracket at the very start and end of the buffer" {
+    var e = try Editor.init(std.testing.allocator, null, "()");
+    defer e.deinit();
+
+    try std.testing.expectEqual(@as(?usize, 1), e.matchingBracket(0));
+    try std.testing.expectEqual(@as(?usize, 0), e.matchingBracket(1));
+
+    var lone = try Editor.init(std.testing.allocator, null, ")");
+    defer lone.deinit();
+    try std.testing.expectEqual(@as(?usize, null), lone.matchingBracket(0));
+
+    var lone_open = try Editor.init(std.testing.allocator, null, "(");
+    defer lone_open.deinit();
+    try std.testing.expectEqual(@as(?usize, null), lone_open.matchingBracket(0));
+}
+
+test "matchingBracket on no bracket, an empty buffer and past the end" {
+    var e = try Editor.init(std.testing.allocator, null, "hello");
+    defer e.deinit();
+    for (0..6) |pos| {
+        try std.testing.expectEqual(@as(?usize, null), e.matchingBracket(pos));
+    }
+    try std.testing.expectEqual(@as(?usize, null), e.matchingBracket(999));
+
+    var empty = try Editor.init(std.testing.allocator, null, "");
+    defer empty.deinit();
+    try std.testing.expectEqual(@as(?usize, null), empty.matchingBracket(0));
+    try std.testing.expectEqual(@as(?usize, null), empty.matchingBracket(99));
 }

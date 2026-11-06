@@ -1,0 +1,114 @@
+# CI for mibi: build, unit tests and the size gate on Linux; build and unit
+# tests on Windows. Zig 0.16.0 is installed by the repo's own scripts, so CI
+# uses the same pinned, SHA-256-checked toolchain as a local build.
+#
+# The screen tests (tools/screen_test.py) are deliberately not run here: they
+# drive the real console through a ConPTY and need pywinpty on Windows, which
+# is not a dependency of the project. Run them locally with
+# `python tools/screen_test.py`.
+#
+# The size budgets below mirror tools/check-size.ps1. Keep the two in step.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache-global
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the Zig toolchain
+        uses: actions/cache@v4
+        with:
+          path: tools/zig-linux
+          key: ${{ runner.os }}-zig-0.16.0-toolchain
+          restore-keys: ${{ runner.os }}-zig-0.16.0-toolchain
+
+      - name: Install Zig 0.16.0 (pinned, SHA-256 checked)
+        run: ./tools/get-zig-linux.sh
+
+      - name: Cache the Zig build
+        uses: actions/cache@v4
+        with:
+          path: |
+            .zig-cache
+            .zig-cache-global
+          key: ${{ runner.os }}-zig-0.16.0-${{ hashFiles('build.zig', 'build.zig.zon') }}
+          restore-keys: ${{ runner.os }}-zig-0.16.0-
+
+      - name: Build
+        run: ./tools/zig-linux/zig build
+
+      - name: Unit tests
+        run: ./tools/zig-linux/zig build test
+
+      - name: Size gate
+        run: |
+          set -euo pipefail
+          zig=./tools/zig-linux/zig
+          # target:budget-KB:exe - the same budgets as tools/check-size.ps1
+          # (re-based after the embedded terminal was removed, ~10-12% headroom).
+          targets="x86_64-linux-gnu:176:mibi aarch64-linux-gnu:160:mibi x86_64-macos:184:mibi aarch64-macos:216:mibi x86_64-windows:232:mibi.exe x86_64-windows-gnu:232:mibi.exe"
+          failed=0
+          for spec in $targets; do
+            target=${spec%%:*}
+            rest=${spec#*:}
+            budget_kb=${rest%%:*}
+            exe=${rest#*:}
+            budget=$((budget_kb * 1024))
+            # Never measure a stale artifact from an earlier target.
+            rm -f "zig-out/bin/$exe"
+            $zig build "-Dtarget=$target"
+            size=$(stat -c%s "zig-out/bin/$exe")
+            if [ "$size" -gt "$budget" ]; then
+              echo "::error file=build.zig,title=size gate::$target is $size bytes, over its $budget budget"
+              failed=1
+            else
+              echo "$target: $size / $budget bytes"
+            fi
+          done
+          exit $failed
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the Zig toolchain
+        uses: actions/cache@v4
+        with:
+          path: tools/zig
+          key: ${{ runner.os }}-zig-0.16.0-toolchain
+          restore-keys: ${{ runner.os }}-zig-0.16.0-toolchain
+
+      - name: Install Zig 0.16.0 (pinned, SHA-256 checked)
+        shell: pwsh
+        run: ./tools/get-zig.ps1
+
+      - name: Cache the Zig build
+        uses: actions/cache@v4
+        with:
+          path: |
+            .zig-cache
+            .zig-cache-global
+          key: ${{ runner.os }}-zig-0.16.0-${{ hashFiles('build.zig', 'build.zig.zon') }}
+          restore-keys: ${{ runner.os }}-zig-0.16.0-
+
+      - name: Build
+        shell: pwsh
+        run: ./build.ps1
+
+      - name: Unit tests
+        shell: pwsh
+        run: ./build.ps1 test

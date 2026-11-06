@@ -1,0 +1,5 @@
+# Normalise line endings: every text file is LF in the repository and in the
+# working tree, whatever core.autocrlf says on the machine. The Zig and Python
+# sources are LF-only, and the PowerShell/bash scripts and YAML read fine with
+# LF too, so there is no per-platform exception.
+* text=auto eol=lf

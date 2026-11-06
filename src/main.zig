@@ -757,7 +757,9 @@ fn run(init: std.process.Init.Minimal) !void {
         @memcpy(pending[pending_len .. pending_len + n], input[0..n]);
         pending_len += n;
 
-        needs_redraw = false;
+        // Do not clear needs_redraw here: a status message may have expired
+        // just above, and a mouse-only chunk does not set it again. Resetting
+        // it made the cleared message stay on screen until the next keypress.
         session.needs_repaint = false;
         const view_rows = viewRows(screen.rows);
         // Consume whole tokens. A prompt can close in the middle of a chunk

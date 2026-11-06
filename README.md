@@ -84,6 +84,28 @@ exists), so the `mibi` Windows Terminal profile always launches the binary you
 just built. `tools\install.ps1` also writes `mibi.cmd`, which opens the editor
 in the `mibi` profile so it gets the Maple Mono NF font.
 
+### Packages
+
+For a release archive rather than a local install, the package scripts stage a
+directory and zip or tar it:
+
+```powershell
+.\tools\package.ps1                       # host target -> dist\mibi-<version>-<target>.zip
+.\tools\package.ps1 -Target x86_64-linux-gnu
+.\tools\package.ps1 -NoBuild              # pack what is already in zig-out\bin
+```
+
+```sh
+./tools/package.sh                        # host target -> dist/mibi-<version>-<target>.tar.gz
+./tools/package.sh x86_64-linux-gnu
+NO_BUILD=1 ./tools/package.sh
+```
+
+The version comes from `pub const version` in `src/main.zig`, so an archive
+cannot drift from the binary it contains. Each one holds `mibi` (or `mibi.exe`),
+`syntax.d/`, `themes/`, `LICENSE`, `README.md` and `config/mibi.ini.example`.
+Both scripts build the requested target first unless told not to.
+
 ## Running in your terminal
 
 mibi is a terminal text editor: it runs inside a terminal, and the window
