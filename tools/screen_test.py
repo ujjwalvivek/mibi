@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+import uuid
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MIBI = os.path.join(ROOT, "zig-out", "bin", "mibi.exe")
@@ -190,10 +191,19 @@ class Screen:
 
 # --- driver ----------------------------------------------------------------
 
+STATE_ROOT = os.path.join(ROOT, "experiments", "out", "state")
+
+
 class Mibi:
-    def __init__(self, args, cwd=ROOT, rows=ROWS, cols=COLS, keep_session=False):
-        # Each check starts from a clean slate: a leftover session file would
-        # restore tabs and dirty buffers from an earlier run.
+    def __init__(self, args, cwd=ROOT, rows=ROWS, cols=COLS, keep_session=False, state=None):
+        # Session state lives outside the project (MIBI_STATE_DIR); each check
+        # gets its own directory so nothing leaks between them.
+        os.makedirs(STATE_ROOT, exist_ok=True)
+        self.state = state or os.path.join(STATE_ROOT, "state-" + uuid.uuid4().hex[:8])
+        if not keep_session:
+            shutil.rmtree(self.state, ignore_errors=True)
+        os.makedirs(self.state, exist_ok=True)
+        os.environ["MIBI_STATE_DIR"] = self.state
         if cwd and not keep_session:
             for name in os.listdir(cwd) if os.path.isdir(cwd) else []:
                 if name.startswith("mibi-session"):
@@ -829,7 +839,7 @@ def session_restores_tabs_and_unsaved_edits(m, path):
     finally:
         proc.close()
 
-    again = Mibi([], cwd=work, keep_session=True)
+    again = Mibi([], cwd=work, keep_session=True, state=proc.state)
     try:
         assert again.wait_for("Xhello", timeout=5), "unsaved edit was not restored"
         again.wait_quiet()
@@ -866,7 +876,7 @@ def split_layout_persists(m, path):
     finally:
         proc.close()
 
-    again = Mibi([], cwd=work, keep_session=True)
+    again = Mibi([], cwd=work, keep_session=True, state=proc.state)
     try:
         assert again.wait_for("hello", timeout=5), "the document was not restored"
         again.wait_quiet()

@@ -225,11 +225,28 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu |  119,376 |
-| x86_64-linux-gnu  |  130,392 |
-| x86_64-macos      |  140,788 |
-| aarch64-macos     |  163,448 |
-| x86_64-windows    |  189,952 |
+| aarch64-linux-gnu |  125,624 |
+| x86_64-linux-gnu  |  137,248 |
+| x86_64-macos      |  145,214 |
+| aarch64-macos     |  181,560 |
+| x86_64-windows    |  196,608 |
+
+## Session state
+
+mibi reopens your last session and keeps unsaved buffers across restarts. That
+state is **not** written into the folder you are working in: it lives under the
+user data directory, one directory per project (an FNV-1a hash of the working
+directory):
+
+```
+%LOCALAPPDATA%\mibi\sessions\<hash>\mibi-session
+%LOCALAPPDATA%\mibi\sessions\<hash>\mibi-session-buf-<n>.txt
+```
+
+`mibi-session` lists the tabs, cursors, split layout and file-tree state;
+`mibi-session-buf-<n>.txt` holds the text of a buffer that has unsaved changes.
+Set `MIBI_STATE_DIR` to put them somewhere else (the tests use it to keep each
+run isolated).
 
 ## Not yet
 

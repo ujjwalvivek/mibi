@@ -141,6 +141,8 @@ pub const Tree = struct {
         while (pass < 2) : (pass += 1) {
             for (names.items) |name| {
                 if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+                // The editor's own state files are not part of the project.
+                if (std.mem.startsWith(u8, name, "mibi-session")) continue;
                 var path_buf: [MAX_PATH * 2]u8 = undefined;
                 const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, name }) catch continue;
                 const is_dir = os.isDirectory(path);

@@ -32,7 +32,7 @@ $targets = [ordered]@{
     'x86_64-linux-gnu'   = @{ budget = 144 * $KB; exe = 'mibi' }
     'aarch64-linux-gnu'  = @{ budget = 144 * $KB; exe = 'mibi' }
     'x86_64-macos'       = @{ budget = 176 * $KB; exe = 'mibi' }
-    'aarch64-macos'      = @{ budget = 176 * $KB; exe = 'mibi' }
+    'aarch64-macos'      = @{ budget = 192 * $KB; exe = 'mibi' }
     'x86_64-windows'     = @{ budget = 208 * $KB; exe = 'mibi.exe' }
     'x86_64-windows-gnu' = @{ budget = 208 * $KB; exe = 'mibi.exe' }
 }

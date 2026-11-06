@@ -59,6 +59,8 @@ const win = struct {
     extern "kernel32" fn GetFileAttributesW(lpFileName: [*:0]const u16) callconv(.winapi) DWORD;
     extern "kernel32" fn GetConsoleProcessList(lProcessList: [*]DWORD, dwProcessCount: DWORD) callconv(.winapi) DWORD;
     extern "kernel32" fn GetConsoleWindow() callconv(.winapi) ?*anyopaque;
+    extern "kernel32" fn CreateDirectoryW(lpPathName: [*:0]const u16, lpSecurityAttributes: ?*anyopaque) callconv(.winapi) c_int;
+    extern "kernel32" fn GetCurrentDirectoryW(nBufferLength: DWORD, lpBuffer: [*]u16) callconv(.winapi) DWORD;
     extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
     extern "user32" fn MessageBoxW(hWnd: ?*anyopaque, lpText: [*:0]const u16, lpCaption: [*:0]const u16, uType: c_uint) callconv(.winapi) c_int;
     extern "user32" fn ShowWindow(hWnd: ?*anyopaque, nCmdShow: c_int) callconv(.winapi) c_int;
@@ -270,6 +272,75 @@ pub fn writeFile(path: []const u8, bytes: []const u8) !void {
             i += @intCast(n);
         }
     }
+}
+
+/// The working directory as an absolute path.
+pub fn cwdAlloc(allocator: std.mem.Allocator) ![]u8 {
+    if (is_windows) {
+        var buf: [4096]u16 = undefined;
+        const n = win.GetCurrentDirectoryW(buf.len, &buf);
+        if (n == 0 or n >= buf.len) return error.CurrentDirectoryUnavailable;
+        return std.unicode.utf16LeToUtf8Alloc(allocator, buf[0..n]);
+    }
+    var buf: [4096]u8 = undefined;
+    const p = std.c.getcwd(&buf, buf.len) orelse return error.CurrentDirectoryUnavailable;
+    var n: usize = 0;
+    while (n < buf.len and p[n] != 0) n += 1;
+    return allocator.dupe(u8, p[0..n]);
+}
+
+/// Environment variable, or an error when it is unset.
+pub fn getEnvAlloc(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    if (is_windows) {
+        const wname = try std.unicode.utf8ToUtf16LeAllocZ(allocator, name);
+        defer allocator.free(wname);
+        var buf: [1024]u16 = undefined;
+        const n = win.GetEnvironmentVariableW(wname.ptr, &buf, buf.len);
+        if (n == 0 or n >= buf.len) return error.EnvironmentVariableNotFound;
+        return std.unicode.utf16LeToUtf8Alloc(allocator, buf[0..n]);
+    }
+    const z = try allocator.dupeZ(u8, name);
+    defer allocator.free(z);
+    const v = std.c.getenv(z.ptr) orelse return error.EnvironmentVariableNotFound;
+    var n: usize = 0;
+    while (v[n] != 0) n += 1;
+    return allocator.dupe(u8, v[0..n]);
+}
+
+/// Create `path` and any missing parents (a no-op when it already exists).
+pub fn makeDirAll(path: []const u8) !void {
+    if (path.len == 0) return;
+    if (isDirectory(path)) return;
+    if (std.mem.lastIndexOfAny(u8, path, "/\\")) |i| {
+        if (i > 0) makeDirAll(path[0..i]) catch {};
+    }
+    if (is_windows) {
+        const wpath = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path) catch return error.OutOfMemory;
+        defer std.heap.page_allocator.free(wpath);
+        _ = win.CreateDirectoryW(wpath.ptr, null);
+    } else {
+        const z = std.heap.page_allocator.dupeZ(u8, path) catch return error.OutOfMemory;
+        defer std.heap.page_allocator.free(z);
+        _ = std.c.mkdir(z.ptr, 0o755);
+    }
+}
+
+/// The user's data directory: `%LOCALAPPDATA%` on Windows, `$XDG_STATE_HOME`
+/// (or `$HOME/.local/state`) elsewhere. Session state lives under it, so the
+/// editor never litters the folder you are working in.
+pub fn dataDirAlloc(allocator: std.mem.Allocator) ![]u8 {
+    if (is_windows) {
+        if (getEnvAlloc(allocator, "LOCALAPPDATA")) |v| {
+            return std.fmt.allocPrint(allocator, "{s}/mibi", .{v});
+        } else |_| {}
+    }
+    if (getEnvAlloc(allocator, "XDG_STATE_HOME")) |v| {
+        return std.fmt.allocPrint(allocator, "{s}/mibi", .{v});
+    } else |_| {}
+    if (getEnvAlloc(allocator, "HOME")) |v| {
+        return std.fmt.allocPrint(allocator, "{s}/.local/state/mibi", .{v});
+    } else |_| {}
+    return allocator.dupe(u8, ".");
 }
 
 const macos = struct {

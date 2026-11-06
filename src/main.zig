@@ -285,15 +285,20 @@ const Session = struct {
     /// pane is showing, reusing an empty scratch tab, and only adds a new
     /// buffer when there is nothing at all left to show.
     fn splitFocused(self: *Session, dir: panes_mod.Dir) !void {
-        if (self.docs.items.len > 1) {
+        // A split should show something worth looking at: a real file first,
+        // and only then an empty buffer. Picking "whatever tab is next" used to
+        // land on a scratch tab and leave the new pane blank.
+        var pass: usize = 0;
+        while (pass < 2) : (pass += 1) {
             var k: usize = 1;
             while (k <= self.docs.items.len) : (k += 1) {
                 const cand = (self.active + k) % self.docs.items.len;
-                if (self.panes.paneWithDoc(self.docs.items[cand].id) == null) {
-                    if (!self.panes.split(dir, self.docs.items[cand].id)) return;
-                    self.active = cand;
-                    return;
-                }
+                const ed = self.docs.items[cand];
+                if (self.panes.paneWithDoc(ed.id) != null) continue;
+                if (pass == 0 and ed.path == null) continue; // files before blanks
+                if (!self.panes.split(dir, ed.id)) return;
+                self.active = cand;
+                return;
             }
         }
         if (self.findScratch()) |i| {
@@ -533,6 +538,13 @@ fn run(init: std.process.Init.Minimal) !void {
     }
     if (registry.langs.items.len == 0) _ = registry.loadDir("syntax.d");
 
+    // Session state goes to the user's data directory, not the project folder.
+    g_session_dir = blk: {
+        const dir = sessionDirAlloc(allocator) catch break :blk null;
+        os.makeDirAll(dir) catch {};
+        break :blk dir;
+    };
+
     var session = Session.init(allocator);
     defer session.deinit();
     session.registry = &registry;
@@ -738,23 +750,45 @@ fn run(init: std.process.Init.Minimal) !void {
 // ---------------------------------------------------------------------------
 const SESSION_FILE = "mibi-session";
 
-/// The session lives in the working directory (one per project), falling back
-/// to the directory of the binary.
-fn sessionPath(exe_dir: ?[]const u8, buf: []u8) []const u8 {
-    if (exe_dir) |d| {
-        if (std.fmt.bufPrint(buf, "{s}/" ++ SESSION_FILE, .{d})) |p| {
-            _ = p;
-        } else |_| {}
+/// Where session state lives. It is deliberately *not* the project folder:
+/// a per-project hash under the user's data directory keeps working
+/// directories clean, and `MIBI_STATE_DIR` overrides it (used by the tests).
+var g_session_dir: ?[]u8 = null;
+
+fn sessionDirAlloc(allocator: std.mem.Allocator) ![]u8 {
+    if (os.getEnvAlloc(allocator, "MIBI_STATE_DIR")) |v| {
+        if (v.len > 0) return v;
+        allocator.free(v);
+    } else |_| {}
+    const data = try os.dataDirAlloc(allocator);
+    defer allocator.free(data);
+    const cwd = try os.cwdAlloc(allocator);
+    defer allocator.free(cwd);
+    // FNV-1a over the working directory: one session per project.
+    var h: u64 = 0xcbf29ce484222325;
+    for (cwd) |b| {
+        h ^= b;
+        h *%= 0x100000001b3;
+    }
+    return std.fmt.allocPrint(allocator, "{s}/sessions/{x}", .{ data, h });
+}
+
+fn sessionPath(buf: []u8) []const u8 {
+    if (g_session_dir) |d| {
+        if (std.fmt.bufPrint(buf, "{s}/" ++ SESSION_FILE, .{d})) |p| return p else |_| {}
     }
     return SESSION_FILE;
 }
 
-fn bufferPath(exe_dir: ?[]const u8, index: usize, buf: []u8) []const u8 {
-    _ = exe_dir;
+fn bufferPath(index: usize, buf: []u8) []const u8 {
+    if (g_session_dir) |d| {
+        if (std.fmt.bufPrint(buf, "{s}/" ++ SESSION_FILE ++ "-buf-{d}.txt", .{ d, index })) |p| return p else |_| {}
+    }
     return std.fmt.bufPrint(buf, SESSION_FILE ++ "-buf-{d}.txt", .{index}) catch SESSION_FILE;
 }
 
 fn saveSession(session: *Session, exe_dir: ?[]const u8) void {
+    _ = exe_dir;
     const allocator = std.heap.page_allocator;
     var out = std.ArrayList(u8).empty;
     defer out.deinit(allocator);
@@ -800,7 +834,7 @@ fn saveSession(session: *Session, exe_dir: ?[]const u8) void {
     }
     for (session.docs.items, 0..) |ed, i| {
         var buf_path: [1024]u8 = undefined;
-        const bp = bufferPath(exe_dir, i, &buf_path);
+        const bp = bufferPath(i, &buf_path);
         const has_buffer = ed.dirty or ed.path == null;
         if (has_buffer) os.writeFile(bp, ed.text()) catch {};
         const row = ed.rowCol();
@@ -814,14 +848,24 @@ fn saveSession(session: *Session, exe_dir: ?[]const u8) void {
         }) catch continue;
         out.appendSlice(allocator, line) catch return;
     }
-    const path = sessionPath(exe_dir, &path_buf);
+    const path = sessionPath(&path_buf);
     os.writeFile(path, out.items) catch {};
 }
 
 fn loadSession(allocator: std.mem.Allocator, exe_dir: ?[]const u8, registry: *syntax.Registry, session: *Session) bool {
+    _ = exe_dir;
     var path_buf: [1024]u8 = undefined;
-    const path = sessionPath(exe_dir, &path_buf);
-    const data = os.readFileAlloc(allocator, path, 16 * 1024 * 1024) catch return false;
+    const path = sessionPath(&path_buf);
+    const data = os.readFileAlloc(allocator, path, 16 * 1024 * 1024) catch blk: {
+        // An older mibi kept its session in the working directory.
+        if (g_session_dir != null) {
+            if (os.readFileAlloc(allocator, SESSION_FILE, 16 * 1024 * 1024)) |old| {
+                os.deleteFile(SESSION_FILE) catch {};
+                break :blk old;
+            } else |_| {}
+        }
+        return false;
+    };
     defer allocator.free(data);
     var lines = std.mem.splitScalar(u8, data, '\n');
     const magic = lines.next() orelse return false;
@@ -886,7 +930,7 @@ fn loadSession(allocator: std.mem.Allocator, exe_dir: ?[]const u8, registry: *sy
             _ = std.fmt.parseInt(usize, fields.next() orelse "0", 10) catch 0;
 
             var buf_path: [1024]u8 = undefined;
-            const bp = bufferPath(exe_dir, loaded, &buf_path);
+            const bp = bufferPath(loaded, &buf_path);
             var text: []u8 = &[_]u8{};
             var owned = false;
             if (has_buffer != 0) {
@@ -1054,7 +1098,7 @@ fn handleMouse(session: *Session, params: []const u8, final: u8, help: *bool, pr
     // it cached, but a click can arrive before the first frame.
     if (session.panes.rect_count == 0) {
         const sz = term.size();
-        const side: usize = if (session.tree != null) TREE_WIDTH else 0;
+        const side = sidebarWidth(session);
         session.pane_area = .{
             .x = side,
             .y = 1,
@@ -1910,7 +1954,7 @@ fn draw(s: *render.Screen, session: *Session, msg: []const u8, prompt: ?Prompt, 
     }
 
     drawTabBar(s, session, w, text_fg, theme.gutter);
-    const side: usize = if (session.tree != null) TREE_WIDTH else 0;
+    const side = sidebarWidth(session);
     if (session.tree) |*t| drawTree(s, t, session.tree_focus, h, theme, session.config.icons_unicode);
 
     // The text area, split into panes. Row 0 is the tab bar, row h-1 the
@@ -2120,13 +2164,20 @@ fn drawPane(s: *render.Screen, session: *Session, ed: *Editor, r: panes_mod.Rect
 /// One row of tabs: ` name [+] ` per document, the active one highlighted.
 const TREE_WIDTH = 28;
 
+/// Columns the sidebar takes from the text area.
+fn sidebarWidth(session: *Session) usize {
+    return if (session.tree != null) TREE_WIDTH else 0;
+}
+
 fn drawTree(s: *render.Screen, t: *tree_mod.Tree, focused: bool, h: usize, theme: config_mod.Theme, icons_unicode: bool) void {
     if (h < 4) return;
     const side_w = @min(TREE_WIDTH, s.cols);
     const rows = h - 2;
     t.ensureVisible(rows);
 
-    const bg = theme.background;
+    // The sidebar is a bar like the tab strip and the status line, so it takes
+    // the bar background: darker than the editor, visibly its own surface.
+    const bg = theme.bar_bg;
     const sel_bg = theme.selection;
     var y: usize = 1;
     while (y < h - 1) : (y += 1) {
@@ -4018,6 +4069,34 @@ test "splitting shows an open file instead of adding a scratch tab" {
     // The new pane shows the other file; no extra [No Name] tab is created.
     try std.testing.expectEqual(@as(usize, 2), d.session.count());
     try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
+}
+
+test "splitting prefers a real file over an empty buffer" {
+    const a = "mibi-split-a.txt";
+    const b = "mibi-split-b.txt";
+    defer os.deleteFile(a) catch {};
+    defer os.deleteFile(b) catch {};
+    try os.writeFile(a, "AAA\n");
+    try os.writeFile(b, "BBB\n");
+
+    var d = try Drive.start("scratch");
+    defer d.stop();
+    // The empty buffer sits first, like a stale [No Name] tab.
+    try d.send("\x14"); // blank tab
+    try openViaPicker(&d.session, std.testing.allocator, ".", a);
+    try openViaPicker(&d.session, std.testing.allocator, ".", b);
+    try std.testing.expectEqual(@as(usize, 4), d.session.count());
+
+    try d.send("\x1b[15~"); // F5
+    try std.testing.expectEqual(@as(usize, 4), d.session.count()); // no new tab
+    try std.testing.expectEqual(@as(usize, 2), d.session.panes.live);
+    // Both panes show real files, not the empty buffer.
+    var i: usize = 0;
+    while (i < d.session.panes.leaf_count) : (i += 1) {
+        const node = d.session.panes.leaves[i];
+        const idx = d.session.docIndex(d.session.panes.nodes[node].doc).?;
+        try std.testing.expect(d.session.docs.items[idx].path != null);
+    }
 }
 
 test "F6 moves the focus between panes" {
