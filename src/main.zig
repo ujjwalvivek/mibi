@@ -25,7 +25,7 @@ const regex = @import("regex.zig");
 const config_mod = @import("config.zig");
 const keys = @import("keys.zig");
 
-pub const version = "0.0.1";
+pub const version = "0.0.2";
 
 const MAX_FILE = 64 * 1024 * 1024;
 

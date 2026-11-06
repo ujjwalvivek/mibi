@@ -231,6 +231,10 @@ target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
 | aarch64-macos     |  181,560 |
 | x86_64-windows    |  196,608 |
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md); the current release is **v0.0.2**.
+
 ## Licence
 
 MIT - see [LICENSE](LICENSE). The installer copies the licence next to the
