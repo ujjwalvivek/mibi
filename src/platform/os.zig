@@ -378,8 +378,10 @@ fn fileStampWindows(path: []const u8) u64 {
 fn fileStampUnix(path: []const u8) u64 {
     const z = std.heap.page_allocator.dupeZ(u8, path) catch return 0;
     defer std.heap.page_allocator.free(z);
-    // AT_FDCWD is -100 on Linux and on macOS, so one constant covers both.
-    const at_fdcwd: i32 = -100;
+    // "Relative to the working directory" is -100 on Linux and -2 on macOS.
+    // A wrong value only shows with a relative path, which is every path the
+    // editor opens: the stamp was always zero on macOS until a test used one.
+    const at_fdcwd: i32 = std.c.AT.FDCWD;
     if (builtin.os.tag == .linux) {
         var st: std.os.linux.Statx = std.mem.zeroes(std.os.linux.Statx);
         const mask: std.os.linux.STATX = .{ .MTIME = true, .SIZE = true };
@@ -840,11 +842,9 @@ fn listDirWindows(allocator: std.mem.Allocator, path: []const u8, out: *std.Arra
 }
 
 test "file stamp notices a rewrite and holds still otherwise" {
-    const allocator = std.testing.allocator;
-    const tmp = getEnvAlloc(allocator, if (is_windows) "TEMP" else "TMPDIR") catch return;
-    defer allocator.free(tmp);
-    const path = try std.fmt.allocPrint(allocator, "{s}/mibi-stamp-test.txt", .{tmp});
-    defer allocator.free(path);
+    // A relative path, as the editor uses them.
+    const path = "mibi-stamp-test.txt";
+    defer deleteFile(path) catch {};
     try writeFile(path, "one");
     const first = fileStamp(path);
     try std.testing.expect(first != 0);

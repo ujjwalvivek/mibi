@@ -916,14 +916,16 @@ test "f4 runs the configured formatter, undoably, and says why when it cannot" {
     try h.keys("f4");
     try testing.expect(std.mem.indexOf(u8, h.lastRow(), "No formatter configured") != null);
 
-    // `sort` reads standard input and exists on every system we build for.
-    config_mod.apply(&h.app.config, "[format]\ntxt = sort\n");
+    // Numbering the lines stands in for a formatter: a real child process
+    // that reads the text and prints a different one.
+    config_mod.apply(&h.app.config, if (os.is_windows) "[format]\ntxt = cmd.exe /c findstr /n .\n" else "[format]\ntxt = cat -n\n");
     try h.keys("f4");
-    try h.expectText("a\nb\n");
+    const sep = if (os.is_windows) ":" else "\t"; // `1:b` or `     1<tab>b`
+    try testing.expect(std.mem.indexOf(u8, h.text(), "1" ++ sep ++ "b") != null);
+    try testing.expect(std.mem.indexOf(u8, h.text(), "2" ++ sep ++ "a") != null);
     try testing.expect(std.mem.indexOf(u8, h.lastRow(), "Formatted") != null);
-    try h.keys("f4");
-    try testing.expect(std.mem.indexOf(u8, h.lastRow(), "Already formatted") != null);
-    try h.keys("ctrl+z");
+    try testing.expect(h.app.doc().isDirty());
+    try h.keys("ctrl+z"); // one step back to what it was
     try h.expectText("b\na\n");
 
     config_mod.apply(&h.app.config, "[format]\nmd = mibi-no-such-program\n");
