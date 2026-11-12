@@ -24,22 +24,26 @@ if (-not (Test-Path $Zig)) {
     & (Join-Path $Root 'tools\get-zig.ps1')
 }
 
-# Per-target regression budgets, re-measured after Phase 4 (splits) with ~15%
-# headroom. Phase gates from PLAN.md: Phase 1 <= 80 KB, Phase 2 <= 150 KB,
-# Phase 3 <= 350 KB, Phase 4 <= 700 KB, hard ceiling 1 MB (every target is far
-# below it).
+# Per-target regression budgets: the size measured when they were last set,
+# plus about 5%. They are a ratchet, not a goal: a change that goes over
+# either earns the bytes (and moves the number here and in check-size.sh,
+# saying why) or loses them. The hard ceiling is 1 MB.
+#
+# Last set for 0.1.0, the rebuilt editor: mouse, focus and bracketed paste on
+# Unix, the Pike regex engine, per-pane views, the command table and the
+# session format are new code the old budgets (160 to 224 KB) never carried.
 #
 # aarch64-macos carries one 16 KB page of slack: Apple Silicon links `__TEXT`
 # on 16 KB pages, so a few hundred bytes of new code can step the file up by a
 # whole page (adding the Unix file stamp moved it 200,616 from 184,200 while
 # the x86_64-macos build grew 65 bytes for the same change).
 $targets = [ordered]@{
-    'x86_64-linux-gnu'   = @{ budget = 160 * $KB; exe = 'mibi' }
-    'aarch64-linux-gnu'  = @{ budget = 160 * $KB; exe = 'mibi' }
-    'x86_64-macos'       = @{ budget = 176 * $KB; exe = 'mibi' }
-    'aarch64-macos'      = @{ budget = 208 * $KB; exe = 'mibi' }
-    'x86_64-windows'     = @{ budget = 224 * $KB; exe = 'mibi.exe' }
-    'x86_64-windows-gnu' = @{ budget = 224 * $KB; exe = 'mibi.exe' }
+    'x86_64-linux-gnu'   = @{ budget = 208 * $KB; exe = 'mibi' }
+    'aarch64-linux-gnu'  = @{ budget = 184 * $KB; exe = 'mibi' }
+    'x86_64-macos'       = @{ budget = 220 * $KB; exe = 'mibi' }
+    'aarch64-macos'      = @{ budget = 232 * $KB; exe = 'mibi' }
+    'x86_64-windows'     = @{ budget = 264 * $KB; exe = 'mibi.exe' }
+    'x86_64-windows-gnu' = @{ budget = 264 * $KB; exe = 'mibi.exe' }
 }
 
 $rows = @()

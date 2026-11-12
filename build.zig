@@ -22,6 +22,17 @@ pub fn build(b: *std.Build) void {
         "Debug, ReleaseSafe, ReleaseFast, ReleaseSmall (default)",
     ) orelse .ReleaseSmall;
 
+    // The layers are modules, so the direction of the imports is checked by
+    // the compiler: a file cannot import a path outside its own module, only
+    // the modules listed for it here.
+    //
+    //   core      the text model               imports nothing
+    //   ui        widgets, events, cells       imports core
+    //   platform  OS and terminal              imports ui (for the event types)
+    //   mibi      the application (src/*.zig)  imports all three
+    const libc = target.result.os.tag != .windows;
+    const layers = Layers.create(b, target, optimize, libc);
+
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -30,9 +41,10 @@ pub fn build(b: *std.Build) void {
         // No unwind tables: we have our own panic and never unwind.
         .unwind_tables = .none,
         // Unix goes through libc for termios and syscalls; Windows uses the
-        // kernel32 declarations in src/os.zig and needs no libc.
-        .link_libc = target.result.os.tag != .windows,
+        // kernel32 declarations in src/platform and needs no libc.
+        .link_libc = libc,
     });
+    layers.addTo(exe_mod);
     const exe = b.addExecutable(.{
         .name = "mibi",
         .root_module = exe_mod,
@@ -41,7 +53,6 @@ pub fn build(b: *std.Build) void {
     // use a message box when started without a terminal.
     if (target.result.os.tag == .windows) {
         exe_mod.addWin32ResourceFile(.{ .file = b.path("assets/mibi.rc") });
-        exe_mod.linkSystemLibrary("user32", .{});
     }
     b.installArtifact(exe);
 
@@ -90,28 +101,68 @@ pub fn build(b: *std.Build) void {
         "test-optimize",
         "Optimize mode for the tests (default Debug)",
     ) orelse .Debug;
-    const tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = test_optimize,
-            // Same rule as the executable: the Unix OS layer goes through libc.
-            .link_libc = target.result.os.tag != .windows,
-        }),
+    const test_step = b.step("test", "Run every layer's tests");
+    const test_layers = Layers.create(b, target, test_optimize, libc);
+    const app_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = test_optimize,
+        .link_libc = libc,
     });
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&b.addRunArtifact(tests).step);
+    test_layers.addTo(app_test_mod);
+    // A module's tests are only the ones in its own files, so each layer is
+    // a test binary: `zig build test-core` runs the text model alone.
+    const suites = [_]struct { name: []const u8, about: []const u8, module: *std.Build.Module }{
+        .{ .name = "test-core", .about = "Run the text model's tests", .module = test_layers.core },
+        .{ .name = "test-ui", .about = "Run the widgets' tests", .module = test_layers.ui },
+        .{ .name = "test-platform", .about = "Run the OS and terminal layer's tests", .module = test_layers.platform },
+        .{ .name = "test-app", .about = "Run the application's tests", .module = app_test_mod },
+    };
+    for (suites) |suite| {
+        const run = b.addRunArtifact(b.addTest(.{ .root_module = suite.module }));
+        const step = b.step(suite.name, suite.about);
+        step.dependOn(&run.step);
+        test_step.dependOn(step);
+    }
+}
 
-    // The text model on its own: no libc, no OS layer, no terminal. Its module
-    // root is src/core, so it cannot import anything outside that directory.
-    const core_tests = b.addTest(.{
-        .root_module = b.createModule(.{
+const Layers = struct {
+    core: *std.Build.Module,
+    ui: *std.Build.Module,
+    platform: *std.Build.Module,
+
+    fn create(
+        b: *std.Build,
+        target: std.Build.ResolvedTarget,
+        optimize: std.builtin.OptimizeMode,
+        libc: bool,
+    ) Layers {
+        const core = b.createModule(.{
             .root_source_file = b.path("src/core/core.zig"),
             .target = target,
-            .optimize = test_optimize,
-        }),
-    });
-    const core_step = b.step("test-core", "Run the text model's tests");
-    core_step.dependOn(&b.addRunArtifact(core_tests).step);
-    test_step.dependOn(core_step);
-}
+            .optimize = optimize,
+        });
+        const ui = b.createModule(.{
+            .root_source_file = b.path("src/ui/ui.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        ui.addImport("core", core);
+        const platform = b.createModule(.{
+            .root_source_file = b.path("src/platform/platform.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = libc,
+        });
+        platform.addImport("ui", ui);
+        // The message box shown when mibi is started without a terminal.
+        if (target.result.os.tag == .windows) platform.linkSystemLibrary("user32", .{});
+        return .{ .core = core, .ui = ui, .platform = platform };
+    }
+
+    fn addTo(self: Layers, module: *std.Build.Module) void {
+        module.addImport("core", self.core);
+        module.addImport("ui", self.ui);
+        module.addImport("platform", self.platform);
+    }
+};

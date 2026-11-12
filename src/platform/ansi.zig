@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const event = @import("../ui/event.zig");
+const event = @import("ui").event;
 const Event = event.Event;
 const Key = event.Key;
 const Mods = event.Mods;

@@ -200,6 +200,13 @@ pub const History = struct {
         self.sealed = true;
     }
 
+    /// No state in the history matches the file: the text came from
+    /// somewhere else (a recovered session). Dirty until the next save.
+    pub fn markUnsaved(self: *History) void {
+        self.saved_id = std.math.maxInt(u64);
+        self.sealed = true;
+    }
+
     /// The next transaction starts its own undo step.
     pub fn seal(self: *History) void {
         self.sealed = true;

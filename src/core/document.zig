@@ -103,6 +103,11 @@ pub const Document = struct {
         self.history.markSaved();
     }
 
+    /// The text does not match any file on disk, whatever the history says.
+    pub fn markUnsaved(self: *Document) void {
+        self.history.markUnsaved();
+    }
+
     /// End the current run of typing: the next edit is its own undo step.
     /// Views call this when the cursor moves for any reason but typing.
     pub fn breakUndoGroup(self: *Document) void {
@@ -226,6 +231,19 @@ test "edit, undo and redo restore text and selections" {
     try expectText(&d, "hello there");
     try testing.expectEqualSlices(Selection, &after, redone.after.items);
     try testing.expect(try d.redo() == null);
+}
+
+test "markUnsaved stays dirty through undo until saved" {
+    var d = try Document.init(testing.allocator, "recovered");
+    defer d.deinit();
+    try testing.expect(!d.isDirty());
+    d.markUnsaved();
+    try testing.expect(d.isDirty());
+    _ = try d.edit(&.{.{ .start = 0, .end = 0, .text = "x" }}, .{});
+    _ = try d.undo();
+    try testing.expect(d.isDirty());
+    d.markSaved();
+    try testing.expect(!d.isDirty());
 }
 
 test "several cursors edit as one step" {

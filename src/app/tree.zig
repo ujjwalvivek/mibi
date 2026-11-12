@@ -2,7 +2,7 @@
 //! directory, with expanded directories tracked by path.
 
 const std = @import("std");
-const os = @import("os.zig");
+const os = @import("platform").os;
 
 pub const MAX_PATH = 512;
 
@@ -37,6 +37,7 @@ pub const Tree = struct {
             .expanded = std.ArrayList([]u8).empty,
         };
         t.setRoot(root);
+        errdefer t.deinit();
         try t.reload();
         return t;
     }
@@ -111,16 +112,24 @@ pub const Tree = struct {
     pub fn reload(self: *Tree) !void {
         self.clearEntries();
         if (self.parent_len > 0) {
-            try self.entries.append(self.allocator, .{
-                .name = try self.allocator.dupe(u8, ".."),
-                .path = try self.allocator.dupe(u8, ""),
-                .is_dir = true,
-                .depth = 0,
-                .is_parent = true,
-            });
+            try self.addEntry("..", "", true, 0, true);
         }
         try self.addDir("", 0);
         self.selected = @min(self.selected, if (self.entries.items.len > 0) self.entries.items.len - 1 else 0);
+    }
+
+    fn addEntry(self: *Tree, name: []const u8, path: []const u8, is_dir: bool, depth: usize, is_parent: bool) !void {
+        try self.entries.ensureUnusedCapacity(self.allocator, 1);
+        const own_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(own_name);
+        const own_path = try self.allocator.dupe(u8, path);
+        self.entries.appendAssumeCapacity(.{
+            .name = own_name,
+            .path = own_path,
+            .is_dir = is_dir,
+            .depth = depth,
+            .is_parent = is_parent,
+        });
     }
 
     fn addDir(self: *Tree, rel: []const u8, depth: usize) !void {
@@ -144,7 +153,6 @@ pub const Tree = struct {
             for (names.items) |name| {
                 if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
                 // The editor's own state files are not part of the project.
-                if (std.mem.startsWith(u8, name, "mibi-session")) continue;
                 var path_buf: [MAX_PATH * 2]u8 = undefined;
                 const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, name }) catch continue;
                 const is_dir = os.isDirectory(path);
@@ -156,12 +164,7 @@ pub const Tree = struct {
                 else
                     std.fmt.bufPrint(&rel_buf, "{s}/{s}", .{ rel, name }) catch continue;
 
-                try self.entries.append(self.allocator, .{
-                    .name = try self.allocator.dupe(u8, name),
-                    .path = try self.allocator.dupe(u8, rel_path),
-                    .is_dir = is_dir,
-                    .depth = depth,
-                });
+                try self.addEntry(name, rel_path, is_dir, depth, false);
                 if (is_dir and self.isExpanded(rel_path)) {
                     try self.addDir(rel_path, depth + 1);
                 }
@@ -304,10 +307,10 @@ pub fn iconFor(name: []const u8, is_dir: bool, expanded: bool, unicode: bool) []
     const ext = name[dot + 1 ..];
     if (!unicode) {
         const ascii = [_]struct { ext: []const u8, glyph: []const u8 }{
-            .{ .ext = "zig", .glyph = "z" },  .{ .ext = "rs", .glyph = "r" },
-            .{ .ext = "py", .glyph = "p" },   .{ .ext = "js", .glyph = "j" },
-            .{ .ext = "ts", .glyph = "t" },   .{ .ext = "md", .glyph = "m" },
-            .{ .ext = "sh", .glyph = "$" },   .{ .ext = "html", .glyph = "<" },
+            .{ .ext = "zig", .glyph = "z" }, .{ .ext = "rs", .glyph = "r" },
+            .{ .ext = "py", .glyph = "p" },  .{ .ext = "js", .glyph = "j" },
+            .{ .ext = "ts", .glyph = "t" },  .{ .ext = "md", .glyph = "m" },
+            .{ .ext = "sh", .glyph = "$" },  .{ .ext = "html", .glyph = "<" },
         };
         for (ascii) |row| {
             if (std.ascii.eqlIgnoreCase(ext, row.ext)) return row.glyph;
@@ -315,27 +318,27 @@ pub fn iconFor(name: []const u8, is_dir: bool, expanded: bool, unicode: bool) []
         return ".";
     }
     const table = [_]struct { ext: []const u8, glyph: []const u8 }{
-        .{ .ext = "zig", .glyph = "\u{e6a9}" },   // zig
-        .{ .ext = "rs", .glyph = "\u{e7a8}" },    // rust
-        .{ .ext = "py", .glyph = "\u{e73c}" },    // python
-        .{ .ext = "js", .glyph = "\u{e74e}" },    // javascript
-        .{ .ext = "ts", .glyph = "\u{e628}" },    // typescript
-        .{ .ext = "json", .glyph = "\u{e60b}" },  // json
-        .{ .ext = "toml", .glyph = "\u{e615}" },  // config
+        .{ .ext = "zig", .glyph = "\u{e6a9}" }, // zig
+        .{ .ext = "rs", .glyph = "\u{e7a8}" }, // rust
+        .{ .ext = "py", .glyph = "\u{e73c}" }, // python
+        .{ .ext = "js", .glyph = "\u{e74e}" }, // javascript
+        .{ .ext = "ts", .glyph = "\u{e628}" }, // typescript
+        .{ .ext = "json", .glyph = "\u{e60b}" }, // json
+        .{ .ext = "toml", .glyph = "\u{e615}" }, // config
         .{ .ext = "yaml", .glyph = "\u{e615}" },
         .{ .ext = "yml", .glyph = "\u{e615}" },
         .{ .ext = "ini", .glyph = "\u{e615}" },
-        .{ .ext = "md", .glyph = "\u{e73e}" },    // markdown
-        .{ .ext = "txt", .glyph = "\u{f15c}" },   // file-text
-        .{ .ext = "sh", .glyph = "\u{f489}" },    // terminal
-        .{ .ext = "c", .glyph = "\u{e61e}" },     // c
-        .{ .ext = "h", .glyph = "\u{f0fd}" },     // h-square
-        .{ .ext = "cpp", .glyph = "\u{e61d}" },   // c++
-        .{ .ext = "go", .glyph = "\u{e627}" },    // go
-        .{ .ext = "lua", .glyph = "\u{e620}" },   // lua
-        .{ .ext = "html", .glyph = "\u{e736}" },  // html5
-        .{ .ext = "css", .glyph = "\u{e749}" },   // css3
-        .{ .ext = "svg", .glyph = "\u{f1c5}" },   // file-image
+        .{ .ext = "md", .glyph = "\u{e73e}" }, // markdown
+        .{ .ext = "txt", .glyph = "\u{f15c}" }, // file-text
+        .{ .ext = "sh", .glyph = "\u{f489}" }, // terminal
+        .{ .ext = "c", .glyph = "\u{e61e}" }, // c
+        .{ .ext = "h", .glyph = "\u{f0fd}" }, // h-square
+        .{ .ext = "cpp", .glyph = "\u{e61d}" }, // c++
+        .{ .ext = "go", .glyph = "\u{e627}" }, // go
+        .{ .ext = "lua", .glyph = "\u{e620}" }, // lua
+        .{ .ext = "html", .glyph = "\u{e736}" }, // html5
+        .{ .ext = "css", .glyph = "\u{e749}" }, // css3
+        .{ .ext = "svg", .glyph = "\u{f1c5}" }, // file-image
         .{ .ext = "png", .glyph = "\u{f1c5}" },
         .{ .ext = "jpg", .glyph = "\u{f1c5}" },
     };

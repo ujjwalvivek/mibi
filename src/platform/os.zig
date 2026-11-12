@@ -113,7 +113,6 @@ const win = struct {
     extern "user32" fn MessageBoxW(hWnd: ?*anyopaque, lpText: [*:0]const u16, lpCaption: [*:0]const u16, uType: c_uint) callconv(.winapi) c_int;
     extern "user32" fn ShowWindow(hWnd: ?*anyopaque, nCmdShow: c_int) callconv(.winapi) c_int;
 
-
     const FILETIME = extern struct { dwLowDateTime: u32, dwHighDateTime: u32 };
     const WIN32_FIND_DATAW = extern struct {
         dwFileAttributes: u32,
@@ -809,7 +808,8 @@ fn listDirUnix(allocator: std.mem.Allocator, path: []const u8, out: *std.ArrayLi
         const name = std.mem.sliceTo(ent.name[0..], 0);
         if (name.len == 0) continue;
         if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-        try out.append(allocator, try allocator.dupe(u8, name));
+        try out.ensureUnusedCapacity(allocator, 1);
+        out.appendAssumeCapacity(try allocator.dupe(u8, name));
     }
 }
 
@@ -832,7 +832,8 @@ fn listDirWindows(allocator: std.mem.Allocator, path: []const u8, out: *std.Arra
         const is_dot = name.len == 1 and name[0] == '.';
         const is_dotdot = name.len == 2 and name[0] == '.' and name[1] == '.';
         if (name.len > 0 and !is_dot and !is_dotdot) {
-            try out.append(allocator, try std.unicode.utf16LeToUtf8Alloc(allocator, name));
+            try out.ensureUnusedCapacity(allocator, 1);
+            out.appendAssumeCapacity(try std.unicode.utf16LeToUtf8Alloc(allocator, name));
         }
         if (win.FindNextFileW(h, &fd) == 0) break;
     }

@@ -6,7 +6,7 @@
 //! a command is adding a row here and a case in `App.run`.
 
 const std = @import("std");
-const event = @import("ui/event.zig");
+const event = @import("ui").event;
 const Key = event.Key;
 
 pub const Command = enum {

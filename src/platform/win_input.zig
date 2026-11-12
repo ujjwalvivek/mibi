@@ -6,7 +6,7 @@
 //! every platform even though only the Windows terminal layer calls it.
 
 const std = @import("std");
-const event = @import("../ui/event.zig");
+const event = @import("ui").event;
 const Event = event.Event;
 const Key = event.Key;
 const Mods = event.Mods;

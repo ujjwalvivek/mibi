@@ -3,8 +3,8 @@
 //! lives here so the core stays free of the OS.
 
 const std = @import("std");
-const os = @import("os.zig");
-const syntax = @import("core/syntax.zig");
+const os = @import("platform").os;
+const syntax = @import("core").syntax;
 
 /// Load every `*.ini` in `dir`, in name order. Returns how many languages
 /// were parsed. A missing directory or a broken file is not an error: that

@@ -21,11 +21,11 @@ KB=1024
 ceiling=$((1024 * KB))
 # target:budget in KB (see check-size.ps1 for how they were measured)
 targets="
-x86_64-linux-gnu:160
-aarch64-linux-gnu:160
-x86_64-macos:176
-aarch64-macos:208
-x86_64-windows-gnu:224
+x86_64-linux-gnu:208
+aarch64-linux-gnu:184
+x86_64-macos:220
+aarch64-macos:232
+x86_64-windows-gnu:264
 "
 
 out=$(mktemp -d)

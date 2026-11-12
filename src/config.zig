@@ -5,65 +5,18 @@
 //! under `[editor]`. Unknown keys are ignored so newer configs keep working.
 
 const std = @import("std");
-const os = @import("os.zig");
-const ini = @import("core/ini.zig");
-const keys = @import("keys.zig");
-const render = @import("render.zig");
+const os = @import("platform").os;
+const ini = @import("core").ini;
+const commands = @import("commands.zig");
+const theme_mod = @import("ui").theme;
 
-pub const Color = render.Color;
-
-/// The palette used by the renderer.
-pub const Theme = struct {
-    /// Screen background; `.default` keeps the terminal's own background.
-    background: Color = .default,
-    text: Color = rgb(0xd8, 0xde, 0xe9),
-    gutter: Color = rgb(0x5c, 0x63, 0x70),
-    selection: Color = rgb(0x33, 0x45, 0x66),
-    bar_bg: Color = rgb(0x28, 0x28, 0x38),
-    accent: Color = rgb(0x8b, 0xd4, 0x50),
-    hint_bg: Color = rgb(0x1e, 0x1e, 0x2a),
-    hint_fg: Color = rgb(0x88, 0x92, 0xa4),
-    tab_bg: Color = rgb(0x1e, 0x1e, 0x2a),
-    tab_active_bg: Color = rgb(0x33, 0x45, 0x66),
-    help_bg: Color = rgb(0x1a, 0x1a, 0x24),
-    comment: Color = rgb(0x6a, 0x73, 0x82),
-    keyword1: Color = rgb(0xc6, 0x78, 0xdd),
-    keyword2: Color = rgb(0xe5, 0xc0, 0x7b),
-    string: Color = rgb(0x98, 0xc3, 0x79),
-    number: Color = rgb(0xd1, 0x9a, 0x66),
-    /// Current-line tint. Unset means "background nudged toward the text".
-    line_hl: Color = .default,
-
-    /// The tint painted behind the line holding the cursor.
-    pub fn lineHighlight(self: Theme) Color {
-        if (std.meta.activeTag(self.line_hl) != .default) return self.line_hl;
-        switch (self.background) {
-            .rgb => |bg| switch (self.text) {
-                .rgb => |fg| return rgb(
-                    blend(bg.r, fg.r, 7),
-                    blend(bg.g, fg.g, 7),
-                    blend(bg.b, fg.b, 7),
-                ),
-                else => return self.background,
-            },
-            else => return self.background,
-        }
-    }
-};
-
-fn blend(a: u8, b: u8, pct: u32) u8 {
-    const av: u32 = a;
-    const bv: u32 = b;
-    return @intCast((av * (100 - pct) + bv * pct) / 100);
-}
-
-fn rgb(r: u8, g: u8, b: u8) Color {
-    return .{ .rgb = .{ .r = r, .g = g, .b = b } };
-}
+pub const Color = theme_mod.Color;
+pub const Theme = theme_mod.Theme;
+const rgb = theme_mod.rgb;
 
 pub const Config = struct {
     theme: Theme = .{},
-    keys: keys.KeyMap = .{},
+    keys: commands.KeyMap = .{},
     tab_width: usize = 4,
     line_numbers: bool = true,
     syntax: bool = true,
@@ -83,17 +36,6 @@ pub const Config = struct {
     format_rules: [16]FormatRule = [_]FormatRule{.{}} ** 16,
     format_count: usize = 0,
     format_on_save: bool = false,
-    /// `[terminal]`: the shell the embedded terminal runs (empty = the
-    /// platform default) and the panel height in rows.
-    terminal_command: [256]u8 = [_]u8{0} ** 256,
-    terminal_command_len: usize = 0,
-    terminal_height: usize = 12,
-
-    /// The shell configured for the embedded terminal, or null for the default.
-    pub fn terminalCommand(self: *const Config) ?[]const u8 {
-        if (self.terminal_command_len == 0) return null;
-        return self.terminal_command[0..self.terminal_command_len];
-    }
 
     pub const FormatRule = struct {
         ext: [16]u8 = [_]u8{0} ** 16,
@@ -125,6 +67,12 @@ pub const Config = struct {
         return self.theme_name[0..self.theme_name_len];
     }
 
+    pub fn setThemeName(self: *Config, name: []const u8) void {
+        const n = @min(name.len, self.theme_name.len);
+        @memcpy(self.theme_name[0..n], name[0..n]);
+        self.theme_name_len = n;
+    }
+
     pub fn sourcePath(self: *const Config) []const u8 {
         return self.source[0..self.source_len];
     }
@@ -137,53 +85,11 @@ pub const Config = struct {
     }
 };
 
-fn hexVal(c: u8) ?u8 {
-    return switch (c) {
-        '0'...'9' => c - '0',
-        'a'...'f' => c - 'a' + 10,
-        'A'...'F' => c - 'A' + 10,
-        else => null,
-    };
-}
-
-fn hexByte(s: []const u8) ?u8 {
-    const hi = hexVal(s[0]) orelse return null;
-    const lo = hexVal(s[1]) orelse return null;
-    return hi * 16 + lo;
-}
-
-/// Parse `#rrggbb` or `#rgb`; anything else is rejected.
-fn parseColor(value: []const u8) ?Color {
-    var v = std.mem.trim(u8, value, " \t");
-    if (v.len > 0 and v[0] == '#') v = v[1..];
-    if (v.len == 3) {
-        const r = hexVal(v[0]) orelse return null;
-        const g = hexVal(v[1]) orelse return null;
-        const b = hexVal(v[2]) orelse return null;
-        return rgb(r * 17, g * 17, b * 17);
-    }
-    if (v.len != 6) return null;
-    const r = hexByte(v[0..2]) orelse return null;
-    const g = hexByte(v[2..4]) orelse return null;
-    const b = hexByte(v[4..6]) orelse return null;
-    return rgb(r, g, b);
-}
-
 fn parseBool(value: []const u8) ?bool {
     const v = std.mem.trim(u8, value, " \t");
     if (std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "yes") or std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "on")) return true;
     if (std.mem.eql(u8, v, "false") or std.mem.eql(u8, v, "no") or std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "off")) return false;
     return null;
-}
-
-fn setThemeColor(theme: *Theme, key: []const u8, value: []const u8) void {
-    const color = parseColor(value) orelse return;
-    inline for (@typeInfo(Theme).@"struct".fields) |field| {
-        if (std.mem.eql(u8, field.name, key)) {
-            @field(theme, field.name) = color;
-            return;
-        }
-    }
 }
 
 /// The extension of a path, without the dot ("" when there is none).
@@ -203,11 +109,11 @@ pub fn apply(config: *Config, text: []const u8) void {
     var reader = ini.Reader{ .text = text };
     while (reader.next()) |entry| {
         if (std.mem.eql(u8, entry.section, "theme")) {
-            setThemeColor(&config.theme, entry.key, entry.value);
+            config.theme.set(entry.key, entry.value);
             continue;
         }
         if (std.mem.eql(u8, entry.section, "keys")) {
-            if (keys.actionFromName(entry.value)) |action| config.keys.add(entry.key, action);
+            if (commands.Command.fromName(entry.value)) |command| _ = config.keys.bind(entry.key, command);
             continue;
         }
         if (std.mem.eql(u8, entry.section, "format")) {
@@ -229,18 +135,9 @@ pub fn apply(config: *Config, text: []const u8) void {
             }
             continue;
         }
-        if (std.mem.eql(u8, entry.section, "terminal")) {
-            if (std.mem.eql(u8, entry.key, "command")) {
-                const v = std.mem.trim(u8, entry.value, " \t");
-                const n = @min(v.len, config.terminal_command.len);
-                @memcpy(config.terminal_command[0..n], v[0..n]);
-                config.terminal_command_len = n;
-            } else if (std.mem.eql(u8, entry.key, "height")) {
-                const n = std.fmt.parseInt(usize, std.mem.trim(u8, entry.value, " \t"), 10) catch continue;
-                config.terminal_height = @min(@max(n, 3), 60);
-            }
-            continue;
-        }
+        // Sections this version does not know (an old `[terminal]`) are
+        // skipped, so an existing config keeps loading.
+        if (entry.section.len > 0 and !std.mem.eql(u8, entry.section, "editor")) continue;
         if (std.mem.eql(u8, entry.key, "tab_width")) {
             const n = std.fmt.parseInt(usize, std.mem.trim(u8, entry.value, " \t"), 10) catch continue;
             config.tab_width = @min(@max(n, 1), 16);
@@ -359,35 +256,31 @@ pub fn saveTheme(allocator: std.mem.Allocator, config: *Config, name: []const u8
     // one next to the binary). Write the choice into the other one as well so
     // launching from a different directory does not bring back the old theme.
     var other_buf: [1024]u8 = undefined;
-    if (otherConfigPath(config, &other_buf)) |other| {
+    if (otherConfigPath(allocator, config, &other_buf)) |other| {
         if (!std.mem.eql(u8, other, path)) {
-            var probe = Config{};
-            probe.setSource(other);
             saveThemeTo(allocator, other, name) catch {};
         }
     }
 }
 
 /// The config path that was *not* loaded, if one exists.
-fn otherConfigPath(self: *const Config, buf: []u8) ?[]const u8 {
+fn otherConfigPath(allocator: std.mem.Allocator, self: *const Config, buf: []u8) ?[]const u8 {
     if (self.source_len == 0) return null;
     const loaded = self.sourcePath();
     // Loaded from the working directory: the other one sits next to the exe.
     if (!std.mem.startsWith(u8, loaded, "mibi.ini") and !std.mem.eql(u8, loaded, "mibi.ini")) {
-        if (readFile(std.heap.page_allocator, "mibi.ini")) |t| {
-            std.heap.page_allocator.free(t);
+        if (readFile(allocator, "mibi.ini")) |t| {
+            allocator.free(t);
             return "mibi.ini";
         }
         return null;
     }
     // Loaded "mibi.ini": look for one next to the executable.
-    const dir = std.fs.path.dirname(loaded) orelse return null;
-    _ = dir;
-    const exe_dir = os.exeDirAlloc(std.heap.page_allocator) catch return null;
-    defer std.heap.page_allocator.free(exe_dir);
+    const exe_dir = os.exeDirAlloc(allocator) catch return null;
+    defer allocator.free(exe_dir);
     const candidate = std.fmt.bufPrint(buf, "{s}/mibi.ini", .{exe_dir}) catch return null;
-    if (readFile(std.heap.page_allocator, candidate)) |t| {
-        std.heap.page_allocator.free(t);
+    if (readFile(allocator, candidate)) |t| {
+        allocator.free(t);
         return candidate;
     }
     return null;
@@ -409,7 +302,9 @@ fn saveThemeTo(allocator: std.mem.Allocator, path: []const u8, name: []const u8)
         var in_editor = false;
         var wrote = false;
         var saw_editor = false;
-        var lines = std.mem.splitScalar(u8, text, '\n');
+        // The last line's own line break is not an extra, empty line.
+        const body = if (text[text.len - 1] == '\n') text[0 .. text.len - 1] else text;
+        var lines = std.mem.splitScalar(u8, body, '\n');
         while (lines.next()) |line| {
             const trimmed = std.mem.trim(u8, line, " \t\r");
             if (trimmed.len > 0 and trimmed[0] == '[') {
@@ -457,7 +352,7 @@ fn loadThemeFile(allocator: std.mem.Allocator, path: []const u8, theme: *Theme) 
     const data = os.readFileAlloc(allocator, path, 64 * 1024) catch return false;
     defer allocator.free(data);
     var reader = ini.Reader{ .text = data };
-    while (reader.next()) |entry| setThemeColor(theme, entry.key, entry.value);
+    while (reader.next()) |entry| theme.set(entry.key, entry.value);
     return true;
 }
 
@@ -469,20 +364,6 @@ test "defaults are the shipped look" {
     try std.testing.expect(config.line_numbers);
     try std.testing.expect(config.syntax);
     try std.testing.expectEqual(rgb(0xd8, 0xde, 0xe9), config.theme.text);
-}
-
-test "parses colours in #rrggbb and #rgb" {
-    const a = parseColor("#c678dd").?;
-    try std.testing.expectEqual(@as(u8, 0xc6), a.rgb.r);
-    try std.testing.expectEqual(@as(u8, 0x78), a.rgb.g);
-    try std.testing.expectEqual(@as(u8, 0xdd), a.rgb.b);
-
-    const b = parseColor("#fff").?;
-    try std.testing.expectEqual(@as(u8, 0xff), b.rgb.r);
-    try std.testing.expectEqual(@as(u8, 0xff), b.rgb.b);
-
-    try std.testing.expect(parseColor("nope") == null);
-    try std.testing.expect(parseColor("#12345") == null);
 }
 
 test "applies editor settings and theme colours" {
@@ -523,9 +404,10 @@ test "parses [keys] bindings and ignores unknown actions" {
         \\ctrl+shift+left = move_word_left
         \\ctrl+j = not_an_action
     );
-    try std.testing.expectEqual(keys.Action.new_tab, config.keys.lookup("ctrl+n").?);
-    try std.testing.expectEqual(keys.Action.save, config.keys.lookup("f2").?);
-    try std.testing.expectEqual(keys.Action.move_word_left, config.keys.lookup("ctrl+shift+left").?);
+    const Key = @import("ui").event.Key;
+    try std.testing.expectEqual(commands.Command.new_tab, config.keys.resolve(Key.parse("ctrl+n").?).?.command);
+    try std.testing.expectEqual(commands.Command.save, config.keys.resolve(Key.parse("f2").?).?.command);
+    try std.testing.expectEqual(commands.Command.move_word_left, config.keys.resolve(Key.parse("ctrl+shift+left").?).?.command);
     try std.testing.expectEqual(@as(usize, 3), config.keys.count); // the bad one was skipped
 }
 
@@ -583,20 +465,6 @@ test "loads a named theme from themes/" {
     try std.testing.expectEqual(rgb(0xff, 0x79, 0xc6), dracula.keyword1);
     try std.testing.expect(loadTheme(std.testing.allocator, null, "nope") == null);
     try std.testing.expect(loadTheme(std.testing.allocator, null, "../etc/passwd") == null);
-}
-
-test "the current-line tint is derived or explicit" {
-    var theme = Theme{ .background = rgb(0x1e, 0x1e, 0x2e), .text = rgb(0xcd, 0xd6, 0xf4) };
-    const derived = theme.lineHighlight();
-    try std.testing.expect(std.meta.activeTag(derived) == .rgb);
-    try std.testing.expect(!std.meta.eql(derived, theme.background));
-    // Light theme: the tint goes darker instead of lighter.
-    var light = Theme{ .background = rgb(0xf0, 0xf0, 0xf0), .text = rgb(0x20, 0x20, 0x20) };
-    const dark_tint = light.lineHighlight();
-    try std.testing.expect(dark_tint.rgb.r < 0xf0);
-    // An explicit colour wins.
-    theme.line_hl = rgb(0x11, 0x22, 0x33);
-    try std.testing.expectEqual(rgb(0x11, 0x22, 0x33), theme.lineHighlight());
 }
 
 test "inline theme keys override a named theme" {
