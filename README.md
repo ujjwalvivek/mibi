@@ -5,15 +5,16 @@
 A tiny, modern terminal text editor. Non-modal, in the spirit of nano/micro,
 built in Zig with no third-party dependencies.
 
-Status: **being rebuilt.** v0.0.2 is the last release and the editor you get
-from this branch still runs on its code. A new core (`src/core/`: buffer,
-undo, multi-cursor editing, regex search) is finished and tested; the
-interface is being moved onto it next. See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what is changing and why.
+Status: **rebuilt, not yet released.** `main` is the new editor (0.1.0 in
+progress): a text model, widgets and a platform layer that the build keeps
+apart, tested on Linux, macOS and Windows on every push. v0.0.2 is the last
+tagged release and predates all of it. Still to come before the tag: soft
+wrap, atomic save, bracket matching and packaging. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what changed and why.
 Cross-platform (Linux, macOS, Windows).
 
 ```
-mibi                # new buffer
+mibi                # the last session in this directory, or a new buffer
 mibi <file>         # open a file (a missing file opens empty and saves there)
 ```
 
@@ -120,7 +121,12 @@ packaging.
 | `Esc`                     | clear the selection (or cancel a prompt)                                                    |
 | `Ctrl+C` / `Ctrl+X`       | copy / cut selection (or line)                                                              |
 | `Ctrl+V`                  | paste from the register                                                                     |
-| `Ctrl+D`                  | duplicate the current line                                                                  |
+| `Ctrl+D` / `Ctrl+K`       | duplicate / delete the current line                                                         |
+| `Alt+Up` / `Alt+Down`     | move the line (or the selected lines) up / down                                             |
+| `Ctrl+/`                  | comment / uncomment with the language's line comment                                        |
+| `Shift+Tab`               | remove one level of indentation (`Tab` with a selection adds one)                           |
+| `Ctrl+Home` / `Ctrl+End`  | start / end of the file                                                                     |
+| `Ctrl+Backspace` / `Ctrl+Delete` | delete the word before / after the cursor                                            |
 | `Ctrl+Z` / `Ctrl+Y`       | undo / redo                                                                                 |
 | `Ctrl+Alt+Up` / `Down`    | add a cursor above / below (Esc drops them)                                                 |
 | `Ctrl+F`                  | find (incremental); `F3` / `Shift+F3` next / previous; `Ctrl+R` in the prompt toggles regex |
@@ -135,8 +141,10 @@ packaging.
 | `F6` / `Shift+F6`         | next / previous pane (or click a pane)                                                      |
 | `F2`                      | theme picker (arrows preview live, Enter keeps and saves, Esc restores)                     |
 | `Ctrl+P`                  | command palette: every action, fuzzy-filtered                                               |
-| `Ctrl+?` / `F1`           | help panel (Esc closes it); hints at the status bar's right edge                            |
-| `Ctrl+Q`                  | quit (asks first if any tab has unsaved edits)                                              |
+| `F1`                      | help panel (Esc closes it); hints at the status bar's right edge                            |
+| `Ctrl+B`                  | file tree: arrows or `j`/`k` move, Enter opens, `Ctrl+B` again hides it                     |
+| mouse                     | click, double and triple click, drag to select, `Ctrl+click` adds a cursor, wheel scrolls; drag a tab to reorder it or into the text to split |
+| `Ctrl+Q`                  | quit; unsaved text is kept in the session and comes back on the next start                  |
 
 ## Features
 
@@ -152,8 +160,9 @@ packaging.
 - Regular expressions: `Ctrl+R` inside find/replace switches the search to a
   pattern engine (classes and ranges, groups with captures, alternation,
   anchors, `\d \w \s \b`, `* + ? {n,m}` with lazy variants). Replacements
-  expand `$0`..`$9` from the captured groups. Backtracking is step-capped and
-  there are no backreferences yet.
+  expand `$0`..`$9` from the captured groups. The engine is a Pike VM: its
+  time is linear in the text whatever the pattern, so `(a*)*b` cannot hang
+  it. There are no backreferences.
 - File tree sidebar (`Ctrl+B`): directories expand with Enter/`j`/`k` or a
   click, files open in a tab. The open folders and the selected entry are
   restored with the session, so it comes back where you left it. Icons are Nerd Font glyphs: see
@@ -171,9 +180,12 @@ packaging.
   (macOS) elsewhere.
 - Mouse: click text to place the cursor, click a tab to switch to it, click
   picker rows (click again to accept), click the status-bar hint for help;
-  the wheel moves one line per notch. Over the tab bar the wheel scrolls the
-  strip instead. Quick-edit mode is turned off so the console reports clicks
-  to the editor.
+  double click selects a word and triple a line, dragging selects, and
+  `Ctrl+click` adds a cursor. The wheel scrolls three lines per notch without
+  moving the cursor. Over the tab bar the wheel scrolls the
+  strip instead. On Windows quick-edit mode is turned off so the console
+  reports clicks; on Unix the terminal is asked for SGR mouse reports.
+- Bracketed paste: pasted text goes in as one undo step, exactly as it is.
 - Configurable keybindings and a colour theme via `mibi.ini` (`[keys]` and
   `[theme]`), with the whole palette and every action bindable. The help
   panel renders the keys you actually bound.
@@ -190,15 +202,14 @@ packaging.
   them. Extra cursors are drawn as blocks like the main one.
 - Split panes (`F5` side by side, `F7` stacked): a binary split tree with
   a `│`/`─` rule between panes, the rule glowing next to the focused
-  pane. Each pane edits its own document with its own cursor, selection and
-  scroll; `F6` cycles the focus and clicking inside a pane focuses it and puts
+  pane. Each pane is its own view, with its own cursors, selection and
+  scroll, and two panes can show the same file: an edit in one appears in
+  the other. `F6` cycles the focus and clicking inside a pane focuses it and puts
   the cursor there. `Shift+F5` / `Shift+F7` closes a pane and leaves its file
   open as a tab, so a split can be undone without closing anything. Dragging a
   tab onto a pane's left/right third (or top/bottom half) splits that pane with
-  the tab, and the target half is tinted while you drag. Splitting shows another
-  open file when there is one (an unused empty scratch tab is reused, so
-  `[No Name]` tabs do not pile up). Closing a tab closes its pane, and the
-  layout is saved in the session file.
+  the tab, and the target half is tinted while you drag. Closing a tab closes
+  the panes showing it, and the layout is saved in the session file.
 - Multiple documents as tabs: file names only in the tab bar, a `+` button
   pinned to the right edge and a per-tab `x` to close (with a cell of padding
   so it does not touch the tab edge; hovering `x`, `+` or the scroll arrows
@@ -212,38 +223,44 @@ packaging.
 - Cell-grid **diff renderer**: changed rows are rewritten in full.
 - Raw mode, alternate screen, resize handling, auto-wrap disabled, UTF-8
   console codepage set on Windows.
-- Cross-platform from one codebase: `src/os.zig` (kernel32 / libc), `src/term.zig`.
+- Cross-platform from one codebase: `src/platform/` is the only place that
+  knows which OS it is on (kernel32 on Windows, libc on Unix).
 
 ## Architecture
 
+Four layers, each a module in `build.zig`, so an import in the wrong
+direction does not compile. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has
+the decisions behind them.
+
 ```
-src/main.zig     entry, input decoding, prompts, tabs, drawing
-src/editor.zig   cursor, selection, editing, undo/redo, clipboard, search, files
-src/buffer.zig   piece table + cached line index
-src/syntax.zig   data-driven highlighter (reads syntax.d/*.ini)
-src/ini.zig      small INI reader
-src/config.zig   mibi.ini: settings, theme, key bindings
-src/keys.zig     key names, actions and the key map
-src/render.zig   cell grid + ANSI diff
-src/term.zig     raw mode, alt screen, size, input
-src/os.zig       raw OS layer (no std.Io)
-src/text.zig     UTF-8 helpers
-src/width.zig    generated Unicode width table
+src/core/      the text model: piece table, undo, selections, views, regex,
+               search, syntax. No OS, no terminal.
+src/ui/        widgets, events and the cell grid. Imports core only.
+src/platform/  OS and terminal: files, processes, raw mode, input decoding.
+src/app.zig    the editor: documents, panes, prompts, pickers, mouse, session
+src/app/
+src/commands.zig  the one command table (bindings, palette, help)
+src/config.zig    mibi.ini, themes
+src/main.zig      arguments, the run loop, restoring the terminal
 ```
+
+`zig build test` runs every layer's tests (`test-core`, `test-ui`,
+`test-platform`, `test-app` run one). The editor is tested in process: key
+presses and mouse events in, screen cells out, no terminal involved.
 
 ## Size
 
-ReleaseSmall, stripped, cross-compiled. `.\build.ps1 size` rebuilds every
-target and fails if one grows past its budget (Phase 1 <= 80 KB, Phase 2 <=
-150 KB, hard ceiling 1 MB); see `experiments/README.md` for the probe data.
+ReleaseSmall, stripped, cross-compiled. `.\build.ps1 size` (or
+`tools/check-size.sh`) rebuilds every target and fails if one grows past its
+budget; the hard ceiling is 1 MB.
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu | 142,728 |
-| x86_64-linux-gnu  | 156,288 |
-| x86_64-macos      | 166,138 |
-| aarch64-macos     | 200,616 |
-| x86_64-windows    | 214,016 |
+| aarch64-linux-gnu | 172,680 |
+| x86_64-linux-gnu  | 196,272 |
+| x86_64-macos      | 207,666 |
+| aarch64-macos     | 219,080 |
+| x86_64-windows    | 249,856 |
 
 ## Changelog
 
@@ -284,15 +301,17 @@ user data directory, one directory per project (an FNV-1a hash of the working
 directory):
 
 ```
-%LOCALAPPDATA%\Mibi\sessions\<hash>\mibi-session
-%LOCALAPPDATA%\Mibi\sessions\<hash>\mibi-session-buf-<n>.txt
+%LOCALAPPDATA%\Mibi\sessions\<hash>\session
+%LOCALAPPDATA%\Mibi\sessions\<hash>\buffer-<id>.txt
 ```
 
-`mibi-session` lists the tabs, cursors, split layout and file-tree state;
-`mibi-session-buf-<n>.txt` holds the text of a buffer that has unsaved changes.
+`session` lists the tabs, cursors, split layout and file-tree state;
+`buffer-<id>.txt` holds the text of a tab that has unsaved changes. It is
+rewritten at most every two seconds while you type, and when the terminal is
+closed.
 Set `MIBI_STATE_DIR` to put them somewhere else (the tests use it to keep each
 run isolated).
 
 ## Not yet
 
-Multi-cursor, macros, embedded terminal.
+Soft wrap, bracket matching, atomic save, macros. There is no embedded terminal and no plugin system, on purpose.

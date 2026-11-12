@@ -1,6 +1,6 @@
 # mibi architecture: decisions for the rebuild
 
-Status: **accepted**, 2026-11-12; step 2 (the core) is built. This record reassesses the design from phase 0
+Status: **accepted**, 2026-11-12; steps 1 to 3 are built (the whole editor runs on the new structure). This record reassesses the design from phase 0
 up. It says what stays, what is replaced, and why, and it fixes the order of
 the work. It supersedes section 3 of the local `PLAN.md`; the product scope in
 that plan (ox-lite, no plugins, no embedded terminal) is unchanged.
@@ -56,10 +56,21 @@ src/app.zig    owns the state, runs the loop, maps events to commands
 src/main.zig   entry point only
 ```
 
-`core` and `ui` each get their own test step whose module graph does not
-include `platform`, so an import in the wrong direction fails to compile
-instead of being caught in review. This is also what makes the editor testable
-without a terminal: a UI test feeds events and reads the cell grid.
+As built, each layer is a module in `build.zig`, and a Zig file cannot import
+a path outside its own module, only the modules it was given:
+
+| Module | Root | May import |
+| --- | --- | --- |
+| `core` | `src/core/core.zig` | nothing |
+| `ui` | `src/ui/ui.zig` | `core` |
+| `platform` | `src/platform/platform.zig` | `ui`, for the event types it produces |
+| application | `src/main.zig` | all three |
+
+An import in the wrong direction is a compile error, not a review comment.
+Each module is also a test binary (`zig build test-core`, `test-ui`,
+`test-platform`, `test-app`; `zig build test` runs all four). This is what
+makes the editor testable without a terminal: a test feeds events and reads
+the cell grid.
 
 ### 2. A buffer that never copies the document
 
@@ -130,23 +141,25 @@ the transaction, so two panes on one file stay correct without special cases.
 records *into* ANSI bytes so that the same parser can read them back. Mouse,
 paste, focus and resize all pass through that.
 
-`platform/input` produces one type on every OS:
+As built (`src/ui/event.zig`), there is one type on every OS:
 
 ```zig
 const Event = union(enum) {
-    key: struct { code: KeyCode, mods: Mods },
-    text: []const u8,       // typed or pasted, already UTF-8
-    paste: []const u8,      // bracketed paste, one undo step
-    mouse: Mouse,
-    resize: Size,
+    key: Key,            // codepoint or named key, plus ctrl/alt/shift
+    mouse: Mouse,        // press, release, drag, wheel; button, cell, mods
+    paste: []const u8,   // bracketed paste, one undo step
     focus: bool,
-    tick,
+    resize,
 };
 ```
 
-Windows builds events directly from console records. Unix has a decoder that is
-a pure function over bytes, fuzzed with split and malformed sequences. The
-keymap matches `Event.key` against bindings without building a string per key.
+Unix has a decoder (`platform/ansi.zig`) that is a pure function over bytes:
+it holds back half a sequence until the rest arrives, and is fuzzed with split
+and malformed input. Windows builds events directly from console records
+(`platform/win_input.zig`); the translation takes plain structs rather than
+kernel32 types, so it is tested on every platform. The keymap matches keys
+against bindings without building a string per key. There is no `tick` event:
+the loop calls `app.tick()` when input has been quiet for half a second.
 
 ### 7. One command table
 
@@ -155,13 +168,16 @@ entries, the help text and the dispatch `switch` are four separate lists in
 `main.zig`. A single table (`id`, title, default keys, function) generates all
 four, and `[keys]` in `mibi.ini` only overrides it.
 
-### 8. Widgets with a focus stack
+### 8. Widgets, and one place that owns the state
 
-Input handlers thread `running`, `prompt`, `help`, `msg_buf`, `msg` and
-`view_rows` through every call. Each widget becomes a struct with
-`handle(event) bool` and `draw(grid, rect)`; the app keeps a focus stack
-(prompt, picker, help, tree, panes) and offers each event from the top down.
-App-wide state (status message, config, quit flag) lives in one `App` struct.
+Input handlers threaded `running`, `prompt`, `help`, `msg_buf`, `msg` and
+`view_rows` through every call. Now each widget in `src/ui/` is a struct that
+takes events and draws into a rectangle of the cell grid, and knows nothing
+else. App-wide state (documents, panes, status message, config, quit flag)
+lives in one `App` struct, which offers a key to whatever is on top: picker,
+then prompt, then the file tree when it has focus, then the keymap, then the
+text. That order is five lines in `App.handleKey`; a general focus stack was
+planned and turned out not to be needed for a fixed set of overlays.
 
 ### 9. The regex engine the plan chose
 
@@ -173,28 +189,32 @@ classic `(a*)*b` cases.
 
 ### 10. A real allocator
 
-`std.heap.page_allocator` is the general allocator in 38 places. It maps at
+`std.heap.page_allocator` was the general allocator in 38 places. It maps at
 least one page per allocation and makes a system call each time. It was chosen
-because it costs zero bytes. The rebuild uses an arena that is reset every
-frame for drawing and input scratch, and one long-lived allocator for
-documents; `experiments/` gets a probe for the size cost of
-`std.heap.smp_allocator` against a small free-list allocator before one is
-picked.
+because it costs zero bytes. As built (`platform/heap.zig`): libc `malloc` on
+Unix, which is linked for termios anyway, and the process heap (`HeapAlloc`)
+on Windows, which links no libc. Both cost a few hundred bytes of glue. The
+per-frame arena that was planned is not there: drawing allocates one scratch
+line per pane, which did not justify a second allocator.
 
 ### 11. Every platform is checked on every change
 
 CI runs the unit tests on Linux, macOS and Windows and the size gate on all
-five targets. The screen tests move from ConPTY-only Python to an in-process
-harness (events in, cell grid out) that runs everywhere, with a thin
-real-terminal smoke test per OS for the platform layer.
+five targets. The screen tests moved from ConPTY-only Python to an in-process
+harness (`src/app/test.zig`: events in, cell grid out) that runs everywhere.
+One of them fails every allocation in turn across a long editing scenario and
+checks that nothing crashes or leaks. A real-terminal smoke test per OS for
+the platform layer is still to do; today that layer is covered by the pure
+decoder and translator tests and by running the editor by hand in a pty.
 
 ## Not changing, on purpose
 
 - No embedded terminal. `src/pty.zig` is deleted in the rebuild.
 - No plugins, LSP or tree-sitter in v1.
 - No rope, no tree-structured piece table, until the benchmark asks for one.
-- The on-disk formats (`mibi.ini`, `themes/*.ini`, `syntax.d/*.ini`, session
-  file) keep working.
+- The on-disk formats `mibi.ini`, `themes/*.ini` and `syntax.d/*.ini` keep
+  working. The session file is the exception: it is a new format (version 2,
+  plain lines, one per tab and pane) and an old session is ignored once.
 
 ## What the core looks like now
 
@@ -230,6 +250,43 @@ Decisions made while building it, beyond the list above:
 - **Word characters include everything outside ASCII,** in movement, whole-word
   search and `\b` alike, so the three agree.
 
+## What sits on the core now
+
+| Where | What it is |
+| --- | --- |
+| `core/ini.zig`, `syntax.zig`, `highlight.zig` | The INI reader, the lexer driven by `syntax.d`, and a per-document cache of the lexer state at each line start, dropped from the first changed line down. |
+| `ui/event.zig` | Keys, mouse, paste, focus, resize; key names as written in `mibi.ini`. |
+| `ui/screen.zig` | Cells, styles, rectangles, and the diff. A changed row is repainted whole, so a glyph the terminal draws wider than expected heals on the next change. |
+| `ui/layout.zig` | The split tree: stable pane ids, at most eight panes. |
+| `ui/editor_pane.zig`, `tabbar.zig`, `picker.zig`, `line_edit.zig`, `theme.zig` | The widgets. |
+| `platform/os.zig`, `heap.zig` | Files, directories, child processes, the clock, the allocator. |
+| `platform/term.zig`, `ansi.zig`, `win_input.zig` | Raw mode, the alternate screen, signals, and input as events. |
+| `commands.zig` | The one table: command, title, default keys, whether the palette lists it. Bindings, palette and help are generated from it. |
+| `config.zig`, `langs.zig` | `mibi.ini`, themes and `syntax.d` read from disk into the pure types. |
+| `app.zig`, `app/*.zig` | The editor: documents and panes, prompts, pickers, mouse, drawing, the file tree, the formatter, reload from disk, the session. |
+| `main.zig` | Arguments, start-up, the run loop, and restoring the terminal on every way out. 245 lines, from 4,506. |
+
+Decisions made while building it:
+
+- **A pane owns a view; a document may be in several panes.** Each view has
+  its own cursors and scroll. A tab remembers where its last view was.
+- **Scrolling is not moving.** The view scrolls to the cursor only after a
+  command or an edit, so the wheel can look elsewhere without dragging the
+  cursor along.
+- **Errors become status messages.** `App.handle` cannot fail: out of memory
+  or a failed save is said in the status line and the editor carries on.
+- **The app has no clock and no terminal.** The loop sets `now_ms` and writes
+  out whatever the app queued (window title, clipboard), so tests are exact.
+- **Unix terminals are asked for the mouse, focus and bracketed paste.** The
+  old code only had a mouse on Windows.
+- **A closed terminal saves the session.** SIGHUP and SIGTERM leave through
+  the normal exit path; the Windows close button calls the same save.
+- **Selections that end at the start of a line do not include that line** in
+  indent, comment and move-line commands, as in other editors.
+- **Help is F1 only.** `ctrl+/` toggles a line comment.
+- **Sizes grew by about 40 KB** (172,680 to 249,856 bytes across the five
+  targets, budgets reset with 5% headroom). The old binary did less.
+
 ## Order of work
 
 Each step ends with all tests green on three platforms and the size gate
@@ -240,10 +297,10 @@ passing. The old code keeps working until the step that replaces it lands.
    search, Pike VM, in `src/core/` with its own test step. Width and UTF-8
    moved in unchanged. Model-based fuzz tests for buffer and undo. The syntax
    lexer moves in at the start of step 3, with the pane that draws it.
-3. **Platform and UI:** typed events, command table, widgets, app loop. Features
-   are ported in the plan's phase order (terminal and render, core editing,
-   documents and UI, ox-lite), each with in-process screen tests. `main.zig`
-   shrinks to the entry point and `pty.zig` goes.
+3. **Platform and UI** (done): typed events, command table, widgets, app
+   loop, each feature with in-process screen tests. `main.zig` is the entry
+   point; `pty.zig`, the old `editor.zig`, `buffer.zig`, `regex.zig`,
+   `render.zig` and `keys.zig` are gone.
 4. **Phase 6 and release:** bracketed paste, soft wrap, atomic save, bracket
    matching, line operations and comment toggle from the plan's v1 list,
    packaging, README and changelog rewritten from the code, tagged release.

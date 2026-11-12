@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+**The rebuild (0.1.0 in progress)**
+
+The editor was taken apart and put back together on a new structure; see
+[ARCHITECTURE.md](ARCHITECTURE.md). What that changes for someone using it:
+
+- Linux and macOS work, and are tested on every push along with Windows.
+  Before, only the Windows build compiled.
+- The mouse, focus reports and bracketed paste now work on Unix terminals.
+- Regex search runs in linear time; no pattern can stall the editor.
+- Two panes can show the same file, each with its own cursors and scroll.
+- New commands: delete line (`Ctrl+K`), move line (`Alt+Up` / `Alt+Down`),
+  toggle comment (`Ctrl+/`), dedent (`Shift+Tab`), delete word
+  (`Ctrl+Backspace` / `Ctrl+Delete`), start and end of file, save as.
+  `Ctrl+click` adds a cursor; double and triple click select a word and a line.
+- The wheel scrolls without moving the cursor.
+- Help is `F1` only: `Ctrl+/` is now the comment toggle.
+- Undo no longer keeps a copy of the document per step, and undoing back to
+  the saved state clears the modified marker.
+- Closing the terminal window (or SIGHUP / SIGTERM) saves the session.
+- `Ctrl+Q` no longer asks about unsaved changes: they are in the session and
+  come back with the tabs. Closing a tab with unsaved changes still asks,
+  because that does discard them.
+- Running out of memory is reported in the status line instead of ending the
+  program.
+- The embedded terminal is gone.
+- The session file has a new format. A session saved by v0.0.2 is not read;
+  the first start after upgrading opens empty.
+- Binaries are about 40 KB larger (173 to 250 KB depending on the target).
+
 **Hot reload**
 
 - An idle tick every half second re-lists the file tree and re-stamps every

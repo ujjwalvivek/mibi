@@ -25,6 +25,9 @@ mibi-session
 mibi-session-buf-*.txt
 mibi-input.log
 mibi-test.tmp
+mibi-*-test.*
+/session
+/buffer-*.txt
 
 # Local design notes (kept out of the repo)
 PLAN.md
