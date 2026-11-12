@@ -187,8 +187,11 @@ fn parseEscape(bytes: []const u8, flush: bool) Parsed {
     }
 }
 
-fn modsFrom(param: u16) Mods {
+fn modsFrom(param: u16) ?Mods {
     const bits = if (param == 0) 0 else param - 1;
+    // Super, hyper and meta have no name in the editor's key model. Dropping
+    // the key is better than turning a chord into plain text.
+    if (bits & (8 | 16 | 32) != 0) return null;
     return .{ .shift = bits & 1 != 0, .alt = bits & 2 != 0, .ctrl = bits & 4 != 0 };
 }
 
@@ -208,21 +211,11 @@ fn parseCsi(bytes: []const u8, flush: bool) Parsed {
 
     if (body.len > 0 and body[0] == '<') return parseMouse(body[1..], final, len);
 
-    var params = [_]u16{0} ** 4;
-    var count: usize = 0;
-    for (body) |c| {
-        if (c >= '0' and c <= '9') {
-            params[count] = params[count] *| 10 +| (c - '0');
-        } else if (c == ';') {
-            if (count < params.len - 1) count += 1;
-        } else if (c == ':') {
-            // Sub-parameters (kitty): not used, but must not corrupt the rest.
-            return .{ .skip = len };
-        } else {
-            return .{ .skip = len };
-        }
-    }
-    const mods = modsFrom(params[1]);
+    const params = parseParams(body) orelse return .{ .skip = len };
+    // With the kitty protocol's event-type reporting on, a release is not a
+    // press. Repeats (2) and presses (1) both are.
+    if (params.subs[1] == 3) return .{ .skip = len };
+    const mods = modsFrom(params.values[1]) orelse return .{ .skip = len };
 
     const special: Special = switch (final) {
         'A' => .up,
@@ -238,7 +231,7 @@ fn parseCsi(bytes: []const u8, flush: bool) Parsed {
         'Z' => return key(.{ .special = .tab, .mods = .{ .shift = true } }, len),
         'I' => return .{ .event = .{ .event = .{ .focus = true }, .len = len } },
         'O' => return .{ .event = .{ .event = .{ .focus = false }, .len = len } },
-        '~' => switch (params[0]) {
+        '~' => switch (params.values[0]) {
             1, 7 => .home,
             4, 8 => .end,
             2 => .insert,
@@ -260,26 +253,99 @@ fn parseCsi(bytes: []const u8, flush: bool) Parsed {
             200 => return .{ .paste_begin = len },
             else => return .{ .skip = len },
         },
-        // CSI u: a key by codepoint, for terminals that spell them out.
+        // CSI u: a key by codepoint, for terminals that spell them out
+        // (the kitty protocol and its relatives).
         'u' => {
-            const cp: u21 = params[0];
-            var k: Key = switch (cp) {
-                9 => .{ .special = .tab },
-                13 => .{ .special = .enter },
-                27 => .{ .special = .esc },
-                127 => .{ .special = .backspace },
-                0x20...0x7e => .{ .cp = cp },
-                else => return .{ .skip = len },
-            };
+            var k = codepointKey(params.values[0]) orelse return .{ .skip = len };
             k.mods = mods;
             if (k.cp >= 'A' and k.cp <= 'Z' and (mods.ctrl or mods.alt)) k.cp += 'a' - 'A';
-            // Shift on a plain character is already in the character.
-            if (k.special == .none and !mods.ctrl and !mods.alt) k.mods.shift = false;
+            // Shift on a plain character is already in the character when
+            // the terminal sends text. When it spells the key out, the
+            // codepoint is the unshifted one, so shift it here.
+            if (k.special == .none and !mods.ctrl and !mods.alt) {
+                if (k.mods.shift and k.cp >= 'a' and k.cp <= 'z') k.cp -= 'a' - 'A';
+                k.mods.shift = false;
+            }
             return key(k, len);
         },
         else => return .{ .skip = len },
     };
     return key(.{ .special = special, .mods = mods }, len);
+}
+
+/// One CSI parameter list. `subs` holds the colon-separated sub-parameters
+/// (the event type in the kitty protocol); everything else uses `values`.
+const Params = struct {
+    values: [4]u16 = .{0} ** 4,
+    subs: [4]u16 = .{0} ** 4,
+    /// Index of the last parameter seen.
+    count: usize = 0,
+};
+
+fn parseParams(body: []const u8) ?Params {
+    var params = Params{};
+    var in_sub = false;
+    for (body) |c| {
+        if (c >= '0' and c <= '9') {
+            const slot = if (in_sub) &params.subs[params.count] else &params.values[params.count];
+            slot.* = slot.* *| 10 +| (c - '0');
+        } else if (c == ';') {
+            if (params.count >= params.values.len - 1) return null;
+            params.count += 1;
+            in_sub = false;
+        } else if (c == ':') {
+            in_sub = true;
+        } else {
+            // `?` (a query reply), `>` and `<` (push/pop) are not input.
+            return null;
+        }
+    }
+    return params;
+}
+
+/// The key behind a `CSI u` codepoint. Functional keys use the private use
+/// area (57344-63743) in the kitty protocol; none of those may become text.
+fn codepointKey(cp: u21) ?Key {
+    return switch (cp) {
+        9 => .{ .special = .tab },
+        13 => .{ .special = .enter },
+        27 => .{ .special = .esc },
+        127 => .{ .special = .backspace },
+        57348 => .{ .special = .insert },
+        57349 => .{ .special = .delete },
+        57350 => .{ .special = .left },
+        57351 => .{ .special = .right },
+        57352 => .{ .special = .up },
+        57353 => .{ .special = .down },
+        57354 => .{ .special = .page_up },
+        57355 => .{ .special = .page_down },
+        57356 => .{ .special = .home },
+        57357 => .{ .special = .end },
+        57364...57375 => .{ .special = @enumFromInt(@intFromEnum(Special.f1) + @as(u8, @intCast(cp - 57364))) },
+        // The keypad, so it keeps typing when the terminal spells it out.
+        57399...57408 => Key.char('0' + (cp - 57399)),
+        57409 => Key.char('.'),
+        57410 => Key.char('/'),
+        57411 => Key.char('*'),
+        57412 => Key.char('-'),
+        57413 => Key.char('+'),
+        57414 => .{ .special = .enter },
+        57415 => Key.char('='),
+        57416 => Key.char(','),
+        57417 => .{ .special = .left },
+        57418 => .{ .special = .right },
+        57419 => .{ .special = .up },
+        57420 => .{ .special = .down },
+        57421 => .{ .special = .page_up },
+        57422 => .{ .special = .page_down },
+        57423 => .{ .special = .home },
+        57424 => .{ .special = .end },
+        57425 => .{ .special = .insert },
+        57426 => .{ .special = .delete },
+        else => if (cp >= 0x20 and !(cp >= 0x7f and cp <= 0x9f) and
+            !(cp >= 0xd800 and cp <= 0xdfff) and
+            !(cp >= 57344 and cp <= 63743)) Key.char(cp) else null,
+    };
 }
 
 /// SGR mouse report: `ESC [ < button ; x ; y M` (press, motion) or `m`
@@ -437,13 +503,55 @@ test "focus and unknown sequences" {
     try expectDecodes("\x1b[13;2u", "shift+enter\n");
 }
 
+test "kitty keyboard protocol" {
+    // Esc, ctrl and alt keys are spelled out instead of control bytes.
+    try expectDecodes("\x1b[27u", "esc\n");
+    try expectDecodes("\x1b[97;5u", "ctrl+a\n");
+    try expectDecodes("\x1b[97;6u", "ctrl+shift+a\n");
+    try expectDecodes("\x1b[97;3u", "alt+a\n");
+    try expectDecodes("\x1b[27;3u", "alt+esc\n");
+    try expectDecodes("\x1b[13;2u", "shift+enter\n");
+    try expectDecodes("\x1b[9;6u", "ctrl+shift+tab\n");
+    try expectDecodes("\x1b[32;5u", "ctrl+space\n");
+    try expectDecodes("\x1b[47;5u", "ctrl+/\n");
+
+    // Event types: press and repeat are keys, release is not.
+    try expectDecodes("\x1b[97;5:1u", "ctrl+a\n");
+    try expectDecodes("\x1b[97;5:2u", "ctrl+a\n");
+    try expectDecodes("\x1b[97;5:3u", "");
+    try expectDecodes("\x1b[1;5:1A", "ctrl+up\n");
+    try expectDecodes("\x1b[1;5:3A", "");
+    try expectDecodes("\x1b[3;5:1~", "ctrl+delete\n");
+    try expectDecodes("\x1b[3;5:3~", "");
+
+    // Functional keys by codepoint, and the keypad.
+    try expectDecodes("\x1b[57352u", "up\n");
+    try expectDecodes("\x1b[57352;5u", "ctrl+up\n");
+    try expectDecodes("\x1b[57364u", "f1\n");
+    try expectDecodes("\x1b[57400u", "1\n");
+    try expectDecodes("\x1b[57414u", "enter\n");
+
+    // A shifted letter is text, not a shortcut.
+    try expectDecodes("\x1b[97;2u", "A\n");
+    try expectDecodes("\x1b[97;4u", "alt+shift+a\n");
+
+    // A private-use key the editor has no name for (a modifier on its own)
+    // is dropped, never typed. A flags query reply and a C1 codepoint are
+    // dropped too.
+    try expectDecodes("\x1b[57441u", "");
+    try expectDecodes("\x1b[?3u", "");
+    try expectDecodes("\x1b[128u", "");
+    // Super/hyper/meta have no binding here; a chord must not become text.
+    try expectDecodes("\x1b[115;9u", "");
+}
+
 test "bracketed paste arrives as one event, escapes and all" {
     try expectDecodes("\x1b[200~hello\r\n\x1b[A world\x1b[201~x", "paste:hello\r\n\x1b[A world\nx\n");
     try expectDecodes("\x1b[200~\x1b[201~", "paste:\n");
 }
 
 test "any split of the input decodes the same" {
-    const input = "a\xc3\xa9\x1b[1;5C\x1b[<0;5;3M\x1bOP\x13\x1b[200~pa\x1bste\x1b[201~\xf0\x9f\x98\x80\x1b[6~z";
+    const input = "a\xc3\xa9\x1b[1;5C\x1b[<0;5;3M\x1bOP\x13\x1b[200~pa\x1bste\x1b[201~\xf0\x9f\x98\x80\x1b[6~z\x1b[97;5:2u\x1b[27u\x1b[57352u\x1b[1;5:3A";
     var whole = std.ArrayList(u8).empty;
     defer whole.deinit(testing.allocator);
     {
@@ -482,7 +590,7 @@ test "random bytes never crash the decoder" {
     const random = prng.random();
     var decoder = Decoder.init(testing.allocator);
     defer decoder.deinit();
-    const interesting = "\x1b[<;~MmOuZ0123456789\x7f\xc3\xf0\x80";
+    const interesting = "\x1b[<;:~?MmOuZ0123456789\x7f\xc3\xf0\x80";
     var round: usize = 0;
     while (round < 4000) : (round += 1) {
         var chunk: [24]u8 = undefined;

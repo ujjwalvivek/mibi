@@ -294,18 +294,33 @@ pub fn enterRaw() !void {
 const reports_on = if (is_windows) "" else "\x1b[?1002h\x1b[?1006h\x1b[?1004h\x1b[?2004h";
 const reports_off = if (is_windows) "" else "\x1b[?2004l\x1b[?1004l\x1b[?1006l\x1b[?1002l";
 
+/// The kitty keyboard protocol, opt-in: disambiguate escape codes (1) and
+/// report event types (2). Pushed while the alternate screen is up and popped
+/// on the way out, so the shell's own keyboard mode comes back untouched.
+/// A terminal that does not know the sequence ignores it.
+const kitty_on = if (is_windows) "" else "\x1b[>3u";
+const kitty_off = if (is_windows) "" else "\x1b[<u";
+var kitty_pushed = false;
+
 /// Switch to the alternate screen, so the shell's contents come back on
 /// exit. Auto-wrap goes off (?7l): every cell is positioned absolutely and
-/// the terminal must never wrap or scroll on its own.
-pub fn enterScreen() !void {
+/// the terminal must never wrap or scroll on its own. `kitty_keys` turns on
+/// the kitty keyboard protocol for the session.
+pub fn enterScreen(kitty_keys: bool) !void {
     on_alt_screen = true;
+    kitty_pushed = kitty_keys and !is_windows;
     try write("\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[2J\x1b[H" ++ reports_on);
+    if (kitty_pushed) try write(kitty_on);
 }
 
 /// Put the terminal back exactly as it was. Safe to call twice, and from a
 /// panic.
 pub fn restore() void {
     if (on_alt_screen) {
+        if (kitty_pushed) {
+            write(kitty_off) catch {};
+            kitty_pushed = false;
+        }
         write(reports_off ++ "\x1b[?7h\x1b[0m\x1b[?25h\x1b[?1049l") catch {};
         on_alt_screen = false;
     }

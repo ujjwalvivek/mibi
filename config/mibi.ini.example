@@ -14,6 +14,10 @@ line_numbers = true
 soft_wrap = false
 ; Syntax highlighting from syntax.d/*.ini.
 syntax = true
+; Ask the terminal for the kitty keyboard protocol (ctrl+shift chords and
+; Escape arrive unambiguously). Off by default; works in kitty, foot, WezTerm,
+; Ghostty and other terminals that implement it, and is ignored elsewhere.
+kitty_keys = false
 ; Colour theme from themes/<name>.ini (see themes/README.md).
 ; theme = catppuccin-mocha
 

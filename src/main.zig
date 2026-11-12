@@ -130,7 +130,7 @@ fn run(init: std.process.Init.Minimal) !void {
 
     try term.enterRaw();
     defer term.restore();
-    try term.enterScreen();
+    try term.enterScreen(app.config.kitty_keys);
 
     // The window's close button ends a Windows process without unwinding.
     closing_app = &app;

@@ -313,5 +313,11 @@ passing. The old code keeps working until the step that replaces it lands.
 
 ## Open questions
 
-- Kitty keyboard protocol: it would make `Ctrl+Shift` chords and `Esc`
-  unambiguous on terminals that support it. Proposed as opt-in after step 3.
+- None recorded.
+
+The kitty keyboard protocol, open at the time of the rebuild, is built as the
+opt-in `kitty_keys` setting. The terminal is asked for disambiguated escape
+codes and event types (`CSI > 3 u`) while the alternate screen is up, and the
+push is undone on every exit path (`CSI < u`). `Esc` then arrives as
+`CSI 27u`, so the decoder's lone-ESC timeout only matters on terminals that do
+not implement the protocol.

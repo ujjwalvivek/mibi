@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Kitty keyboard protocol, opt-in with `kitty_keys = true` in `[editor]`.
+  On terminals that implement it, `Ctrl+Shift` chords and `Escape` arrive as
+  distinct keys instead of colliding with other control bytes, and key
+  releases are dropped rather than acting twice. The editor pushes the mode
+  when it takes the screen and pops it on exit. Windows is unchanged: console
+  records already carry the modifiers.
+
 ## v0.1.0
 
 **The rebuild**

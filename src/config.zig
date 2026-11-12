@@ -22,6 +22,10 @@ pub const Config = struct {
     /// Fold lines that are wider than the pane instead of scrolling sideways.
     soft_wrap: bool = false,
     syntax: bool = true,
+    /// Ask the terminal for the kitty keyboard protocol, which makes
+    /// ctrl+shift chords and Escape unambiguous. Off by default: support and
+    /// behaviour vary between terminals.
+    kitty_keys: bool = false,
     /// Unicode icons in the file tree (false = one-letter ASCII markers).
     /// ASCII is the default because many terminal fonts lack emoji glyphs.
     icons_unicode: bool = true,
@@ -149,6 +153,8 @@ pub fn apply(config: *Config, text: []const u8) void {
             if (parseBool(entry.value)) |b| config.soft_wrap = b;
         } else if (std.mem.eql(u8, entry.key, "syntax")) {
             if (parseBool(entry.value)) |b| config.syntax = b;
+        } else if (std.mem.eql(u8, entry.key, "kitty_keys")) {
+            if (parseBool(entry.value)) |b| config.kitty_keys = b;
         } else if (std.mem.eql(u8, entry.key, "icons")) {
             const v = std.mem.trim(u8, entry.value, " \t");
             config.icons_unicode = !std.ascii.eqlIgnoreCase(v, "ascii");
@@ -367,6 +373,7 @@ test "defaults are the shipped look" {
     try std.testing.expectEqual(@as(usize, 4), config.tab_width);
     try std.testing.expect(config.line_numbers);
     try std.testing.expect(config.syntax);
+    try std.testing.expect(!config.kitty_keys);
     try std.testing.expectEqual(rgb(0xd8, 0xde, 0xe9), config.theme.text);
 }
 
@@ -376,6 +383,7 @@ test "applies editor settings and theme colours" {
         \\tab_width = 2
         \\line_numbers = false
         \\syntax = off
+        \\kitty_keys = true
         \\
         \\[theme]
         \\text = #ff0000
@@ -385,6 +393,7 @@ test "applies editor settings and theme colours" {
     try std.testing.expectEqual(@as(usize, 2), config.tab_width);
     try std.testing.expect(!config.line_numbers);
     try std.testing.expect(!config.syntax);
+    try std.testing.expect(config.kitty_keys);
     try std.testing.expectEqual(rgb(0xff, 0x00, 0x00), config.theme.text);
     try std.testing.expectEqual(rgb(0x00, 0xff, 0x00), config.theme.comment);
     // An unknown colour key must not disturb the defaults.

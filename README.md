@@ -57,6 +57,7 @@ tab_width = 2
 line_numbers = false
 soft_wrap = true
 syntax = true
+kitty_keys = true
 
 [theme]
 background = #0e0e0e   ; unset keeps the terminal's own background
@@ -202,6 +203,12 @@ packaging.
   strip instead. On Windows quick-edit mode is turned off so the console
   reports clicks; on Unix the terminal is asked for SGR mouse reports.
 - Bracketed paste: pasted text goes in as one undo step, exactly as it is.
+- Kitty keyboard protocol (`kitty_keys = true` in `[editor]`): on terminals
+  that implement it (kitty, foot, WezTerm, Ghostty), `Ctrl+Shift` chords and
+  `Escape` arrive unambiguously, and key releases are filtered out. It is
+  pushed when the editor takes the screen and popped on exit, so the shell
+  gets its own keyboard mode back. Off by default because support and
+  behaviour vary between terminals; ignored where it is not implemented.
 - Configurable keybindings and a colour theme via `mibi.ini` (`[keys]` and
   `[theme]`), with the whole palette and every action bindable. The help
   panel renders the keys you actually bound.

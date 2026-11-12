@@ -29,6 +29,10 @@ def main() -> int:
     path = os.path.join(work, "note.txt")
     with open(path, "w") as f:
         f.write("first\nsecond\n")
+    # Turn on the kitty keyboard protocol, so the smoke test checks that the
+    # mode is pushed and popped as well as that input still works.
+    with open(os.path.join(work, "mibi.ini"), "w") as f:
+        f.write("[editor]\nkitty_keys = true\n")
 
     pid, fd = pty.fork()
     if pid == 0:
@@ -71,6 +75,7 @@ def main() -> int:
     pump(0.8)
     check("enters the alternate screen", b"\x1b[?1049h" in out)
     check("asks for mouse reports and bracketed paste", b"\x1b[?1006h" in out and b"\x1b[?2004h" in out)
+    check("pushes the kitty keyboard protocol", b"\x1b[>3u" in out)
     # The first letter is under the cursor, so it is styled apart from the rest.
     check("draws the file", b"irst" in out and b"second" in out)
 
@@ -97,6 +102,7 @@ def main() -> int:
     check("quits on ctrl+q", done == pid)
     check("exits cleanly", done == pid and os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0)
     check("leaves the alternate screen and turns reports off", b"\x1b[?1049l" in out and b"\x1b[?1006l" in out)
+    check("pops the kitty keyboard protocol", b"\x1b[<u" in out)
     session = os.path.join(state, "session")
     check("writes the session", os.path.exists(session))
     buffers = [n for n in os.listdir(state) if n.startswith("buffer-")]
