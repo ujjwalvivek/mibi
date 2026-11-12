@@ -4,9 +4,11 @@
 //! format) are parsed at startup, so adding a language is dropping in a file.
 //! The lexer is line-oriented and carries a tiny state across lines so
 //! multi-line comments and multi-line strings colour correctly.
+//!
+//! Reading the files is the caller's job (`src/langs.zig`); this module only
+//! parses text it is handed. `highlight.zig` caches the per-line state.
 
 const std = @import("std");
-const os = @import("os.zig");
 const ini = @import("ini.zig");
 
 pub const Class = enum(u8) {
@@ -79,30 +81,6 @@ pub const Registry = struct {
     pub fn deinit(self: *Registry) void {
         for (self.langs.items) |*lang| lang.deinit(self.allocator);
         self.langs.deinit(self.allocator);
-    }
-
-    /// Load every `*.ini` in `dir`. Returns how many languages were parsed.
-    /// A missing directory is not an error (highlighting is simply off).
-    pub fn loadDir(self: *Registry, dir: []const u8) usize {
-        var names = std.ArrayList([]u8).empty;
-        defer {
-            for (names.items) |n| self.allocator.free(n);
-            names.deinit(self.allocator);
-        }
-        os.listDirNames(self.allocator, dir, &names) catch return 0;
-
-        var count: usize = 0;
-        os.sortStrings(names.items);
-        for (names.items) |name| {
-            if (!std.mem.endsWith(u8, name, ".ini")) continue;
-            var path_buf: [1024]u8 = undefined;
-            const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, name }) catch continue;
-            const data = os.readFileAlloc(self.allocator, path, 1024 * 1024) catch continue;
-            defer self.allocator.free(data);
-            self.parse(data) catch continue;
-            count += 1;
-        }
-        return count;
     }
 
     /// Parse one definition. Errors leave the registry unchanged.
@@ -608,24 +586,4 @@ test "multi-line strings carry state" {
     try std.testing.expectEqual(Class.ml_string, classAt(spans[0..n2], 0));
     _ = highlight(lang, "end\"\"\" + x", &st, &spans);
     try std.testing.expect(!st.in_ml_string);
-}
-
-test "a missing syntax.d directory is not an error" {
-    var reg = Registry.init(std.testing.allocator);
-    defer reg.deinit();
-    try std.testing.expectEqual(@as(usize, 0), reg.loadDir("no-such-syntax-dir"));
-    try std.testing.expect(reg.find("x.zig") == null);
-}
-
-test "the repository syntax.d loads and knows common languages" {
-    var reg = Registry.init(std.testing.allocator);
-    defer reg.deinit();
-    const count = reg.loadDir("syntax.d");
-    try std.testing.expect(count >= 8);
-    try std.testing.expectEqualStrings("Zig", reg.find("src/main.zig").?.name);
-    try std.testing.expectEqualStrings("C", reg.find("main.c").?.name);
-    try std.testing.expectEqualStrings("Rust", reg.find("lib.rs").?.name);
-    try std.testing.expectEqualStrings("Python", reg.find("x.py").?.name);
-    try std.testing.expectEqualStrings("json", reg.find("package.json").?.name);
-    try std.testing.expect(reg.find("README") == null);
 }

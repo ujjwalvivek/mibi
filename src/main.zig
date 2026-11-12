@@ -17,7 +17,8 @@ const editor_mod = @import("editor.zig");
 const Editor = editor_mod.Editor;
 const utf8 = @import("core/utf8.zig");
 const width = @import("core/width.zig");
-const syntax = @import("syntax.zig");
+const syntax = @import("core/syntax.zig");
+const langs = @import("langs.zig");
 const picker = @import("picker.zig");
 const tree_mod = @import("tree.zig");
 const panes_mod = @import("panes.zig");
@@ -545,10 +546,10 @@ fn run(init: std.process.Init.Minimal) !void {
     if (exe_dir) |dir| {
         var dir_buf: [1024]u8 = undefined;
         if (std.fmt.bufPrint(&dir_buf, "{s}/syntax.d", .{dir})) |sub_dir| {
-            _ = registry.loadDir(sub_dir);
+            _ = langs.loadDir(&registry, sub_dir);
         } else |_| {}
     }
-    if (registry.langs.items.len == 0) _ = registry.loadDir("syntax.d");
+    if (registry.langs.items.len == 0) _ = langs.loadDir(&registry, "syntax.d");
 
     // Session state goes to the user's data directory, not the project folder.
     g_session_dir = blk: {
@@ -3873,7 +3874,7 @@ test "quit asks when a background tab is dirty" {
 test "syntax highlighting colours keywords and comments" {
     var d = try Drive.start("const x = 1; // note");
     defer d.stop();
-    _ = d.registry.loadDir("syntax.d");
+    _ = langs.loadDir(&d.registry, "syntax.d");
     try std.testing.expect(d.registry.langs.items.len > 0);
     const lang = d.registry.find("x.zig") orelse return error.TestUnexpectedResult;
     d.session.current().setLanguage(lang);
@@ -3897,7 +3898,7 @@ test "syntax highlighting colours keywords and comments" {
 test "block comment state carries down the visible rows" {
     var d = try Drive.start("/* one\ntwo */\nint x;");
     defer d.stop();
-    _ = d.registry.loadDir("syntax.d");
+    _ = langs.loadDir(&d.registry, "syntax.d");
     d.session.current().setLanguage(d.registry.find("x.c"));
 
     var s = try render.Screen.init(std.testing.allocator, 40, 6);
@@ -3912,7 +3913,7 @@ test "block comment state carries down the visible rows" {
 test "an edit that opens a block comment re-colours the lines below" {
     var d = try Drive.start("int a;\nint b;");
     defer d.stop();
-    _ = d.registry.loadDir("syntax.d");
+    _ = langs.loadDir(&d.registry, "syntax.d");
     const ed = d.session.current();
     ed.setLanguage(d.registry.find("x.c"));
 

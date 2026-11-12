@@ -10,7 +10,7 @@ const regex = @import("regex.zig");
 const Buffer = buffer.Buffer;
 const utf8 = @import("core/utf8.zig");
 const width = @import("core/width.zig");
-const syntax = @import("syntax.zig");
+const syntax = @import("core/syntax.zig");
 
 const MAX_UNDO = 512;
 

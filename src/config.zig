@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const os = @import("os.zig");
-const ini = @import("ini.zig");
+const ini = @import("core/ini.zig");
 const keys = @import("keys.zig");
 const render = @import("render.zig");
 

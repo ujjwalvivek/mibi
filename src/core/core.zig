@@ -13,6 +13,9 @@ pub const document = @import("document.zig");
 pub const view = @import("view.zig");
 pub const regex = @import("regex.zig");
 pub const search = @import("search.zig");
+pub const ini = @import("ini.zig");
+pub const syntax = @import("syntax.zig");
+pub const highlight = @import("highlight.zig");
 
 pub const Buffer = buffer.Buffer;
 pub const Selection = selection.Selection;
@@ -29,4 +32,7 @@ test {
     _ = view;
     _ = regex;
     _ = search;
+    _ = ini;
+    _ = syntax;
+    _ = highlight;
 }
