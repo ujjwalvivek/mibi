@@ -4,8 +4,18 @@
 //! import in the wrong direction is a compile error.
 
 pub const buffer = @import("buffer.zig");
+pub const selection = @import("selection.zig");
+pub const history = @import("history.zig");
+pub const document = @import("document.zig");
+
 pub const Buffer = buffer.Buffer;
+pub const Selection = selection.Selection;
+pub const Document = document.Document;
+pub const Edit = document.Edit;
 
 test {
     _ = buffer;
+    _ = selection;
+    _ = history;
+    _ = document;
 }

@@ -170,70 +170,115 @@ pub const Buffer = struct {
     }
 
     /// Split the piece under `pos` so that a piece boundary falls exactly at
-    /// `pos`, and return the index of the piece that starts there.
-    fn splitAt(self: *Buffer, pos: usize) !usize {
+    /// `pos`, and return the index of the piece that starts there. Needs room
+    /// for one more piece.
+    fn splitAt(self: *Buffer, pos: usize) usize {
         const loc = self.locate(pos);
         if (loc.index == self.pieces.items.len or loc.offset == pos) return loc.index;
         const p = self.pieces.items[loc.index];
         const head = pos - loc.offset;
         const left = self.makePiece(p.source, p.start, head);
         const right = Piece{ .source = p.source, .start = p.start + head, .len = p.len - head, .nl = p.nl - left.nl };
-        try self.pieces.insert(self.allocator, loc.index + 1, right);
+        self.pieces.insertAssumeCapacity(loc.index + 1, right);
         self.pieces.items[loc.index] = left;
         return loc.index + 1;
     }
 
     // --- editing ---------------------------------------------------------
+    //
+    // Every edit is one primitive, `splice`: remove a range and put a run of
+    // pieces in its place. It cannot fail once capacity is reserved, which is
+    // what lets a multi-part edit (several cursors, undo of a group) be all
+    // or nothing: reserve for every part first, then apply.
+
+    /// Copy `text` into the append-only store and return the span that holds
+    /// it. The document does not change until the span is spliced in.
+    pub fn store(self: *Buffer, text: []const u8) !Piece {
+        const start = self.add.items.len;
+        const text_nl = std.mem.count(u8, text, "\n");
+        try self.add.ensureUnusedCapacity(self.allocator, text.len);
+        try self.add_nl.ensureUnusedCapacity(self.allocator, text_nl);
+        self.add.appendSliceAssumeCapacity(text);
+        for (text, 0..) |c, i| {
+            if (c == '\n') self.add_nl.appendAssumeCapacity(start + i);
+        }
+        return .{ .source = .add, .start = start, .len = text.len, .nl = text_nl };
+    }
+
+    /// Room for `splices` calls to `splice` that insert `inserted` pieces in
+    /// total.
+    pub fn reserve(self: *Buffer, splices: usize, inserted: usize) !void {
+        // Each splice splits at most twice.
+        try self.pieces.ensureUnusedCapacity(self.allocator, 2 * splices + inserted);
+    }
+
+    /// The pieces that make up `[start, end)`, trimmed to the range, appended
+    /// to `out`. Read-only: this is how an edit remembers what it removes
+    /// without copying the text.
+    pub fn spans(self: *const Buffer, start: usize, end: usize, allocator: Allocator, out: *std.ArrayList(Piece)) !void {
+        const e = @min(end, self.total);
+        const s = @min(start, e);
+        if (s == e) return;
+        var loc = self.locate(s);
+        while (loc.offset < e and loc.index < self.pieces.items.len) {
+            const p = self.pieces.items[loc.index];
+            const from = if (s > loc.offset) s - loc.offset else 0;
+            const to = @min(p.len, e - loc.offset);
+            try out.append(allocator, self.makePiece(p.source, p.start + from, to - from));
+            loc.offset += p.len;
+            loc.index += 1;
+        }
+    }
+
+    /// Replace `count` bytes at `pos` with `run`. Both are clamped to the
+    /// document. Needs capacity from `reserve`; never fails.
+    pub fn splice(self: *Buffer, pos: usize, count: usize, run: []const Piece) void {
+        const at = @min(pos, self.total);
+        const n = @min(count, self.total - at);
+        const first = self.splitAt(at);
+        const last = self.splitAt(at + n);
+        for (self.pieces.items[first..last]) |p| {
+            self.total -= p.len;
+            self.total_nl -= p.nl;
+        }
+        for (run) |p| {
+            std.debug.assert(p.len > 0);
+            self.total += p.len;
+            self.total_nl += p.nl;
+        }
+        self.pieces.replaceRangeAssumeCapacity(first, last - first, run);
+        // Heal the seams: neighbours that are contiguous in their store become
+        // one piece again. This is what keeps typing in one piece, and what
+        // makes undo give back the piece list it started from.
+        self.mergeAt(first + run.len);
+        self.mergeAt(first);
+    }
+
+    /// Merge piece `index` into piece `index - 1` when they are adjacent
+    /// spans of the same store.
+    fn mergeAt(self: *Buffer, index: usize) void {
+        if (index == 0 or index >= self.pieces.items.len) return;
+        const prev = &self.pieces.items[index - 1];
+        const next = self.pieces.items[index];
+        if (prev.source != next.source or prev.start + prev.len != next.start) return;
+        prev.len += next.len;
+        prev.nl += next.nl;
+        _ = self.pieces.orderedRemove(index);
+    }
 
     /// Insert `text` at byte offset `pos` (clamped to the document).
     pub fn insert(self: *Buffer, pos: usize, text: []const u8) !void {
         if (text.len == 0) return;
-        const at = @min(pos, self.total);
-        const add_start = self.add.items.len;
-
-        // Reserve first: after this point nothing can fail halfway and leave
-        // the piece list and the stores disagreeing.
-        try self.add.ensureUnusedCapacity(self.allocator, text.len);
-        const text_nl = std.mem.count(u8, text, "\n");
-        try self.add_nl.ensureUnusedCapacity(self.allocator, text_nl);
-        try self.pieces.ensureUnusedCapacity(self.allocator, 2);
-
-        self.add.appendSliceAssumeCapacity(text);
-        for (text, 0..) |c, i| {
-            if (c == '\n') self.add_nl.appendAssumeCapacity(add_start + i);
-        }
-
-        const index = self.splitAt(at) catch unreachable; // capacity reserved
-        // Typing continues the previous insert: grow that piece instead of
-        // adding one per keystroke.
-        if (index > 0) {
-            const prev = &self.pieces.items[index - 1];
-            if (prev.source == .add and prev.start + prev.len == add_start) {
-                prev.len += text.len;
-                prev.nl += text_nl;
-                self.total += text.len;
-                self.total_nl += text_nl;
-                return;
-            }
-        }
-        self.pieces.insertAssumeCapacity(index, .{ .source = .add, .start = add_start, .len = text.len, .nl = text_nl });
-        self.total += text.len;
-        self.total_nl += text_nl;
+        try self.reserve(1, 1);
+        const piece = try self.store(text);
+        self.splice(pos, 0, &.{piece});
     }
 
     /// Delete `count` bytes starting at `pos` (clamped to the document).
     pub fn delete(self: *Buffer, pos: usize, count: usize) !void {
         if (count == 0 or pos >= self.total) return;
-        const n = @min(count, self.total - pos);
-        // Two splits add at most two pieces; after that removal cannot fail.
-        try self.pieces.ensureUnusedCapacity(self.allocator, 2);
-        const first = self.splitAt(pos) catch unreachable;
-        const last = self.splitAt(pos + n) catch unreachable;
-        var removed_nl: usize = 0;
-        for (self.pieces.items[first..last]) |p| removed_nl += p.nl;
-        self.pieces.replaceRangeAssumeCapacity(first, last - first, &.{});
-        self.total -= n;
-        self.total_nl -= removed_nl;
+        try self.reserve(1, 0);
+        self.splice(pos, count, &.{});
     }
 
     // --- lines -----------------------------------------------------------
@@ -471,6 +516,31 @@ test "chunks cover a range exactly" {
     var it = b.chunks(2, 8);
     while (it.next()) |chunk| try out.appendSlice(testing.allocator, chunk);
     try testing.expectEqualStrings("bcXYZd", out.items);
+}
+
+test "splice puts back exactly what spans took out" {
+    var b = try Buffer.init(testing.allocator, "one\ntwo\nthree");
+    defer b.deinit();
+    try b.insert(4, "X");
+    try b.insert(9, "Y\n");
+    try expectText(&b, "one\nXtwo\nY\nthree");
+    const before = try testing.allocator.dupe(Piece, b.pieces.items);
+    defer testing.allocator.free(before);
+
+    var removed = std.ArrayList(Piece).empty;
+    defer removed.deinit(testing.allocator);
+    try b.spans(5, 5, testing.allocator, &removed); // an empty range has no pieces
+    try testing.expectEqual(@as(usize, 0), removed.items.len);
+    try b.spans(2, 11, testing.allocator, &removed);
+    try b.reserve(2, removed.items.len);
+    b.splice(2, 9, &.{});
+    try expectText(&b, "onthree");
+    try testing.expectEqual(@as(usize, 1), b.lineCount());
+    b.splice(2, 0, removed.items);
+    try expectText(&b, "one\nXtwo\nY\nthree");
+    // Not just the same text: the same pieces, so repeated undo and redo
+    // cannot fragment the list.
+    try testing.expectEqualSlices(Piece, before, b.pieces.items);
 }
 
 // The buffer against a plain byte array: every operation is applied to
