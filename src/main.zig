@@ -4507,3 +4507,11 @@ test "clicking a pane focuses it and places the cursor there" {
     try std.testing.expectEqual(left, d.session.panes.focus);
     try std.testing.expectEqual(@as(usize, 2), d.session.current().rowCol().row);
 }
+
+// The rebuilt layers, not wired into the running editor yet. Referenced here
+// so `zig build test` covers them.
+test {
+    _ = @import("commands.zig");
+    _ = @import("platform/ansi.zig");
+    _ = @import("platform/win_input.zig");
+}
