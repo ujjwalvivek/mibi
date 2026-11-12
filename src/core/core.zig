@@ -11,6 +11,7 @@ pub const selection = @import("selection.zig");
 pub const history = @import("history.zig");
 pub const document = @import("document.zig");
 pub const view = @import("view.zig");
+pub const regex = @import("regex.zig");
 
 pub const Buffer = buffer.Buffer;
 pub const Selection = selection.Selection;
@@ -25,4 +26,5 @@ test {
     _ = history;
     _ = document;
     _ = view;
+    _ = regex;
 }
