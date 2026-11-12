@@ -88,6 +88,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            // Same rule as the executable: the Unix OS layer goes through libc.
+            .link_libc = target.result.os.tag != .windows,
         }),
     });
     const test_step = b.step("test", "Run unit tests");
