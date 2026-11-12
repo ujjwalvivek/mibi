@@ -19,6 +19,7 @@ const Document = document.Document;
 const Edit = document.Edit;
 const Bias = document.Bias;
 const Kind = document.Kind;
+const brackets = @import("brackets.zig");
 const Selection = selection.Selection;
 
 pub const Motion = enum {
@@ -35,6 +36,8 @@ pub const Motion = enum {
     page_down,
     doc_start,
     doc_end,
+    /// To the partner of the bracket under or before the cursor.
+    bracket,
 };
 
 pub const View = struct {
@@ -224,6 +227,14 @@ pub const View = struct {
         }
     }
 
+    /// The bracket pair the primary cursor touches, when it is a bare
+    /// cursor: what the pane highlights.
+    pub fn bracketPair(self: *View) ?brackets.Pair {
+        const sel = self.primarySelection();
+        if (!sel.isEmpty()) return null;
+        return brackets.around(&self.doc.buffer, sel.head, &self.scratch, self.allocator);
+    }
+
     // --- selections ------------------------------------------------------
 
     /// One caret at `pos`, dropping every other selection.
@@ -374,6 +385,11 @@ pub const View = struct {
             .line_end => return buf.lineEnd(p.row),
             .doc_start => return 0,
             .doc_end => return buf.len(),
+            .bracket => {
+                const pair = brackets.around(buf, from, &self.scratch, self.allocator) orelse return from;
+                // Land where the partner would be the one found from there.
+                return pair.to;
+            },
             .up, .down, .page_up, .page_down => if (self.wrap_cols > 0) {
                 const line = self.lineText(p.row);
                 const here = text.wrapAt(line, self.tab_width, self.wrap_cols, p.col);

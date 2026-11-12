@@ -1164,7 +1164,7 @@ test "alt+z folds long lines; up and down move by the rows you see" {
 test "with wrap the window follows the cursor through a long line, and the wheel scrolls rows" {
     var h = try Harness.initSized("", 20, 6); // 4 rows of text, 17 cells wide
     defer h.deinit();
-    config_mod.apply(&h.app.config, "wrap = true\n");
+    config_mod.apply(&h.app.config, "soft_wrap = true\n");
     try h.typeText("aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo pppp");
     // Typing ran past the bottom: the window starts inside the line, so
     // the first row has no number, and the cursor is on the last row.
@@ -1195,4 +1195,61 @@ test "with wrap the window follows the cursor through a long line, and the wheel
         }
     }
     try testing.expect(found);
+}
+
+test "ctrl+] jumps between a bracket and its partner, and shift selects up to it" {
+    var h = try Harness.init("if (a[0]) { b(); }");
+    defer h.deinit();
+    try h.keys("right right right ctrl+]"); // on "("
+    try testing.expectEqual(@as(usize, 8), h.head());
+    try h.keys("ctrl+]");
+    try testing.expectEqual(@as(usize, 3), h.head());
+    try h.keys("end ctrl+]"); // just after "}"
+    try testing.expectEqual(@as(usize, 10), h.head());
+    try h.keys("shift+ctrl+]");
+    const sel = h.app.view().primarySelection();
+    try testing.expectEqual(@as(usize, 10), sel.start());
+    try testing.expectEqual(@as(usize, 17), sel.end());
+    // Nowhere near a bracket: nothing moves.
+    try h.keys("home ctrl+]");
+    try testing.expectEqual(@as(usize, 0), h.head());
+}
+
+test "alt+x pipes the selection, or everything, through a shell command" {
+    var h = try Harness.initSized("pear\napple\nfig\n", 100, 12);
+    defer h.deinit();
+    // Dropping the lines that hold a word; on Unix through a pipe, to show
+    // that the line really goes to a shell.
+    const drop = if (os.is_windows) "findstr /v " else "cat | grep -v ";
+    try h.keys("alt+x");
+    try testing.expect(std.mem.startsWith(u8, h.lastRow(), "Filter through:"));
+    try h.typeText(drop);
+    try h.typeText("fig");
+    try h.keys("enter");
+    try h.expectText("pear\napple\n");
+    try testing.expect(std.mem.indexOf(u8, h.lastRow(), "Filtered through") != null);
+    try h.keys("ctrl+z"); // one step
+    try h.expectText("pear\napple\nfig\n");
+
+    // Only the selection goes through, and what comes back stays selected.
+    try h.keys("ctrl+home shift+down shift+down alt+x");
+    try h.typeText(drop);
+    try h.typeText("pear");
+    try h.keys("enter");
+    try h.expectText("apple\nfig\n");
+    const sel = h.app.view().primarySelection();
+    try testing.expectEqual(@as(usize, 0), sel.start());
+    try testing.expectEqual(@as(usize, "apple\n".len), sel.end());
+
+    // A command that fails changes nothing and says so.
+    try h.keys("alt+x");
+    try h.typeText("exit 3");
+    try h.keys("enter");
+    try h.expectText("apple\nfig\n");
+    try testing.expect(std.mem.indexOf(u8, h.lastRow(), "exit code 3") != null);
+
+    // Esc, or an empty command, does nothing.
+    try h.keys("alt+x esc alt+x enter");
+    try testing.expect(h.app.prompt == null);
+    try h.expectText("apple\nfig\n");
 }

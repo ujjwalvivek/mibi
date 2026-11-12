@@ -16,6 +16,7 @@ pub const search = @import("search.zig");
 pub const ini = @import("ini.zig");
 pub const syntax = @import("syntax.zig");
 pub const highlight = @import("highlight.zig");
+pub const brackets = @import("brackets.zig");
 
 pub const Buffer = buffer.Buffer;
 pub const Selection = selection.Selection;
@@ -35,4 +36,5 @@ test {
     _ = ini;
     _ = syntax;
     _ = highlight;
+    _ = brackets;
 }

@@ -39,6 +39,7 @@ pub const Command = enum {
     delete_word_back,
     delete_word_forward,
     format,
+    filter,
     // Selection and cursors.
     select_all,
     clear_selection,
@@ -57,6 +58,7 @@ pub const Command = enum {
     page_down,
     move_doc_start,
     move_doc_end,
+    move_bracket,
     // Search.
     find,
     find_next,
@@ -86,7 +88,7 @@ pub const Command = enum {
     /// Movement commands: Shift plus their key extends the selection.
     pub fn isMotion(self: Command) bool {
         return @intFromEnum(self) >= @intFromEnum(Command.move_up) and
-            @intFromEnum(self) <= @intFromEnum(Command.move_doc_end);
+            @intFromEnum(self) <= @intFromEnum(Command.move_bracket);
     }
 };
 
@@ -132,6 +134,7 @@ pub const table = [_]Info{
     .{ .command = .delete_word_back, .title = "Delete word backward", .keys = &.{ "ctrl+backspace", "alt+backspace" }, .palette = false },
     .{ .command = .delete_word_forward, .title = "Delete word forward", .keys = &.{"ctrl+delete"}, .palette = false },
     .{ .command = .format, .title = "Format with the configured tool", .keys = &.{"f4"} },
+    .{ .command = .filter, .title = "Filter through a command...", .keys = &.{"alt+x"} },
 
     .{ .command = .select_all, .title = "Select all", .keys = &.{"ctrl+a"} },
     .{ .command = .clear_selection, .title = "Clear selection", .keys = &.{"esc"}, .palette = false },
@@ -150,6 +153,7 @@ pub const table = [_]Info{
     .{ .command = .page_down, .title = "Page down", .keys = &.{"pgdn"}, .palette = false },
     .{ .command = .move_doc_start, .title = "Start of file", .keys = &.{"ctrl+home"}, .palette = false },
     .{ .command = .move_doc_end, .title = "End of file", .keys = &.{"ctrl+end"}, .palette = false },
+    .{ .command = .move_bracket, .title = "Jump to matching bracket", .keys = &.{"ctrl+]"} },
 
     .{ .command = .find, .title = "Find", .keys = &.{"ctrl+f"} },
     .{ .command = .find_next, .title = "Find next", .keys = &.{"f3"} },

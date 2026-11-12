@@ -556,6 +556,7 @@ pub const App = struct {
             .delete_word_back => try v.deleteWordBack(),
             .delete_word_forward => try v.deleteWordForward(),
             .format => try files.format(self, false),
+            .filter => try prompt.open(self, .filter),
 
             .select_all => v.selectAll(),
             .clear_selection => {
@@ -582,6 +583,7 @@ pub const App = struct {
             .page_down => v.move(.page_down, extend, self.pageRows()),
             .move_doc_start => v.move(.doc_start, extend, 1),
             .move_doc_end => v.move(.doc_end, extend, 1),
+            .move_bracket => v.move(.bracket, extend, 1),
 
             .find => try prompt.open(self, .find),
             .find_next => self.findNext(1),
@@ -593,12 +595,12 @@ pub const App = struct {
             .theme_picker => try pickers.open(self, .themes),
             .toggle_tree => try self.toggleTree(),
             .toggle_wrap => {
-                self.config.wrap = !self.config.wrap;
+                self.config.soft_wrap = !self.config.soft_wrap;
                 // Every pane re-folds at the next draw; keep each cursor in view.
                 for (&self.panes) |*slot| {
                     if (slot.*) |*open| open.reveal = true;
                 }
-                self.setMessage("word wrap {s}", .{if (self.config.wrap) "on" else "off"});
+                self.setMessage("word wrap {s}", .{if (self.config.soft_wrap) "on" else "off"});
             },
             .help => self.help = !self.help,
             .split_columns => try self.splitPane(self.layout.focused().?, .columns, false, p.doc),

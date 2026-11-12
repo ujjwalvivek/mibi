@@ -9,7 +9,7 @@
 tab_width = 4
 ; Line numbers in the left gutter.
 line_numbers = true
-wrap = false            ; fold long lines at the pane's width (alt+z toggles)
+soft_wrap = false       ; fold long lines at the pane's width (alt+z toggles)
 ; Syntax highlighting from syntax.d/*.ini.
 syntax = true
 ; Colour theme from themes/<name>.ini (see themes/README.md).

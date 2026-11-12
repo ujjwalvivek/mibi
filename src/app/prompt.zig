@@ -9,6 +9,7 @@ const screen = @import("ui").screen;
 const LineEdit = @import("ui").line_edit.LineEdit;
 const app_mod = @import("../app.zig");
 const doc_mod = @import("doc.zig");
+const files = @import("files.zig");
 const App = app_mod.App;
 
 pub const Kind = enum {
@@ -19,6 +20,8 @@ pub const Kind = enum {
     /// Replace, second question: what to put there.
     replace_with,
     goto,
+    /// A shell command to pipe the selection (or everything) through.
+    filter,
     confirm_quit,
     confirm_close,
 
@@ -29,6 +32,7 @@ pub const Kind = enum {
             .replace_find => "Replace: ",
             .replace_with => "With: ",
             .goto => "Go to line: ",
+            .filter => "Filter through: ",
             .confirm_quit => "Unsaved changes - quit without saving? (y/N) ",
             .confirm_close => "Unsaved changes - close without saving? (y/N) ",
         };
@@ -169,6 +173,12 @@ fn execute(app: *App) !void {
             }
         },
         .goto => gotoLine(app, text),
+        .filter => {
+            const command = try app.allocator.dupe(u8, text);
+            defer app.allocator.free(command);
+            close(app);
+            return files.filter(app, command);
+        },
         .confirm_quit, .confirm_close => unreachable,
     }
     close(app);
@@ -245,7 +255,7 @@ pub fn draw(app: *App, s: *screen.Screen) void {
     // else how the search reads its text.
     var right = w;
     var note = app.message();
-    if (note.len == 0 and p.kind != .save_as and p.kind != .goto) {
+    if (note.len == 0 and (p.kind.isSearch() or p.kind == .replace_with)) {
         note = if (app.search_regex) "regex  ctrl+r: plain" else "plain  ctrl+r: regex";
     }
     if (note.len > 0 and w > x + note.len + 12) {

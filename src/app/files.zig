@@ -73,6 +73,62 @@ pub fn format(app: *App, quiet: bool) !void {
     app.setMessage("Formatted", .{});
 }
 
+/// Pipe text through a shell command and put what it prints in its place:
+/// the selection if there is one, otherwise the whole document. This is the
+/// editor's extension point: `sort`, `jq .`, `column -t`, anything that
+/// reads standard input.
+///
+/// The command line goes to the system's shell (`sh -c`, or `cmd.exe /c`), so
+/// pipes and quotes work as they do in a terminal. A command that fails
+/// changes nothing and its exit code is reported.
+pub fn filter(app: *App, command: []const u8) !void {
+    const line = std.mem.trim(u8, command, " \t");
+    if (line.len == 0) return;
+    const d = app.doc();
+    const v = app.view();
+    const sel = v.primarySelection();
+    const start = if (sel.isEmpty()) 0 else sel.start();
+    const end = if (sel.isEmpty()) d.document.len() else sel.end();
+
+    var input = std.ArrayList(u8).empty;
+    defer input.deinit(app.allocator);
+    try input.ensureTotalCapacity(app.allocator, end - start);
+    var chunks = d.document.buffer.chunks(start, end);
+    while (chunks.next()) |chunk| input.appendSliceAssumeCapacity(chunk);
+
+    var argv_buf: [18][]const u8 = undefined;
+    var word_buf: [1024]u8 = undefined;
+    var argc: usize = 0;
+    if (os.is_windows) {
+        argv_buf[0] = "cmd.exe";
+        argv_buf[1] = "/c";
+        argc = 2 + buildArgv(line, "", argv_buf[2..], &word_buf);
+    } else {
+        argv_buf[0] = "sh";
+        argv_buf[1] = "-c";
+        argv_buf[2] = line;
+        argc = 3;
+    }
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(app.allocator);
+    const res = os.runCommand(app.allocator, app.state_dir orelse ".", argv_buf[0..argc], input.items, &out, 10_000) catch |err| {
+        return app.setMessage("Could not run the command ({s})", .{app_mod.describe(err)});
+    };
+    if (res.timed_out) return app.setMessage("The command took more than 10 seconds and was stopped", .{});
+    if (res.exit_code != 0) return app.setMessage("The command failed (exit code {d}); nothing was changed", .{res.exit_code});
+
+    const result = core.text.normalizeLineEndings(out.items);
+    if (std.mem.eql(u8, result, input.items)) return app.setMessage("The command changed nothing", .{});
+    v.now_ms = app.now_ms;
+    try v.applyEdits(&.{.{ .start = start, .end = end, .text = result }});
+    // What came back is selected, ready to be filtered again or typed over.
+    if (!sel.isEmpty()) v.setSelection(.{ .anchor = start, .head = start + result.len });
+    app.pane().reveal = true;
+    app.session_dirty = true;
+    app.setMessage("Filtered through {s}", .{line});
+}
+
 /// Follow changes made outside the editor: the file tree, and open files
 /// that have no unsaved changes. A file with unsaved changes is never
 /// replaced. Returns true when something on screen changed.

@@ -306,7 +306,8 @@ passing. The old code keeps working until the step that replaces it lands.
    point; `pty.zig`, the old `editor.zig`, `buffer.zig`, `regex.zig`,
    `render.zig` and `keys.zig` are gone.
 4. **Phase 6 and release:** bracketed paste, soft wrap, atomic save, line
-   operations and comment toggle are done. Left: bracket matching, packaging,
+   operations, comment toggle, bracket matching and the command filter are
+   done. Left: packaging,
    README and changelog checked against the code, tagged release.
 
 ## Open questions

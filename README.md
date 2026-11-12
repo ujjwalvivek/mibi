@@ -8,8 +8,7 @@ built in Zig with no third-party dependencies.
 Status: **rebuilt, not yet released.** `main` is the new editor (0.1.0 in
 progress): a text model, widgets and a platform layer that the build keeps
 apart, tested on Linux, macOS and Windows on every push. v0.0.2 is the last
-tagged release and predates all of it. Still to come before the tag: bracket
-matching and packaging. See
+tagged release and predates all of it. Still to come before the tag: packaging. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what changed and why.
 Cross-platform (Linux, macOS, Windows).
 
@@ -141,7 +140,9 @@ packaging.
 | `F6` / `Shift+F6`         | next / previous pane (or click a pane)                                                      |
 | `F2`                      | theme picker (arrows preview live, Enter keeps and saves, Esc restores)                     |
 | `Ctrl+P`                  | command palette: every action, fuzzy-filtered                                               |
-| `Alt+Z`                   | word wrap on / off (`wrap = true` in `mibi.ini` makes it the default)                       |
+| `Ctrl+]`                  | jump to the matching bracket (with `Shift`, select up to it)                                |
+| `Alt+X`                   | filter: pipe the selection, or the whole file, through a shell command                      |
+| `Alt+Z`                   | word wrap on / off (`soft_wrap = true` in `mibi.ini` makes it the default)                       |
 | `F1`                      | help panel (Esc closes it); hints at the status bar's right edge                            |
 | `Ctrl+B`                  | file tree: arrows or `j`/`k` move, Enter opens, `Ctrl+B` again hides it                     |
 | mouse                     | click, double and triple click, drag to select, `Ctrl+click` adds a cursor, wheel scrolls; drag a tab to reorder it or into the text to split |
@@ -201,6 +202,12 @@ packaging.
   where there is one. Up, down, paging, the wheel and clicks then go by the
   rows on screen; Home and End still mean the line of the file. Line numbers
   stand on a line's first row.
+- Matching brackets: the bracket at the cursor and its partner are drawn in
+  the accent colour. Brackets inside strings and comments count too.
+- Filter (`Alt+X`): the selection, or the whole file, goes to a shell command
+  (`sort`, `jq .`, `column -t`, a pipeline) and is replaced by what it
+  prints, as one undo step. This stands in for a plugin system. A command
+  that fails, or runs longer than 10 seconds, changes nothing.
 - Line numbers, status bar (name, dirty `[+]`, cursor, line count, size).
 - Multiple cursors (`Ctrl+Alt+Up` / `Ctrl+Alt+Down`): typing, backspace and
   delete apply at every cursor, movement moves them together, `Esc` drops
@@ -320,4 +327,4 @@ run isolated).
 
 ## Not yet
 
-Bracket matching, macros. There is no embedded terminal and no plugin system, on purpose.
+Macros. There is no embedded terminal and no plugin system, on purpose.

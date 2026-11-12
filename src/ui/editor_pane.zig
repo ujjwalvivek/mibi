@@ -22,6 +22,8 @@ pub const Options = struct {
     focused: bool = true,
     /// Null when syntax colouring is off or the file type is unknown.
     highlighter: ?*core.highlight.Highlighter = null,
+    /// Mark the bracket pair the cursor touches.
+    match_brackets: bool = true,
 };
 
 fn digits(n: usize) usize {
@@ -73,6 +75,7 @@ pub fn draw(s: *screen.Screen, r: screen.Rect, view: *View, opts: Options) void 
     const head_row = buf.lineOf(view.primarySelection().head);
     const line_bg = theme.lineHighlight();
     const wrapped = view.wrap_cols > 0;
+    const pair = if (opts.focused and opts.match_brackets) view.bracketPair() else null;
 
     var scratch = std.ArrayList(u8).empty;
     defer scratch.deinit(view.allocator);
@@ -129,10 +132,12 @@ pub fn draw(s: *screen.Screen, r: screen.Rect, view: *View, opts: Options) void 
                 const selected = si < sels.len and !sels[si].isEmpty() and sels[si].start() <= pos;
                 while (span_i < nspans and spans[span_i].end <= at) span_i += 1;
                 const class: syntax.Class = if (span_i < nspans and at >= spans[span_i].start) spans[span_i].class else .normal;
+                const paired = if (pair) |pr| pos == pr.from or pos == pr.to else false;
                 const style = screen.Cell{
                     .ch = if (cp == '\t' or cp < 0x20 or cp == 0x7f) ' ' else cp,
-                    .fg = colorOf(class, theme),
+                    .fg = if (paired) theme.accent else colorOf(class, theme),
                     .bg = if (selected) theme.selection else row_bg,
+                    .attr = .{ .bold = paired, .underline = paired },
                 };
                 if (cell + w > base) {
                     const x = text_x + (cell -| base);
@@ -367,4 +372,27 @@ test "soft wrap folds long lines, numbers only their first row, and keeps the cu
     f.render(.{});
     try testing.expectEqualStrings("  three", f.row(0));
     try testing.expectEqualStrings("2 short", f.row(2));
+}
+
+test "the bracket under the cursor and its partner are marked" {
+    var f = try Fixture.init("f(a[0])", 20, 3);
+    defer f.deinit();
+    f.view.setCaret(1);
+    f.render(.{ .line_numbers = false });
+    try testing.expect(f.s.at(6, 0).attr.underline); // the partner
+    try testing.expect(!f.s.at(3, 0).attr.underline); // another pair
+    f.view.setCaret(0);
+    f.render(.{ .line_numbers = false });
+    try testing.expect(!f.s.at(6, 0).attr.underline);
+    // Just after a closing bracket counts too.
+    f.view.setCaret(7);
+    f.render(.{ .line_numbers = false });
+    try testing.expect(f.s.at(1, 0).attr.underline and f.s.at(6, 0).attr.underline);
+    // Not while a selection is active, and not in a pane without focus.
+    f.view.setSelection(.{ .anchor = 0, .head = 7 });
+    f.render(.{ .line_numbers = false });
+    try testing.expect(!f.s.at(1, 0).attr.underline);
+    f.view.setCaret(1);
+    f.render(.{ .line_numbers = false, .focused = false });
+    try testing.expect(!f.s.at(6, 0).attr.underline);
 }

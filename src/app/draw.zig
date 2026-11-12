@@ -47,7 +47,7 @@ pub fn draw(app: *App, s: *screen.Screen) void {
         const p = &(app.panes[pr.pane] orelse continue);
         const v = p.view;
         const text_cols = editor_pane.textCols(v, pr.rect.w, app.config.line_numbers);
-        const wrap_cols = if (app.config.wrap) @max(text_cols, 1) else 0;
+        const wrap_cols = if (app.config.soft_wrap) @max(text_cols, 1) else 0;
         // Folding at a new width moves everything: bring the cursor along.
         if (wrap_cols != v.wrap_cols and wrap_cols != 0 and v.wrap_cols != 0) p.reveal = true;
         v.wrap_cols = wrap_cols;
@@ -242,6 +242,8 @@ const help_rows = [_]HelpRow{
     .{ .commands = &.{ .close_pane, .next_pane }, .text = "close pane / next pane" },
     .{ .commands = &.{.toggle_tree}, .text = "file tree (arrows, enter)" },
     .{ .commands = &.{.toggle_wrap}, .text = "word wrap on / off" },
+    .{ .commands = &.{.filter}, .text = "filter the selection through a command" },
+    .{ .commands = &.{.move_bracket}, .text = "jump to the matching bracket" },
     .{ .commands = &.{.format}, .text = "format with the configured tool" },
     .{ .keys = "click, drag, wheel", .text = "cursor, selection, tabs / scroll" },
     .{ .commands = &.{ .help, .quit }, .text = "this help / quit" },
