@@ -4224,8 +4224,10 @@ test "F4 runs the configured formatter and replaces the buffer" {
 
     try d.send("\x1b[14~"); // F4
     const text = d.session.current().text();
-    try std.testing.expect(std.mem.indexOf(u8, text, "1:b") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "2:a") != null);
+    // findstr prints `1:b`, cat -n prints `     1<tab>b`.
+    const sep = if (os.is_windows) ":" else "\t";
+    try std.testing.expect(std.mem.indexOf(u8, text, "1" ++ sep ++ "b") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "2" ++ sep ++ "a") != null);
     try std.testing.expect(d.session.current().dirty);
     try std.testing.expect(std.mem.indexOf(u8, d.msg, "Formatted") != null);
 }
