@@ -32,3 +32,4 @@ mibi-*-test.*
 # Local design notes (kept out of the repo)
 PLAN.md
 tmp/
+dist/
