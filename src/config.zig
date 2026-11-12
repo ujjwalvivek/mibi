@@ -529,8 +529,10 @@ test "parses [keys] bindings and ignores unknown actions" {
 }
 
 test "saveTheme replaces, adds and preserves" {
-    var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "experiments/out/screens/mibi-save-test.ini", .{}) catch unreachable;
+    // In the working directory, like the other file tests: a scratch
+    // directory that only exists on one machine makes the test fail elsewhere.
+    const path = "mibi-save-test.ini";
+    defer os.deleteFile(path) catch {};
 
     // Existing theme line is replaced, other settings stay.
     try os.writeFile(path, "[editor]\ntab_width = 2\ntheme = nord\nsyntax = false\n");
