@@ -28,6 +28,9 @@ The editor was taken apart and put back together on a new structure; see
   the old one's place, so a crash or a full disk cannot leave half a file.
   Permissions, symbolic links and hard links are kept.
 - Files changed by another program are now noticed on macOS too.
+- Soft wrap: `Alt+Z`, or `wrap = true` in `[editor]`. Lines fold at the
+  pane's width, between words where possible, and the cursor moves by the
+  rows on screen.
 - Running out of memory is reported in the status line instead of ending the
   program.
 - The embedded terminal is gone.

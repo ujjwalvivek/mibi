@@ -105,8 +105,7 @@ pub fn handle(app: *App, m: event.Mouse) !void {
             // cursor stays where it is.
             const id = app.layout.paneAt(x, y) orelse return;
             const p = &app.panes[id].?;
-            const last = p.view.doc.buffer.lineCount() - 1;
-            p.view.scroll_row = if (down) @min(p.view.scroll_row + wheel_lines, last) else p.view.scroll_row -| wheel_lines;
+            p.view.scrollBy(if (down) wheel_lines else -wheel_lines);
             p.reveal = false;
         },
         .press => {

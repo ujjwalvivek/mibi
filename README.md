@@ -8,8 +8,8 @@ built in Zig with no third-party dependencies.
 Status: **rebuilt, not yet released.** `main` is the new editor (0.1.0 in
 progress): a text model, widgets and a platform layer that the build keeps
 apart, tested on Linux, macOS and Windows on every push. v0.0.2 is the last
-tagged release and predates all of it. Still to come before the tag: soft
-wrap, bracket matching and packaging. See
+tagged release and predates all of it. Still to come before the tag: bracket
+matching and packaging. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what changed and why.
 Cross-platform (Linux, macOS, Windows).
 
@@ -141,6 +141,7 @@ packaging.
 | `F6` / `Shift+F6`         | next / previous pane (or click a pane)                                                      |
 | `F2`                      | theme picker (arrows preview live, Enter keeps and saves, Esc restores)                     |
 | `Ctrl+P`                  | command palette: every action, fuzzy-filtered                                               |
+| `Alt+Z`                   | word wrap on / off (`wrap = true` in `mibi.ini` makes it the default)                       |
 | `F1`                      | help panel (Esc closes it); hints at the status bar's right edge                            |
 | `Ctrl+B`                  | file tree: arrows or `j`/`k` move, Enter opens, `Ctrl+B` again hides it                     |
 | mouse                     | click, double and triple click, drag to select, `Ctrl+click` adds a cursor, wheel scrolls; drag a tab to reorder it or into the text to split |
@@ -196,6 +197,10 @@ packaging.
 - Syntax highlighting from `syntax.d/*.ini` definitions (kibi's format): 52
   languages ship in the repo, and adding one is dropping in a file - no
   rebuild. Multi-line comments and strings carry state across lines.
+- Soft wrap (`Alt+Z`): long lines fold at the pane's width, after a blank
+  where there is one. Up, down, paging, the wheel and clicks then go by the
+  rows on screen; Home and End still mean the line of the file. Line numbers
+  stand on a line's first row.
 - Line numbers, status bar (name, dirty `[+]`, cursor, line count, size).
 - Multiple cursors (`Ctrl+Alt+Up` / `Ctrl+Alt+Down`): typing, backspace and
   delete apply at every cursor, movement moves them together, `Esc` drops
@@ -315,4 +320,4 @@ run isolated).
 
 ## Not yet
 
-Soft wrap, bracket matching, macros. There is no embedded terminal and no plugin system, on purpose.
+Bracket matching, macros. There is no embedded terminal and no plugin system, on purpose.

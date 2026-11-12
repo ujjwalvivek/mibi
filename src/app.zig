@@ -592,6 +592,14 @@ pub const App = struct {
             .command_palette => try pickers.open(self, .commands),
             .theme_picker => try pickers.open(self, .themes),
             .toggle_tree => try self.toggleTree(),
+            .toggle_wrap => {
+                self.config.wrap = !self.config.wrap;
+                // Every pane re-folds at the next draw; keep each cursor in view.
+                for (&self.panes) |*slot| {
+                    if (slot.*) |*open| open.reveal = true;
+                }
+                self.setMessage("word wrap {s}", .{if (self.config.wrap) "on" else "off"});
+            },
             .help => self.help = !self.help,
             .split_columns => try self.splitPane(self.layout.focused().?, .columns, false, p.doc),
             .split_rows => try self.splitPane(self.layout.focused().?, .rows, false, p.doc),

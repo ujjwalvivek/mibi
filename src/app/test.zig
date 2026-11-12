@@ -1105,7 +1105,7 @@ test "an allocation failure anywhere is survived: no crash, no leak, the text in
         try h.keys("enter f6 ctrl+t");
         try h.typeText("new tab");
         try h.keys("ctrl+a ctrl+c ctrl+v ctrl+v ctrl+z ctrl+y ctrl+pgup");
-        try h.keys("ctrl+alt+down tab shift+tab alt+down ctrl+k f1 f1 f2 down esc ctrl+b ctrl+b ctrl+b");
+        try h.keys("ctrl+alt+down tab shift+tab alt+down ctrl+k f1 f1 f2 down esc ctrl+b ctrl+b ctrl+b alt+z down up pgdn");
         h.app.handle(.{ .paste = "pasted\r\ntext" });
         h.mouse(.press, 6, 2);
         h.mouse(.drag, 9, 3);
@@ -1121,4 +1121,78 @@ test "an allocation failure anywhere is survived: no crash, no leak, the text in
     }
     try testing.expect(fail_at > 50); // the scenario allocates, so the loop did real work
     try testing.expect(fail_at < 4000); // and it ended because a run got through untouched
+}
+
+// --- soft wrap -----------------------------------------------------------------
+
+test "alt+z folds long lines; up and down move by the rows you see" {
+    // 30 columns: 2 for the line number, 1 kept free, 27 of text.
+    var h = try Harness.initSized("alpha beta gamma delta epsilon zeta eta theta iota\nend", 30, 10);
+    defer h.deinit();
+    try testing.expectEqualStrings("1 alpha beta gamma delta epsil", h.row(1)); // cut off, not folded
+    try h.keys("alt+z");
+    try testing.expectEqualStrings("1 alpha beta gamma delta", h.row(1));
+    try testing.expectEqualStrings("  epsilon zeta eta theta iota", h.row(2));
+    try testing.expectEqualStrings("2 end", h.row(3));
+    try testing.expectEqualStrings("word wrap on", h.app.message());
+
+    // Down goes to the row below on screen, in the same column, though it
+    // is the same line of the file.
+    try h.keys("right right down");
+    try testing.expectEqual(@as(usize, "alpha beta gamma delta ep".len), h.head());
+    try h.keys("down");
+    try testing.expectEqual(@as(usize, "alpha beta gamma delta epsilon zeta eta theta iota\nen".len), h.head());
+    try h.keys("down"); // the last row: to the end of the text
+    try testing.expectEqual(h.text().len, h.head());
+    try h.keys("up up");
+    try testing.expectEqual(@as(usize, 2), h.head()); // the column it set out from is remembered
+    try h.keys("up"); // the first row: to the start
+    try testing.expectEqual(@as(usize, 0), h.head());
+
+    // Home and end still mean the line of the file.
+    try h.keys("end");
+    try testing.expectEqual(@as(usize, 50), h.head());
+
+    // A click on a folded row lands on that row's text.
+    h.click(2, 2);
+    try testing.expectEqual(@as(usize, "alpha beta gamma delta ".len), h.head());
+
+    try h.keys("alt+z");
+    try testing.expectEqualStrings("2 end", h.row(2));
+}
+
+test "with wrap the window follows the cursor through a long line, and the wheel scrolls rows" {
+    var h = try Harness.initSized("", 20, 6); // 4 rows of text, 17 cells wide
+    defer h.deinit();
+    config_mod.apply(&h.app.config, "wrap = true\n");
+    try h.typeText("aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo pppp");
+    // Typing ran past the bottom: the window starts inside the line, so
+    // the first row has no number, and the cursor is on the last row.
+    try testing.expect(h.app.view().scroll_sub > 0);
+    try testing.expectEqualStrings("  mmmm nnnn oooo", h.row(3));
+    try testing.expectEqualStrings("  pppp", h.row(4));
+    try testing.expect(h.s.at(6, 4).attr.reverse);
+
+    try h.keys("ctrl+home");
+    try testing.expectEqualStrings("1 aaaa bbbb cccc", h.row(1));
+    h.mouse(.wheel_down, 5, 2);
+    try testing.expectEqualStrings("  jjjj kkkk llll", h.row(1)); // three rows down
+    try testing.expectEqual(@as(usize, 0), h.head()); // the cursor stayed
+    h.mouse(.wheel_up, 5, 2);
+    h.mouse(.wheel_up, 5, 2);
+    try testing.expectEqualStrings("1 aaaa bbbb cccc", h.row(1));
+
+    // Narrowing the window re-folds without losing the place.
+    try h.keys("ctrl+end");
+    h.s.deinit();
+    h.s = try screen.Screen.init(testing.allocator, 12, 6);
+    h.draw();
+    try testing.expect(h.app.view().wrap_cols == 9);
+    var found = false;
+    for (1..5) |y| {
+        for (0..12) |x| {
+            if (h.s.at(x, y).attr.reverse) found = true;
+        }
+    }
+    try testing.expect(found);
 }

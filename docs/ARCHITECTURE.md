@@ -283,6 +283,10 @@ Decisions made while building it:
   the normal exit path; the Windows close button calls the same save.
 - **Selections that end at the start of a line do not include that line** in
   indent, comment and move-line commands, as in other editors.
+- **Soft wrap is a property of the view, computed on demand.** There is no
+  cache of wrapped lines to invalidate: `core/text.zig` folds one line at a
+  time, and only the lines on screen (or stepped over by the cursor) are
+  folded. The scroll position is a line plus a row inside it.
 - **Help is F1 only.** `ctrl+/` toggles a line comment.
 - **Sizes grew by about 40 KB** (172,680 to 249,856 bytes across the five
   targets, budgets reset with 5% headroom). The old binary did less.
@@ -301,9 +305,9 @@ passing. The old code keeps working until the step that replaces it lands.
    loop, each feature with in-process screen tests. `main.zig` is the entry
    point; `pty.zig`, the old `editor.zig`, `buffer.zig`, `regex.zig`,
    `render.zig` and `keys.zig` are gone.
-4. **Phase 6 and release:** bracketed paste, soft wrap, atomic save, bracket
-   matching, line operations and comment toggle from the plan's v1 list,
-   packaging, README and changelog rewritten from the code, tagged release.
+4. **Phase 6 and release:** bracketed paste, soft wrap, atomic save, line
+   operations and comment toggle are done. Left: bracket matching, packaging,
+   README and changelog checked against the code, tagged release.
 
 ## Open questions
 

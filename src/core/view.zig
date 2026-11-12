@@ -46,6 +46,11 @@ pub const View = struct {
     primary: usize = 0,
     scroll_row: usize = 0,
     scroll_col: usize = 0,
+    /// Soft wrap: lines are folded at this many cells. 0 is off. Whoever
+    /// draws the view sets it to the width it has.
+    wrap_cols: usize = 0,
+    /// With wrap, which visual row of line `scroll_row` is at the top.
+    scroll_sub: usize = 0,
     tab_width: usize = 4,
     /// What Tab inserts and what one level of indentation is.
     indent_unit: []const u8 = "    ",
@@ -140,6 +145,83 @@ pub const View = struct {
     pub fn offsetAt(self: *View, row: usize, cell: usize) usize {
         const r = @min(row, self.lastRow());
         return self.doc.buffer.lineStart(r) + text.byteOfCell(self.lineText(r), cell, self.tab_width);
+    }
+
+    // --- visual rows -------------------------------------------------------
+    //
+    // With soft wrap a line takes several rows on screen. Up, down, paging,
+    // scrolling and clicking then count those rows, not lines.
+
+    const VisualRow = struct { row: usize, sub: usize };
+
+    fn rowsOf(self: *View, row: usize) usize {
+        if (self.wrap_cols == 0) return 1;
+        return text.wrapCount(self.lineText(row), self.tab_width, self.wrap_cols);
+    }
+
+    /// `steps` visual rows up or down from `from`, stopping at either end
+    /// of the document.
+    fn stepVisual(self: *View, from: VisualRow, down: bool, steps: usize) VisualRow {
+        var at = from;
+        var left = steps;
+        while (left > 0) : (left -= 1) {
+            if (down) {
+                if (at.sub + 1 < self.rowsOf(at.row)) {
+                    at.sub += 1;
+                } else if (at.row < self.lastRow()) {
+                    at = .{ .row = at.row + 1, .sub = 0 };
+                } else break;
+            } else {
+                if (at.sub > 0) {
+                    at.sub -= 1;
+                } else if (at.row > 0) {
+                    const above = at.row - 1;
+                    at = .{ .row = above, .sub = self.rowsOf(above) - 1 };
+                } else break;
+            }
+        }
+        return at;
+    }
+
+    fn visualRowOf(self: *View, pos: usize) VisualRow {
+        const p = self.place(pos);
+        if (self.wrap_cols == 0) return .{ .row = p.row, .sub = 0 };
+        return .{ .row = p.row, .sub = text.wrapAt(self.lineText(p.row), self.tab_width, self.wrap_cols, p.col).index };
+    }
+
+    /// The document offset `x` cells into visual row `at`.
+    fn offsetInVisual(self: *View, at: VisualRow, x: usize) usize {
+        const line = self.lineText(at.row);
+        const seg = text.wrapSegment(line, self.tab_width, self.wrap_cols, at.sub);
+        return self.doc.buffer.lineStart(at.row) + text.byteOfSegmentCell(line, seg, x, self.tab_width);
+    }
+
+    /// The document offset under a cell of the window: `vrow` rows below the
+    /// top row, `x` cells from the left edge of the text.
+    pub fn offsetAtVisual(self: *View, vrow: usize, x: usize) usize {
+        if (self.wrap_cols == 0) return self.offsetAt(self.scroll_row + vrow, self.scroll_col + x);
+        const top = VisualRow{ .row = @min(self.scroll_row, self.lastRow()), .sub = self.scroll_sub };
+        return self.offsetInVisual(self.stepVisual(top, true, vrow), x);
+    }
+
+    /// Scroll by rows (negative is up) without moving any cursor.
+    pub fn scrollBy(self: *View, delta: isize) void {
+        self.clampScroll();
+        const top = self.stepVisual(.{ .row = self.scroll_row, .sub = self.scroll_sub }, delta > 0, @abs(delta));
+        self.scroll_row = top.row;
+        self.scroll_sub = top.sub;
+    }
+
+    /// Keep the scroll position inside the document after it shrank, the
+    /// window changed width, or wrap was switched.
+    pub fn clampScroll(self: *View) void {
+        self.scroll_row = @min(self.scroll_row, self.lastRow());
+        if (self.wrap_cols == 0) {
+            self.scroll_sub = 0;
+        } else {
+            self.scroll_col = 0;
+            self.scroll_sub = @min(self.scroll_sub, self.rowsOf(self.scroll_row) - 1);
+        }
     }
 
     // --- selections ------------------------------------------------------
@@ -292,7 +374,19 @@ pub const View = struct {
             .line_end => return buf.lineEnd(p.row),
             .doc_start => return 0,
             .doc_end => return buf.len(),
-            .up, .down, .page_up, .page_down => {
+            .up, .down, .page_up, .page_down => if (self.wrap_cols > 0) {
+                const line = self.lineText(p.row);
+                const here = text.wrapAt(line, self.tab_width, self.wrap_cols, p.col);
+                const x = goal.* orelse text.cellOfByte(line, p.col, self.tab_width) - here.seg.cell;
+                goal.* = x;
+                const down = motion == .down or motion == .page_down;
+                const step = if (motion == .up or motion == .down) 1 else @max(page, 1);
+                const at = VisualRow{ .row = p.row, .sub = here.index };
+                const to = self.stepVisual(at, down, step);
+                // Nowhere further to go: the start or the end of the text.
+                if (to.row == at.row and to.sub == at.sub) return if (down) buf.len() else 0;
+                return self.offsetInVisual(to, x);
+            } else {
                 const cell = goal.* orelse text.cellOfByte(self.lineText(p.row), p.col, self.tab_width);
                 goal.* = cell;
                 const step = if (motion == .up or motion == .down) 1 else @max(page, 1);
@@ -312,12 +406,37 @@ pub const View = struct {
     /// of `rows` by `cols` cells.
     pub fn scrollToCursor(self: *View, rows: usize, cols: usize) void {
         const head = self.primarySelection().head;
+        if (self.wrap_cols > 0) return self.scrollToVisual(self.visualRowOf(head), rows);
         const row = self.doc.buffer.lineOf(head);
         const cell = self.cellOf(head);
         if (row < self.scroll_row) self.scroll_row = row;
         if (rows > 0 and row >= self.scroll_row + rows) self.scroll_row = row + 1 - rows;
         if (cell < self.scroll_col) self.scroll_col = cell;
         if (cols > 0 and cell >= self.scroll_col + cols) self.scroll_col = cell + 1 - cols;
+    }
+
+    fn scrollToVisual(self: *View, at: VisualRow, rows: usize) void {
+        self.clampScroll();
+        const above = at.row < self.scroll_row or (at.row == self.scroll_row and at.sub < self.scroll_sub);
+        if (above or rows == 0) {
+            self.scroll_row = at.row;
+            self.scroll_sub = at.sub;
+            return;
+        }
+        // Rows between the top of the window and the cursor. Every line is
+        // at least one row, so a cursor `rows` lines down needs no counting.
+        var below: usize = rows;
+        if (at.row - self.scroll_row < rows) {
+            below = 0;
+            var row = self.scroll_row;
+            while (row < at.row and below < rows + self.scroll_sub) : (row += 1) below += self.rowsOf(row);
+            below = below + at.sub -| self.scroll_sub;
+            if (row < at.row) below = rows;
+        }
+        if (below < rows) return;
+        const top = self.stepVisual(at, false, rows - 1);
+        self.scroll_row = top.row;
+        self.scroll_sub = top.sub;
     }
 
     // --- applying edits --------------------------------------------------

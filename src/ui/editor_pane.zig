@@ -47,9 +47,7 @@ pub fn textCols(view: *const View, width: usize, line_numbers: bool) usize {
 /// position.
 pub fn offsetAt(view: *View, r: screen.Rect, line_numbers: bool, x: usize, y: usize) usize {
     const gutter = gutterWidth(view, line_numbers);
-    const row = view.scroll_row + (@max(y, r.y) - r.y);
-    const cell = view.scroll_col + (@max(x, r.x + gutter) - r.x - gutter);
-    return view.offsetAt(row, cell);
+    return view.offsetAtVisual(@max(y, r.y) - r.y, @max(x, r.x + gutter) - r.x - gutter);
 }
 
 fn colorOf(class: syntax.Class, theme: *const Theme) screen.Color {
@@ -74,6 +72,7 @@ pub fn draw(s: *screen.Screen, r: screen.Rect, view: *View, opts: Options) void 
     const sels = view.selections.items;
     const head_row = buf.lineOf(view.primarySelection().head);
     const line_bg = theme.lineHighlight();
+    const wrapped = view.wrap_cols > 0;
 
     var scratch = std.ArrayList(u8).empty;
     defer scratch.deinit(view.allocator);
@@ -81,93 +80,107 @@ pub fn draw(s: *screen.Screen, r: screen.Rect, view: *View, opts: Options) void 
     // Selections are sorted, so one index walks them as the rows go down.
     var sel_i: usize = 0;
 
-    var vrow: usize = 0;
-    while (vrow < r.h) : (vrow += 1) {
-        const row = view.scroll_row + vrow;
-        if (row >= total) break;
-        const y = r.y + vrow;
+    var y = r.y;
+    var row = view.scroll_row;
+    // With wrap, the window may start part of the way into a line.
+    var skip = if (wrapped) view.scroll_sub else 0;
+    while (y < r.bottom() and row < total) : (row += 1) {
         // An unreadable line (out of memory joining its pieces) is drawn
         // empty rather than not drawing the frame.
         const line = buf.line(row, &scratch) catch "";
         const line_start = buf.lineStart(row);
         const line_end = line_start + line.len;
-
         const tinted = opts.focused and row == head_row and !line_bg.isDefault();
         const row_bg = if (tinted) line_bg else theme.background;
-        if (tinted) s.fill(.{ .x = r.x, .y = y, .w = r.w, .h = 1 }, .{ .bg = row_bg });
-
-        if (gutter > 0) {
-            var num_buf: [24]u8 = undefined;
-            const num = std.fmt.bufPrint(&num_buf, "{d}", .{row + 1}) catch "";
-            const fg = if (opts.focused and row == head_row) theme.text else theme.gutter;
-            _ = s.text(r.x + (gutter - 1 - num.len), y, right, num, .{ .fg = fg, .bg = row_bg });
-        }
 
         const nspans = if (opts.highlighter) |h| h.spans(row, line, &spans) else 0;
         while (sel_i < sels.len and sels[sel_i].end() < line_start) sel_i += 1;
-
-        var cell: usize = 0; // cell column in the line, before scrolling
-        var i: usize = 0;
         var span_i: usize = 0;
         var si = sel_i;
-        while (i < line.len) {
-            const at = i;
-            const cp = utf8.nextCp(line, &i);
-            const w = text.cellsFor(cp, cell, view.tab_width);
-            if (w == 0) continue; // combining mark: drawn with the cell before
-            const pos = line_start + at;
-            while (si < sels.len and sels[si].end() <= pos) si += 1;
-            const selected = si < sels.len and !sels[si].isEmpty() and sels[si].start() <= pos;
-            while (span_i < nspans and spans[span_i].end <= at) span_i += 1;
-            const class: syntax.Class = if (span_i < nspans and at >= spans[span_i].start) spans[span_i].class else .normal;
-            const style = screen.Cell{
-                .ch = if (cp == '\t' or cp < 0x20 or cp == 0x7f) ' ' else cp,
-                .fg = colorOf(class, theme),
-                .bg = if (selected) theme.selection else row_bg,
-            };
-            if (cell + w > view.scroll_col) {
-                const x = text_x + (cell -| view.scroll_col);
-                if (x >= right) break;
-                if (cp == '\t' or cell < view.scroll_col) {
-                    // A tab, or a wide character cut by the left edge: blanks.
-                    var k = @max(cell, view.scroll_col);
-                    while (k < cell + w) : (k += 1) {
-                        const tx = text_x + (k - view.scroll_col);
-                        if (tx < right) s.put(tx, y, .{ .fg = style.fg, .bg = style.bg });
+
+        // One pass per visual row: the whole line when wrap is off.
+        var wrap = text.Wrap{ .line = line, .tab_width = view.tab_width, .width = view.wrap_cols };
+        var sub: usize = 0;
+        while (wrap.next()) |seg| : (sub += 1) {
+            if (sub < skip) continue;
+            if (y >= r.bottom()) break;
+            // The first cell column shown on this row.
+            const base = if (wrapped) seg.cell else view.scroll_col;
+            const is_last = seg.end == line.len;
+
+            if (tinted) s.fill(.{ .x = r.x, .y = y, .w = r.w, .h = 1 }, .{ .bg = row_bg });
+            // The number stands on the line's first row only.
+            if (gutter > 0 and sub == 0) {
+                var num_buf: [24]u8 = undefined;
+                const num = std.fmt.bufPrint(&num_buf, "{d}", .{row + 1}) catch "";
+                const fg = if (opts.focused and row == head_row) theme.text else theme.gutter;
+                _ = s.text(r.x + (gutter - 1 - num.len), y, right, num, .{ .fg = fg, .bg = row_bg });
+            }
+
+            var cell = seg.cell; // cell column in the unwrapped line
+            var i = seg.start;
+            while (i < seg.end) {
+                const at = i;
+                const cp = utf8.nextCp(line, &i);
+                const w = text.cellsFor(cp, cell, view.tab_width);
+                if (w == 0) continue; // combining mark: drawn with the cell before
+                const pos = line_start + at;
+                while (si < sels.len and sels[si].end() <= pos) si += 1;
+                const selected = si < sels.len and !sels[si].isEmpty() and sels[si].start() <= pos;
+                while (span_i < nspans and spans[span_i].end <= at) span_i += 1;
+                const class: syntax.Class = if (span_i < nspans and at >= spans[span_i].start) spans[span_i].class else .normal;
+                const style = screen.Cell{
+                    .ch = if (cp == '\t' or cp < 0x20 or cp == 0x7f) ' ' else cp,
+                    .fg = colorOf(class, theme),
+                    .bg = if (selected) theme.selection else row_bg,
+                };
+                if (cell + w > base) {
+                    const x = text_x + (cell -| base);
+                    if (x >= right) break;
+                    if (cp == '\t' or cell < base) {
+                        // A tab, or a wide character cut by the left edge: blanks.
+                        var k = @max(cell, base);
+                        while (k < cell + w) : (k += 1) {
+                            const tx = text_x + (k - base);
+                            if (tx < right) s.put(tx, y, .{ .fg = style.fg, .bg = style.bg });
+                        }
+                    } else if (x + w <= right) {
+                        s.put(x, y, style);
+                        if (w == 2) s.put(x + 1, y, .{ .fg = style.fg, .bg = style.bg, .cont = true });
                     }
-                } else if (x + w <= right) {
-                    s.put(x, y, style);
-                    if (w == 2) s.put(x + 1, y, .{ .fg = style.fg, .bg = style.bg, .cont = true });
+                }
+                cell += w;
+            }
+
+            // A selection that runs past the end of the line shows one
+            // selected cell where the newline is.
+            if (is_last) {
+                while (si < sels.len and sels[si].end() <= line_end) si += 1;
+                if (si < sels.len and !sels[si].isEmpty() and sels[si].start() <= line_end and cell >= base) {
+                    const x = text_x + (cell - base);
+                    if (x < right) s.put(x, y, .{ .bg = theme.selection });
                 }
             }
-            cell += w;
-        }
 
-        // A selection that runs past the end of the line shows one selected
-        // cell where the newline is.
-        while (si < sels.len and sels[si].end() <= line_end) si += 1;
-        if (si < sels.len and !sels[si].isEmpty() and sels[si].start() <= line_end and cell >= view.scroll_col) {
-            const x = text_x + (cell - view.scroll_col);
-            if (x < right) s.put(x, y, .{ .bg = theme.selection });
+            // Cursors last, so they win over the selection colour. A cursor
+            // on the seam between two rows is drawn on the lower one.
+            if (opts.focused) for (sels) |sel| {
+                if (sel.head < line_start + seg.start) continue;
+                if (sel.head > line_start + seg.end or (sel.head == line_start + seg.end and !is_last)) continue;
+                const head_cell = text.cellOfByte(line, sel.head - line_start, view.tab_width);
+                if (head_cell < base) continue;
+                const x = text_x + (head_cell - base);
+                if (x >= right) continue;
+                var under = s.at(x, y);
+                if (under.cont) under = .{};
+                s.put(x, y, .{ .ch = under.ch, .fg = theme.text, .attr = .{ .reverse = true } });
+                if (x + 1 < right and s.at(x + 1, y).cont) {
+                    s.put(x + 1, y, .{ .fg = theme.text, .attr = .{ .reverse = true }, .cont = true });
+                }
+            };
+            y += 1;
         }
-    }
-
-    if (!opts.focused) return;
-    // Cursors last, so they win over the selection colour.
-    for (sels) |sel| {
-        const row = buf.lineOf(sel.head);
-        if (row < view.scroll_row or row >= view.scroll_row + r.h) continue;
-        const cell = view.cellOf(sel.head);
-        if (cell < view.scroll_col) continue;
-        const x = text_x + (cell - view.scroll_col);
-        if (x >= right) continue;
-        const y = r.y + (row - view.scroll_row);
-        var under = s.at(x, y);
-        if (under.cont) under = .{};
-        s.put(x, y, .{ .ch = under.ch, .fg = theme.text, .attr = .{ .reverse = true } });
-        if (x + 1 < right and s.at(x + 1, y).cont) {
-            s.put(x + 1, y, .{ .fg = theme.text, .attr = .{ .reverse = true }, .cont = true });
-        }
+        skip = 0;
     }
 }
 
@@ -327,4 +340,31 @@ test "syntax colours and the cursor-line tint" {
     // Row 1 holds the cursor: tinted across the whole pane; row 0 is not.
     try testing.expect(f.s.at(20, 1).bg.eql(f.theme.lineHighlight()));
     try testing.expect(f.s.at(20, 0).bg.isDefault());
+}
+
+test "soft wrap folds long lines, numbers only their first row, and keeps the cursor on screen" {
+    var f = try Fixture.init("one two three four five\nshort", 12, 6);
+    defer f.deinit();
+    f.view.wrap_cols = textCols(f.view, 12, true); // 9 cells of text
+    f.render(.{});
+    try testing.expectEqualStrings("1 one two", f.row(0));
+    try testing.expectEqualStrings("  three", f.row(1));
+    try testing.expectEqualStrings("  four five", f.row(2));
+    try testing.expectEqualStrings("2 short", f.row(3));
+
+    // The cursor at the start of "four" is on the third row, not after "three ".
+    f.view.setCaret(14);
+    f.render(.{});
+    try testing.expect(f.s.at(2, 2).attr.reverse);
+    try testing.expect(!f.s.at(8, 1).attr.reverse);
+
+    // A click on a folded row lands in that row's text.
+    try testing.expectEqual(@as(usize, 8), offsetAt(f.view, f.s.area(), true, 2, 1)); // "t" of three
+    try testing.expectEqual(@as(usize, 26), offsetAt(f.view, f.s.area(), true, 4, 3)); // "o" of short
+
+    // Scrolled one visual row: the window starts inside line 1.
+    f.view.scrollBy(1);
+    f.render(.{});
+    try testing.expectEqualStrings("  three", f.row(0));
+    try testing.expectEqualStrings("2 short", f.row(2));
 }

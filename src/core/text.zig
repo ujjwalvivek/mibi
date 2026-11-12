@@ -44,6 +44,100 @@ pub fn byteOfCell(line: []const u8, cell: usize, tab_width: usize) usize {
     return line.len;
 }
 
+/// One visual row of a line: bytes `start..end`, the first of which stands
+/// at cell column `cell` of the unwrapped line.
+pub const Segment = struct { start: usize, end: usize, cell: usize };
+
+/// Splits a line into the visual rows it takes at `width` cells. A row ends
+/// after the last blank that fits, so words stay whole; a word longer than a
+/// row is cut where the row ends. A character is never split, and every line,
+/// even an empty one, has at least one segment. `width` 0 means no wrapping:
+/// one segment, the whole line.
+pub const Wrap = struct {
+    line: []const u8,
+    tab_width: usize,
+    width: usize,
+    pos: usize = 0,
+    cell: usize = 0,
+    done: bool = false,
+
+    pub fn next(self: *Wrap) ?Segment {
+        if (self.done) return null;
+        const start = self.pos;
+        const start_cell = self.cell;
+        if (self.width > 0) {
+            var i = start;
+            var cell = start_cell;
+            var after_blank: ?Segment = null; // only `end` and `cell` are used
+            while (i < self.line.len) {
+                const at = i;
+                const cp = utf8.nextCp(self.line, &i);
+                const w = cellsFor(cp, cell, self.tab_width);
+                // `at > start`: a character wider than the row still gets one.
+                if (cell + w - start_cell > self.width and at > start) {
+                    const cut = after_blank orelse Segment{ .start = start, .end = at, .cell = cell };
+                    self.pos = cut.end;
+                    self.cell = cut.cell;
+                    return .{ .start = start, .end = cut.end, .cell = start_cell };
+                }
+                cell += w;
+                if (cp == ' ' or cp == '\t') after_blank = .{ .start = start, .end = i, .cell = cell };
+            }
+        }
+        self.done = true;
+        return .{ .start = start, .end = self.line.len, .cell = start_cell };
+    }
+};
+
+/// How many visual rows `line` takes at `cols` cells.
+pub fn wrapCount(line: []const u8, tab_width: usize, cols: usize) usize {
+    if (cols == 0) return 1;
+    var it = Wrap{ .line = line, .tab_width = tab_width, .width = cols };
+    var n: usize = 0;
+    while (it.next()) |_| n += 1;
+    return n;
+}
+
+/// The visual row holding byte column `col`, and its index. A column on the
+/// seam between two rows belongs to the second: that is where the cursor is
+/// drawn.
+pub fn wrapAt(line: []const u8, tab_width: usize, cols: usize, col: usize) struct { index: usize, seg: Segment } {
+    var it = Wrap{ .line = line, .tab_width = tab_width, .width = cols };
+    var index: usize = 0;
+    var seg = it.next().?;
+    while (col >= seg.end) {
+        seg = it.next() orelse break;
+        index += 1;
+    }
+    return .{ .index = index, .seg = seg };
+}
+
+/// Visual row number `index` of the line, or the last one if there are fewer.
+pub fn wrapSegment(line: []const u8, tab_width: usize, cols: usize, index: usize) Segment {
+    var it = Wrap{ .line = line, .tab_width = tab_width, .width = cols };
+    var seg = it.next().?;
+    var i: usize = 0;
+    while (i < index) : (i += 1) seg = it.next() orelse break;
+    return seg;
+}
+
+/// The byte column in `seg` nearest to `x` cells from its left edge. Unless
+/// the segment is the line's last, the answer stays inside it: its end is
+/// the next row's first column.
+pub fn byteOfSegmentCell(line: []const u8, seg: Segment, x: usize, tab_width: usize) usize {
+    var at = seg.cell;
+    var i = seg.start;
+    while (i < seg.end) {
+        const start = i;
+        const cp = utf8.nextCp(line, &i);
+        const w = cellsFor(cp, at, tab_width);
+        if (w > 0 and at + w > seg.cell + x) return start;
+        at += w;
+    }
+    if (seg.end < line.len and seg.end > seg.start) return @max(prevBoundary(line, seg.end), seg.start);
+    return seg.end;
+}
+
 /// Total cells the line occupies.
 pub fn cellWidth(line: []const u8, tab_width: usize) usize {
     return cellOfByte(line, line.len, tab_width);
@@ -254,4 +348,51 @@ test "line endings are detected and normalised" {
 
     var data = "a\r\nb\rc\r\n\r\n".*;
     try testing.expectEqualStrings("a\nb\rc\n\n", normalizeLineEndings(&data));
+}
+
+fn expectWrap(line: []const u8, cols: usize, want: []const []const u8) !void {
+    var it = Wrap{ .line = line, .tab_width = 4, .width = cols };
+    var n: usize = 0;
+    var at: usize = 0;
+    while (it.next()) |seg| : (n += 1) {
+        try std.testing.expect(n < want.len);
+        try std.testing.expectEqualStrings(want[n], line[seg.start..seg.end]);
+        try std.testing.expectEqual(at, seg.start); // no gaps, no overlap
+        try std.testing.expectEqual(cellOfByte(line, seg.start, 4), seg.cell);
+        at = seg.end;
+    }
+    try std.testing.expectEqual(want.len, n);
+    try std.testing.expectEqual(line.len, at);
+    try std.testing.expectEqual(want.len, wrapCount(line, 4, cols));
+}
+
+test "wrap breaks after blanks, cuts long words, and never splits a character" {
+    try expectWrap("", 10, &.{""});
+    try expectWrap("short", 10, &.{"short"});
+    try expectWrap("exactly ten", 0, &.{"exactly ten"}); // off
+    try expectWrap("one two three four", 8, &.{ "one two ", "three ", "four" });
+    try expectWrap("abcdefghijkl", 5, &.{ "abcde", "fghij", "kl" });
+    try expectWrap("ab cdefghijkl", 5, &.{ "ab ", "cdefg", "hijkl" });
+    // Wide characters take two cells and are not cut in half.
+    try expectWrap("\u{65e5}\u{672c}\u{8a9e}\u{3067}\u{3059}", 5, &.{ "\u{65e5}\u{672c}", "\u{8a9e}\u{3067}", "\u{3059}" });
+    // A combining mark stays with its letter, whatever the width.
+    try expectWrap("ae\u{301}io", 2, &.{ "ae\u{301}", "io" });
+    // Narrower than a character: one per row, and it still ends.
+    try expectWrap("\u{65e5}\u{672c}", 1, &.{ "\u{65e5}", "\u{672c}" });
+    try expectWrap("a\tb", 4, &.{ "a\t", "b" });
+}
+
+test "wrapAt puts a seam position on the lower row; byteOfSegmentCell stays on its row" {
+    const line = "one two three four";
+    try std.testing.expectEqual(@as(usize, 0), wrapAt(line, 4, 8, 7).index);
+    try std.testing.expectEqual(@as(usize, 1), wrapAt(line, 4, 8, 8).index); // the seam
+    try std.testing.expectEqual(@as(usize, 2), wrapAt(line, 4, 8, line.len).index);
+    try std.testing.expectEqual(@as(usize, 0), wrapAt(line, 4, 0, line.len).index);
+
+    const first = wrapSegment(line, 4, 8, 0);
+    try std.testing.expectEqual(@as(usize, 3), byteOfSegmentCell(line, first, 3, 4));
+    try std.testing.expectEqual(@as(usize, 7), byteOfSegmentCell(line, first, 99, 4)); // not 8: that is row two
+    const last = wrapSegment(line, 4, 8, 99);
+    try std.testing.expectEqualStrings("four", line[last.start..last.end]);
+    try std.testing.expectEqual(line.len, byteOfSegmentCell(line, last, 99, 4));
 }
