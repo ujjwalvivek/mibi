@@ -5,10 +5,11 @@
 A tiny, modern terminal text editor. Non-modal, in the spirit of nano/micro,
 built in Zig with no third-party dependencies.
 
-Status: **Phase 3 in progress** - Phase 2 (open, edit, select, copy, undo,
-save) is complete and hardened, plus the Unicode width table,
-find/replace/go-to-line, a help panel, multiple documents in tabs and data-driven
-syntax highlighting.
+Status: **being rebuilt.** v0.0.2 is the last release and the editor you get
+from this branch still runs on its code. A new core (`src/core/`: buffer,
+undo, multi-cursor editing, regex search) is finished and tested; the
+interface is being moved onto it next. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what is changing and why.
 Cross-platform (Linux, macOS, Windows).
 
 ```

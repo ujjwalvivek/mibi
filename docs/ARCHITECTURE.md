@@ -1,6 +1,6 @@
 # mibi architecture: decisions for the rebuild
 
-Status: **proposed**, 2026-11-12. This record reassesses the design from phase 0
+Status: **accepted**, 2026-11-12; step 2 (the core) is built. This record reassesses the design from phase 0
 up. It says what stays, what is replaced, and why, and it fixes the order of
 the work. It supersedes section 3 of the local `PLAN.md`; the product scope in
 that plan (ox-lite, no plugins, no embedded terminal) is unchanged.
@@ -18,9 +18,8 @@ Measured at `d57e27a` (2026-11-06), the newest commit on GitHub.
 | `src/main.zig` is 4,506 of 12,108 lines | input decoding, prompts, session file, mouse, tabs, tree, pickers, help and all drawing in one file; 67 of the tests live there |
 | The plan and the repo disagree | `PLAN.md` describes v0.0.4; more than ten commits were reverted, leaving the repo between v0.0.2 and v0.0.3 with `src/pty.zig` still in it. Phase 5b and 6 are rebuilt from the plan, not recovered |
 
-The first four are fixed on this branch: all five targets build, 136 of 136
-tests pass on Linux, and CI now runs the tests on three platforms plus the size
-gate. Sizes after the fix: 143,880 to 215,040 bytes, all under budget.
+The first four are fixed: all five targets build, the old tests pass on
+Linux, and CI now runs the tests on three platforms plus the size gate. Sizes after the fix: 143,880 to 215,040 bytes, all under budget.
 
 The lesson is the first decision below: "cross-platform" was a claim nobody
 checked, because the project is developed on Windows and nothing else ran.
@@ -197,15 +196,50 @@ real-terminal smoke test per OS for the platform layer.
 - The on-disk formats (`mibi.ini`, `themes/*.ini`, `syntax.d/*.ini`, session
   file) keep working.
 
+## What the core looks like now
+
+Step 2 is in `src/core/`, about 4,900 lines with tests, and compiles on its
+own (`zig build test-core`) with no libc and no OS layer.
+
+| File | What it is |
+| --- | --- |
+| `buffer.zig` | Piece table. One primitive, `splice`, that cannot fail once capacity is reserved. Newline indexes on the two stores; no document copy. |
+| `history.zig` | Transactions of changes that reference store spans. Undo is the same splice reversed. Typing merges within one second. Tracks the saved state, so undoing back to it clears the dirty flag. |
+| `document.zig` | Buffer plus history. `edit` takes a list of edits and applies them all or not at all. Observers are told about every change. |
+| `selection.zig` | Anchor and head; sorting and merging of a selection list. |
+| `view.zig` | Selections, scroll, and every editing command, each written once for any number of cursors. |
+| `text.zig` | Cells and columns, cursor boundaries that keep combining marks with their base, word classes, line-ending detection. |
+| `regex.zig` | Parser, compiler and Pike VM. Streams chunks; syntax errors carry a position and a reason. |
+| `search.zig` | Find, find previous, replace all. Plain search is the same engine with the needle escaped. |
+
+Decisions made while building it, beyond the list above:
+
+- **Line endings are normalised on load.** A document is always `\n` in
+  memory and remembers whether the file was CRLF, to write it back the same
+  way. The old code carried `\r` through every column calculation.
+- **Failure is handled by reserving first.** An edit reserves room in the
+  piece list and the history, then performs steps that cannot fail. There is
+  no rollback code, because there is nothing to roll back. Every module has a
+  test that fails each allocation in turn and checks nothing changed.
+- **Tests build in Debug.** They used to inherit `ReleaseSmall`, which turns
+  off the bounds, overflow and aliasing checks. Switching found an aliasing
+  `@memcpy` in `config.zig` the same day.
+- **Cursor movement is by displayed character,** not by codepoint: a base
+  letter and its combining marks are one stop. Full grapheme clusters (emoji
+  joined with ZWJ) are not handled yet.
+- **Word characters include everything outside ASCII,** in movement, whole-word
+  search and `\b` alike, so the three agree.
+
 ## Order of work
 
 Each step ends with all tests green on three platforms and the size gate
 passing. The old code keeps working until the step that replaces it lands.
 
-1. **Baseline** (this branch): build fixes, portable tests, CI, this record.
-2. **Core:** buffer, document, view, selections, transactions, undo, search,
-   Pike VM, in `src/core/` with its own test step. Syntax, width and UTF-8 move
-   in unchanged. Model-based fuzz tests for buffer and undo.
+1. **Baseline** (done): build fixes, portable tests, CI, this record.
+2. **Core** (done): buffer, document, view, selections, transactions, undo,
+   search, Pike VM, in `src/core/` with its own test step. Width and UTF-8
+   moved in unchanged. Model-based fuzz tests for buffer and undo. The syntax
+   lexer moves in at the start of step 3, with the pane that draws it.
 3. **Platform and UI:** typed events, command table, widgets, app loop. Features
    are ported in the plan's phase order (terminal and render, core editing,
    documents and UI, ox-lite), each with in-process screen tests. `main.zig`
