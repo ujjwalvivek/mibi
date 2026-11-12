@@ -481,7 +481,7 @@ pub fn readInput(buf: []u8, extra: ?ExtraHandle, timeout_ms: u32) !Input {
         .{ .fd = (extra orelse -1), .events = std.posix.POLL.IN, .revents = 0 },
     };
     const count: usize = if (extra == null) 1 else 2;
-    const ready = std.posix.poll(fds[0..count], timeout_ms) catch 1;
+    const ready = std.posix.poll(fds[0..count], @intCast(@min(timeout_ms, std.math.maxInt(i32)))) catch 1;
     if (ready == 0) {
         idle = true;
         return .{};
