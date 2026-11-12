@@ -4,8 +4,8 @@
 
 const std = @import("std");
 const term = @import("term.zig");
-const utf8 = @import("text.zig");
-const width = @import("width.zig");
+const utf8 = @import("core/utf8.zig");
+const width = @import("core/width.zig");
 
 pub const Color = union(enum) {
     default,

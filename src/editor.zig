@@ -8,8 +8,8 @@ const os = @import("os.zig");
 const buffer = @import("buffer.zig");
 const regex = @import("regex.zig");
 const Buffer = buffer.Buffer;
-const utf8 = @import("text.zig");
-const width = @import("width.zig");
+const utf8 = @import("core/utf8.zig");
+const width = @import("core/width.zig");
 const syntax = @import("syntax.zig");
 
 const MAX_UNDO = 512;

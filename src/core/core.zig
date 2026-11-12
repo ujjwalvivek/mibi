@@ -4,6 +4,9 @@
 //! import in the wrong direction is a compile error.
 
 pub const buffer = @import("buffer.zig");
+pub const utf8 = @import("utf8.zig");
+pub const width = @import("width.zig");
+pub const text = @import("text.zig");
 pub const selection = @import("selection.zig");
 pub const history = @import("history.zig");
 pub const document = @import("document.zig");
@@ -15,6 +18,7 @@ pub const Edit = document.Edit;
 
 test {
     _ = buffer;
+    _ = text;
     _ = selection;
     _ = history;
     _ = document;
