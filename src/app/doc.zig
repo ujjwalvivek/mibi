@@ -109,7 +109,8 @@ pub const Doc = struct {
         const path = self.path orelse return error.NoPath;
         const bytes = try self.bytesForDisk(self.allocator);
         defer self.allocator.free(bytes);
-        try os.writeFile(path, bytes);
+        // All or nothing: a save that fails must not cost the file on disk.
+        try os.writeFileAtomic(path, bytes);
         self.document.markSaved();
         self.stamp = os.fileStamp(path);
     }

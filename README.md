@@ -9,7 +9,7 @@ Status: **rebuilt, not yet released.** `main` is the new editor (0.1.0 in
 progress): a text model, widgets and a platform layer that the build keeps
 apart, tested on Linux, macOS and Windows on every push. v0.0.2 is the last
 tagged release and predates all of it. Still to come before the tag: soft
-wrap, atomic save, bracket matching and packaging. See
+wrap, bracket matching and packaging. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what changed and why.
 Cross-platform (Linux, macOS, Windows).
 
@@ -218,7 +218,8 @@ packaging.
   scrolled into view. Closing the last tab quits, exactly like `Ctrl+W`.
   Per-document dirty markers, Ctrl+T / Ctrl+W, Ctrl+PgUp / Ctrl+PgDn, and a
   quit that checks every tab.
-- File open/save; path prompts list the directory; Tab completes. A failed
+- File open/save; path prompts list the directory; Tab completes. A save
+  replaces the file in one step, so an interrupted save cannot truncate it. A failed
   open or save reports the actual OS error rather than failing silently.
 - Cell-grid **diff renderer**: changed rows are rewritten in full.
 - Raw mode, alternate screen, resize handling, auto-wrap disabled, UTF-8
@@ -314,4 +315,4 @@ run isolated).
 
 ## Not yet
 
-Soft wrap, bracket matching, atomic save, macros. There is no embedded terminal and no plugin system, on purpose.
+Soft wrap, bracket matching, macros. There is no embedded terminal and no plugin system, on purpose.

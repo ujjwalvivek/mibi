@@ -54,6 +54,16 @@ const win = struct {
     extern "kernel32" fn FindClose(hFindFile: HANDLE) callconv(.winapi) c_int;
     extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
     extern "kernel32" fn DeleteFileW(lpFileName: [*:0]const u16) callconv(.winapi) c_int;
+    extern "kernel32" fn ReplaceFileW(
+        lpReplacedFileName: [*:0]const u16,
+        lpReplacementFileName: [*:0]const u16,
+        lpBackupFileName: ?[*:0]const u16,
+        dwReplaceFlags: DWORD,
+        lpExclude: ?*anyopaque,
+        lpReserved: ?*anyopaque,
+    ) callconv(.winapi) c_int;
+    const INVALID_FILE_ATTRIBUTES: DWORD = 0xFFFF_FFFF;
+    const REPLACEFILE_IGNORE_MERGE_ERRORS: DWORD = 2;
     extern "kernel32" fn GetModuleFileNameW(hModule: ?HANDLE, lpFilename: [*]u16, nSize: DWORD) callconv(.winapi) DWORD;
     extern "kernel32" fn GetEnvironmentVariableW(lpName: [*:0]const u16, lpBuffer: [*]u16, nSize: DWORD) callconv(.winapi) DWORD;
     extern "kernel32" fn GetFileAttributesW(lpFileName: [*:0]const u16) callconv(.winapi) DWORD;
@@ -318,6 +328,116 @@ pub fn writeFile(path: []const u8, bytes: []const u8) !void {
             if (n <= 0) return error.WriteFailed;
             i += @intCast(n);
         }
+    }
+}
+
+/// Replace the contents of `path` so that a crash, a full disk or a pulled
+/// plug leaves either the old file or the new one, never half of each.
+///
+/// The bytes go to a temporary file next to the target, which then takes its
+/// place in one step. Where that would change what the file *is*, the write
+/// goes through the file in place instead, as `writeFile` does:
+///
+/// - the file does not exist yet (there is nothing to protect),
+/// - it has other hard links, or belongs to another user (a new file would
+///   break the links, or change the owner),
+/// - the directory does not allow creating a file.
+///
+/// A symbolic link is followed: the file it points to is replaced and the
+/// link stays a link. The permission bits are carried over.
+pub fn writeFileAtomic(path: []const u8, bytes: []const u8) !void {
+    return if (is_windows) writeAtomicWindows(path, bytes) else writeAtomicUnix(path, bytes);
+}
+
+const tmp_suffix = ".mibi-save";
+
+const FileMeta = struct { mode: u32, nlink: u64, uid: u32 };
+
+fn fileMetaUnix(z: [*:0]const u8) ?FileMeta {
+    // "Relative to the working directory": -100 on Linux, -2 on macOS.
+    const at_fdcwd: i32 = std.c.AT.FDCWD;
+    if (builtin.os.tag == .linux) {
+        var st: std.os.linux.Statx = std.mem.zeroes(std.os.linux.Statx);
+        const mask: std.os.linux.STATX = .{ .MODE = true, .NLINK = true, .UID = true };
+        const rc: isize = @bitCast(std.os.linux.statx(at_fdcwd, z, 0, mask, &st));
+        if (rc < 0) return null;
+        return .{ .mode = st.mode & 0o7777, .nlink = st.nlink, .uid = st.uid };
+    }
+    if (builtin.os.tag == .macos) {
+        var st: std.c.Stat = std.mem.zeroes(std.c.Stat);
+        if (std.c.fstatat(at_fdcwd, z, &st, 0) != 0) return null;
+        return .{ .mode = @as(u32, st.mode) & 0o7777, .nlink = st.nlink, .uid = st.uid };
+    }
+    return null;
+}
+
+fn writeAtomicUnix(path: []const u8, bytes: []const u8) !void {
+    if (is_windows) unreachable;
+    const allocator = std.heap.page_allocator;
+    const z = try allocator.dupeZ(u8, path);
+    defer allocator.free(z);
+    // Through any symbolic links to the file itself. No such file: create it.
+    var real_buf: [std.posix.PATH_MAX]u8 = undefined;
+    const real = std.c.realpath(z.ptr, &real_buf) orelse return writeFile(path, bytes);
+    const target = std.mem.sliceTo(real, 0);
+    const meta = fileMetaUnix(real) orelse return writeFile(path, bytes);
+    if (meta.nlink > 1 or meta.uid != std.c.geteuid()) return writeFile(path, bytes);
+
+    const tmp = try std.mem.concatWithSentinel(allocator, u8, &.{ target, tmp_suffix }, 0);
+    defer allocator.free(tmp);
+    // Exclusive, and private until it has the right mode. A leftover from a
+    // save that was interrupted is ours to remove.
+    const flags: std.c.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true };
+    var fd = std.c.open(tmp.ptr, flags, @as(c_uint, 0o600));
+    if (fd < 0 and std.c.errno(fd) == .EXIST) {
+        _ = std.c.unlink(tmp.ptr);
+        fd = std.c.open(tmp.ptr, flags, @as(c_uint, 0o600));
+    }
+    if (fd < 0) return writeFile(path, bytes);
+
+    const written = blk: {
+        var i: usize = 0;
+        while (i < bytes.len) {
+            const n = std.c.write(fd, bytes[i..].ptr, bytes.len - i);
+            if (n <= 0) break :blk false;
+            i += @intCast(n);
+        }
+        if (std.c.fchmod(fd, @intCast(meta.mode)) != 0) break :blk false;
+        // On disk before it takes the old file's place.
+        break :blk std.c.fsync(fd) == 0;
+    };
+    const closed = std.c.close(fd) == 0;
+    if (!written or !closed or std.c.rename(tmp.ptr, real) != 0) {
+        _ = std.c.unlink(tmp.ptr);
+        return error.WriteFailed;
+    }
+}
+
+fn writeAtomicWindows(path: []const u8, bytes: []const u8) !void {
+    if (!is_windows) unreachable;
+    const allocator = std.heap.page_allocator;
+    const wpath = try std.unicode.utf8ToUtf16LeAllocZ(allocator, path);
+    defer allocator.free(wpath);
+    if (win.GetFileAttributesW(wpath.ptr) == win.INVALID_FILE_ATTRIBUTES) return writeFile(path, bytes);
+
+    const tmp = try std.mem.concat(allocator, u8, &.{ path, tmp_suffix });
+    defer allocator.free(tmp);
+    const wtmp = try std.unicode.utf8ToUtf16LeAllocZ(allocator, tmp);
+    defer allocator.free(wtmp);
+    // A directory that refuses a new file still lets the file be rewritten.
+    writeFile(tmp, bytes) catch |err| {
+        _ = win.DeleteFileW(wtmp.ptr);
+        return switch (err) {
+            error.WriteFailed => err, // the disk is full: the old file is intact, keep it
+            else => writeFile(path, bytes),
+        };
+    };
+    // ReplaceFile keeps the target's attributes and permissions. It refuses
+    // when another program has the file open without sharing; rewriting in
+    // place is what an editor does then.
+    if (win.ReplaceFileW(wpath.ptr, wtmp.ptr, null, win.REPLACEFILE_IGNORE_MERGE_ERRORS, null, null) == 0) {
+        _ = win.DeleteFileW(wtmp.ptr);
+        return writeFile(path, bytes);
     }
 }
 
@@ -853,4 +973,65 @@ test "file stamp notices a rewrite and holds still otherwise" {
     const second = fileStamp(path);
     try std.testing.expect(second != 0);
     try std.testing.expect(first != second);
+}
+
+test "an atomic save replaces the text, keeps the mode, and leaves nothing behind" {
+    const allocator = std.testing.allocator;
+    const path = "mibi-atomic-test.txt";
+    const tmp = path ++ tmp_suffix;
+    defer deleteFile(path) catch {};
+
+    // A file that does not exist yet is simply created.
+    try deleteFile(path);
+    try writeFileAtomic(path, "one");
+    try writeFileAtomic(path, "two, and longer");
+    const got = try readFileAlloc(allocator, path, 1024);
+    defer allocator.free(got);
+    try std.testing.expectEqualStrings("two, and longer", got);
+    try std.testing.expectError(error.FileNotFound, readFileAlloc(allocator, tmp, 1024));
+
+    // A leftover from an interrupted save does not get in the way.
+    try writeFile(tmp, "stale");
+    try writeFileAtomic(path, "three");
+    try std.testing.expectError(error.FileNotFound, readFileAlloc(allocator, tmp, 1024));
+
+    if (!is_windows) {
+        try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(path, 0o750));
+        try writeFileAtomic(path, "four");
+        try std.testing.expectEqual(@as(u32, 0o750), fileMetaUnix(path).?.mode);
+    }
+    const last = try readFileAlloc(allocator, path, 1024);
+    defer allocator.free(last);
+    try std.testing.expectEqualStrings(if (is_windows) "three" else "four", last);
+}
+
+test "an atomic save through a symbolic link or a hard link keeps the link" {
+    if (is_windows) return;
+    const allocator = std.testing.allocator;
+    const file = "mibi-atomic-target.txt";
+    const soft = "mibi-atomic-soft.txt";
+    const hard = "mibi-atomic-hard.txt";
+    defer for ([_][]const u8{ file, soft, hard }) |p| deleteFile(p) catch {};
+    for ([_][]const u8{ file, soft, hard }) |p| try deleteFile(p);
+    try writeFile(file, "old");
+    try std.testing.expectEqual(@as(c_int, 0), std.c.symlink(file, soft));
+
+    try writeFileAtomic(soft, "through the link");
+    var buf: [64]u8 = undefined;
+    const n = std.c.readlink(soft, &buf, buf.len);
+    try std.testing.expectEqualStrings(file, buf[0..@intCast(n)]); // still a link
+    const a = try readFileAlloc(allocator, file, 1024);
+    defer allocator.free(a);
+    try std.testing.expectEqualStrings("through the link", a);
+
+    // With a second name for the same file, both names must see the save.
+    try std.testing.expectEqual(@as(c_int, 0), std.c.link(file, hard));
+    try writeFileAtomic(file, "both names");
+    const b = try readFileAlloc(allocator, hard, 1024);
+    defer allocator.free(b);
+    try std.testing.expectEqualStrings("both names", b);
+}
+
+test "an atomic save into a directory that does not exist fails and says so" {
+    try std.testing.expectError(error.FileNotFound, writeFileAtomic("mibi-no-such-dir/x.txt", "x"));
 }

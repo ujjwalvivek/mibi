@@ -24,6 +24,10 @@ The editor was taken apart and put back together on a new structure; see
 - `Ctrl+Q` no longer asks about unsaved changes: they are in the session and
   come back with the tabs. Closing a tab with unsaved changes still asks,
   because that does discard them.
+- Saving is all or nothing: the text goes to a temporary file that then takes
+  the old one's place, so a crash or a full disk cannot leave half a file.
+  Permissions, symbolic links and hard links are kept.
+- Files changed by another program are now noticed on macOS too.
 - Running out of memory is reported in the status line instead of ending the
   program.
 - The embedded terminal is gone.
