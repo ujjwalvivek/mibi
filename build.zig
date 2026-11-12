@@ -82,12 +82,19 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Build and run mibi");
     run_step.dependOn(&run_cmd.step);
 
-    // `zig build test` runs the unit tests in the same sources.
+    // `zig build test` runs the unit tests in the same sources. Tests build
+    // in Debug unless told otherwise: the release mode turns off the bounds,
+    // overflow and aliasing checks that tests exist to trip.
+    const test_optimize = b.option(
+        std.builtin.OptimizeMode,
+        "test-optimize",
+        "Optimize mode for the tests (default Debug)",
+    ) orelse .Debug;
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
-            .optimize = optimize,
+            .optimize = test_optimize,
             // Same rule as the executable: the Unix OS layer goes through libc.
             .link_libc = target.result.os.tag != .windows,
         }),
@@ -101,7 +108,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/core/core.zig"),
             .target = target,
-            .optimize = optimize,
+            .optimize = test_optimize,
         }),
     });
     const core_step = b.step("test-core", "Run the text model's tests");

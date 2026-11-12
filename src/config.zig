@@ -131,7 +131,8 @@ pub const Config = struct {
 
     pub fn setSource(self: *Config, path: []const u8) void {
         const n = @min(path.len, self.source.len);
-        @memcpy(self.source[0..n], path[0..n]);
+        // `path` may be `sourcePath()` itself, so the ranges can overlap.
+        std.mem.copyForwards(u8, self.source[0..n], path[0..n]);
         self.source_len = n;
     }
 };
