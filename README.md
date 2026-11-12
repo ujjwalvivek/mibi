@@ -5,11 +5,11 @@
 A tiny, modern terminal text editor. Non-modal, in the spirit of nano/micro,
 built in Zig with no third-party dependencies.
 
-Status: **rebuilt, not yet released.** `main` is the new editor (0.1.0 in
-progress): a text model, widgets and a platform layer that the build keeps
-apart, tested on Linux, macOS and Windows on every push. v0.0.2 is the last
-tagged release and predates all of it. Still to come before the tag: packaging. See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what changed and why.
+Status: **0.1.0**, the rebuilt editor: a text model, widgets and a platform
+layer that the build keeps apart, tested on Linux, macOS and Windows on every
+push. Archives for all three are on the
+[releases page](https://github.com/ujjwalvivek/mibi/releases). See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it is put together and why.
 Cross-platform (Linux, macOS, Windows).
 
 ```
@@ -292,7 +292,7 @@ budget; the hard ceiling is 1 MB.
 
 ## Changelog
 
-See [docs/CHANGELOG.md](docs/CHANGELOG.md); the current release is **v0.0.2**.
+See [docs/CHANGELOG.md](docs/CHANGELOG.md); the current release is **v0.1.0**.
 
 ## Licence
 

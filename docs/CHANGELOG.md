@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## v0.1.0
 
-**The rebuild (0.1.0 in progress)**
+**The rebuild**
 
 The editor was taken apart and put back together on a new structure; see
 [ARCHITECTURE.md](ARCHITECTURE.md). What that changes for someone using it:

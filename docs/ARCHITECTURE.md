@@ -1,6 +1,6 @@
 # mibi architecture: decisions for the rebuild
 
-Status: **accepted**, 2026-11-12; steps 1 to 3 are built (the whole editor runs on the new structure). This record reassesses the design from phase 0
+Status: **accepted**, 2026-11-12; all four steps are built and released as v0.1.0. This record reassesses the design from phase 0
 up. It says what stays, what is replaced, and why, and it fixes the order of
 the work. It supersedes section 3 of the local `PLAN.md`; the product scope in
 that plan (ox-lite, no plugins, no embedded terminal) is unchanged.
@@ -309,7 +309,7 @@ passing. The old code keeps working until the step that replaces it lands.
 4. **Phase 6 and release:** bracketed paste, soft wrap, atomic save, line
    operations, comment toggle, bracket matching, the command filter and
    packaging (`tools/package.sh`, a release workflow on tags) are done.
-   Left: the tag.
+   Released as v0.1.0.
 
 ## Open questions
 
