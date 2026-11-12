@@ -89,6 +89,8 @@ pub const Program = struct {
     /// When every match must start with this byte, the searcher can skip
     /// ahead to it instead of stepping the VM over every codepoint.
     first_byte: ?u8 = null,
+    /// The same byte in the other case, when case is ignored.
+    first_byte_alt: ?u8 = null,
 
     pub fn deinit(self: *Program) void {
         self.arena.deinit();
@@ -512,7 +514,10 @@ pub fn compile(allocator: Allocator, pattern: []const u8, options: Options, diag
     program.classes = classes;
     program.groups = parser.groups;
     program.ignore_case = options.ignore_case;
-    if (!options.ignore_case) program.first_byte = firstByte(root);
+    if (firstByte(root)) |b| {
+        program.first_byte = b;
+        if (options.ignore_case and std.ascii.isAlphabetic(b)) program.first_byte_alt = b ^ 0x20;
+    }
     return program;
 }
 
@@ -652,15 +657,14 @@ pub const Matcher = struct {
             // known byte, so jump to its next occurrence.
             if (self.program.first_byte) |b| {
                 if (self.pending.len == 0 and self.best == null and self.partial_need == 0) {
-                    const skip = std.mem.indexOfScalarPos(u8, chunk, i, b) orelse {
-                        self.pos += chunk.len - i;
-                        self.prev = chunk[chunk.len - 1];
-                        return false;
-                    };
+                    const alt = self.program.first_byte_alt orelse b;
+                    var skip = i;
+                    while (skip < chunk.len and chunk[skip] != b and chunk[skip] != alt) skip += 1;
                     if (skip > i) {
                         self.pos += skip - i;
                         self.prev = chunk[skip - 1];
                         i = skip;
+                        if (i == chunk.len) return false;
                     }
                 }
             }
@@ -1011,6 +1015,8 @@ test "the first-byte skip does not change results" {
     try expectMatch("n+eedle", "nnneedle", .{ 0, 8 });
     try expectMatch("\\bnew", "renew new", .{ 6, 9 });
     try expectMatch("(n)x", "nnnx", .{ 2, 4 });
+    try expectMatchOptions("needle", .{ .ignore_case = true }, "hay Nee nEEdle", .{ 8, 14 });
+    try expectMatchOptions("1a", .{ .ignore_case = true }, "x1A", .{ 1, 3 });
 }
 
 test "patterns that defeat backtracking run in linear time" {

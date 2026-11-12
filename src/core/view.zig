@@ -359,6 +359,12 @@ pub const View = struct {
         self.normalize();
     }
 
+    /// Apply edits prepared elsewhere (replace all) as one undo step. They
+    /// must be sorted and must not overlap; selections move with the text.
+    pub fn applyEdits(self: *View, edits: []const Edit) !void {
+        try self.apply(edits, .other, .keep, .before);
+    }
+
     fn allEmpty(self: *const View) bool {
         for (self.selections.items) |s| {
             if (!s.isEmpty()) return false;
