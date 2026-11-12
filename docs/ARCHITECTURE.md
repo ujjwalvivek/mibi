@@ -16,7 +16,7 @@ Measured at `d57e27a` (2026-11-06), the newest commit on GitHub.
 | 2 of 136 tests were Windows-only by accident | one wrote into `experiments/out/screens/`, one expected `findstr` output from `cat -n` |
 | No CI | no `.github/`; the size gate and screen tests are PowerShell and ConPTY only |
 | `src/main.zig` is 4,506 of 12,108 lines | input decoding, prompts, session file, mouse, tabs, tree, pickers, help and all drawing in one file; 67 of the tests live there |
-| The plan and the repo disagree | `PLAN.md` describes v0.0.4; the repo is between v0.0.2 and v0.0.3 and still contains `src/pty.zig` |
+| The plan and the repo disagree | `PLAN.md` describes v0.0.4; more than ten commits were reverted, leaving the repo between v0.0.2 and v0.0.3 with `src/pty.zig` still in it. Phase 5b and 6 are rebuilt from the plan, not recovered |
 
 The first four are fixed on this branch: all five targets build, 136 of 136
 tests pass on Linux, and CI now runs the tests on three platforms plus the size
@@ -216,7 +216,5 @@ passing. The old code keeps working until the step that replaces it lands.
 
 ## Open questions
 
-- Is there unpushed work (v0.0.3, v0.0.4) on the development machine? If so it
-  is ported from; if not, phase 6 is rebuilt from the plan.
 - Kitty keyboard protocol: it would make `Ctrl+Shift` chords and `Esc`
   unambiguous on terminals that support it. Proposed as opt-in after step 3.
