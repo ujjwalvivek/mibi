@@ -28,6 +28,10 @@ jobs:
           version: 0.16.0
       - run: zig build test
       - run: zig build
+      # The real thing in a pseudo-terminal: raw mode, the run loop, resize,
+      # save, and the terminal handed back. (Windows has no pty to script.)
+      - if: runner.os != 'Windows'
+        run: python3 tools/smoke.py zig-out/bin/mibi
 
   size:
     # Cross-compiles all five targets and holds each one to its byte budget.
