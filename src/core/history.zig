@@ -205,15 +205,26 @@ pub const History = struct {
         self.sealed = true;
     }
 
-    /// Take ownership of a transaction that has just been applied. It either
-    /// becomes a new undo step or, for a run of typing, joins the last one.
-    /// On error the transaction is still the caller's.
-    pub fn push(self: *History, tx: *Transaction) !void {
+    /// Make room to record `tx`, so that `push` cannot fail. Called before
+    /// the transaction is applied: recording an edit must never be the step
+    /// that fails after the text has already changed.
+    pub fn reserve(self: *History, tx: *const Transaction) !void {
         if (self.canMerge(tx)) {
             const top = &self.undo_stack.items[self.undo_stack.items.len - 1];
             try top.changes.ensureUnusedCapacity(self.allocator, tx.changes.items.len);
             try top.pieces.ensureUnusedCapacity(self.allocator, tx.pieces.items.len);
-            const after = try self.allocator.dupe(Selection, tx.after.items);
+            try top.after.ensureTotalCapacity(self.allocator, tx.after.items.len);
+        } else {
+            try self.undo_stack.ensureUnusedCapacity(self.allocator, 1);
+        }
+    }
+
+    /// Take ownership of a transaction that has just been applied. It either
+    /// becomes a new undo step or, for a run of typing, joins the last one.
+    /// Needs `reserve(tx)` first; never fails. `tx` is left empty.
+    pub fn push(self: *History, tx: *Transaction) void {
+        if (self.canMerge(tx)) {
+            const top = &self.undo_stack.items[self.undo_stack.items.len - 1];
             const offset: u32 = @intCast(top.pieces.items.len);
             top.pieces.appendSliceAssumeCapacity(tx.pieces.items);
             for (tx.changes.items) |c| {
@@ -222,15 +233,14 @@ pub const History = struct {
                 moved.inserted.start += offset;
                 top.changes.appendAssumeCapacity(moved);
             }
-            top.after.deinit(self.allocator);
-            top.after = .fromOwnedSlice(after);
+            top.after.clearRetainingCapacity();
+            top.after.appendSliceAssumeCapacity(tx.after.items);
             top.time_ms = tx.time_ms;
-            // Still the same undo step, so the same state id: a step never
-            // merges across a save (see `markSaved`), so `saved_id` cannot be
-            // pointing at it.
+            // Still the same undo step, so the same state id. A step never
+            // merges across a save (`markSaved` seals it), so `saved_id`
+            // cannot be pointing at it.
             tx.deinit(self.allocator);
         } else {
-            try self.undo_stack.ensureUnusedCapacity(self.allocator, 1);
             tx.id = self.next_id;
             self.next_id += 1;
             self.undo_stack.appendAssumeCapacity(tx.*);

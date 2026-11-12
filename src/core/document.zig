@@ -36,10 +36,23 @@ pub const EditOptions = struct {
     after: []const Selection = &.{},
 };
 
+/// Whether a transaction was just applied (an edit or a redo) or taken back.
+pub const Direction = enum { applied, reverted };
+
+/// Something that holds positions in a document and has to move them when
+/// the text changes: another pane's cursors, a search result list.
+pub const Observer = struct {
+    ptr: *anyopaque,
+    onChange: *const fn (ptr: *anyopaque, tx: *const Transaction, direction: Direction) void,
+};
+
 pub const Document = struct {
     allocator: Allocator,
     buffer: Buffer,
     history: history.History,
+    observers: std.ArrayList(Observer) = .empty,
+    /// How lines end in the file. In memory they always end in `\n`.
+    line_ending: @import("text.zig").LineEnding = .lf,
     /// Incremented on every change to the text, including undo and redo.
     /// Caches (syntax state, search matches, wrapped rows) compare against it.
     revision: u64 = 0,
@@ -53,9 +66,28 @@ pub const Document = struct {
     }
 
     pub fn deinit(self: *Document) void {
+        self.observers.deinit(self.allocator);
         self.history.deinit();
         self.buffer.deinit();
         self.* = undefined;
+    }
+
+    pub fn observe(self: *Document, observer: Observer) !void {
+        try self.observers.append(self.allocator, observer);
+    }
+
+    pub fn unobserve(self: *Document, ptr: *anyopaque) void {
+        for (self.observers.items, 0..) |o, i| {
+            if (o.ptr == ptr) {
+                _ = self.observers.orderedRemove(i);
+                return;
+            }
+        }
+    }
+
+    fn notify(self: *Document, tx: *const Transaction, direction: Direction) void {
+        self.revision += 1;
+        for (self.observers.items) |o| o.onChange(o.ptr, tx, direction);
     }
 
     pub fn len(self: *const Document) usize {
@@ -114,15 +146,14 @@ pub const Document = struct {
         try tx.before.appendSlice(self.allocator, options.before);
         try tx.after.appendSlice(self.allocator, options.after);
 
-        // Reserve for the changes and for taking them back, so that a failure
-        // to record the step can always be rolled back.
-        try self.buffer.reserve(2 * tx.changes.items.len, 2 * tx.pieces.items.len);
+        // Everything that can fail happens before the text changes: room in
+        // the piece list, room in the history. After that the edit is three
+        // steps that cannot fail, so it is all or nothing by construction.
+        try self.buffer.reserve(tx.changes.items.len, tx.pieces.items.len);
+        try self.history.reserve(&tx);
         tx.apply(&self.buffer) catch unreachable;
-        self.history.push(&tx) catch |err| {
-            tx.revert(&self.buffer) catch unreachable;
-            return err;
-        };
-        self.revision += 1;
+        self.notify(&tx, .applied);
+        self.history.push(&tx);
         return true;
     }
 
@@ -131,14 +162,14 @@ pub const Document = struct {
     /// other views of the document remap with `Transaction.unmap`.
     pub fn undo(self: *Document) !?*const Transaction {
         const tx = try self.history.undo(&self.buffer) orelse return null;
-        self.revision += 1;
+        self.notify(tx, .reverted);
         return tx;
     }
 
     /// Redo the last undone step; restore `after`, remap others with `map`.
     pub fn redo(self: *Document) !?*const Transaction {
         const tx = try self.history.redo(&self.buffer) orelse return null;
-        self.revision += 1;
+        self.notify(tx, .applied);
         return tx;
     }
 };

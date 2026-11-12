@@ -10,11 +10,13 @@ pub const text = @import("text.zig");
 pub const selection = @import("selection.zig");
 pub const history = @import("history.zig");
 pub const document = @import("document.zig");
+pub const view = @import("view.zig");
 
 pub const Buffer = buffer.Buffer;
 pub const Selection = selection.Selection;
 pub const Document = document.Document;
 pub const Edit = document.Edit;
+pub const View = view.View;
 
 test {
     _ = buffer;
@@ -22,4 +24,5 @@ test {
     _ = selection;
     _ = history;
     _ = document;
+    _ = view;
 }
