@@ -198,7 +198,7 @@ real-terminal smoke test per OS for the platform layer.
 
 ## What the core looks like now
 
-Step 2 is in `src/core/`, about 4,900 lines with tests, and compiles on its
+Step 2 is in `src/core/`, about 5,100 lines with tests (width table included), and compiles on its
 own (`zig build test-core`) with no libc and no OS layer.
 
 | File | What it is |
