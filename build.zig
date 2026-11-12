@@ -94,4 +94,17 @@ pub fn build(b: *std.Build) void {
     });
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+
+    // The text model on its own: no libc, no OS layer, no terminal. Its module
+    // root is src/core, so it cannot import anything outside that directory.
+    const core_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/core.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const core_step = b.step("test-core", "Run the text model's tests");
+    core_step.dependOn(&b.addRunArtifact(core_tests).step);
+    test_step.dependOn(core_step);
 }
