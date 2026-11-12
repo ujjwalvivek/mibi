@@ -203,9 +203,10 @@ CI runs the unit tests on Linux, macOS and Windows and the size gate on all
 five targets. The screen tests moved from ConPTY-only Python to an in-process
 harness (`src/app/test.zig`: events in, cell grid out) that runs everywhere.
 One of them fails every allocation in turn across a long editing scenario and
-checks that nothing crashes or leaks. A real-terminal smoke test per OS for
-the platform layer is still to do; today that layer is covered by the pure
-decoder and translator tests and by running the editor by hand in a pty.
+checks that nothing crashes or leaks. `tools/smoke.py` then runs the built binary in a pseudo-terminal on Linux and
+macOS and checks what no in-process test can: raw mode, real escape sequences,
+a resize, a save, and the terminal handed back on exit. Windows has no pty to
+script from CI; there the platform layer is covered by the translator tests.
 
 ## Not changing, on purpose
 
@@ -306,9 +307,9 @@ passing. The old code keeps working until the step that replaces it lands.
    point; `pty.zig`, the old `editor.zig`, `buffer.zig`, `regex.zig`,
    `render.zig` and `keys.zig` are gone.
 4. **Phase 6 and release:** bracketed paste, soft wrap, atomic save, line
-   operations, comment toggle, bracket matching and the command filter are
-   done. Left: packaging,
-   README and changelog checked against the code, tagged release.
+   operations, comment toggle, bracket matching, the command filter and
+   packaging (`tools/package.sh`, a release workflow on tags) are done.
+   Left: the tag.
 
 ## Open questions
 

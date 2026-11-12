@@ -31,6 +31,19 @@ toolchain (0.16.0) is fetched into `tools/zig` on first use.
 .\build.ps1 -Dtarget=x86_64-linux-gnu   # cross-compile
 ```
 
+On Linux and macOS, with Zig 0.16.0 on the path:
+
+```sh
+zig build                  # -> zig-out/bin/mibi (ReleaseSmall)
+zig build test             # every layer's tests
+tools/check-size.sh        # build all five targets and check the size budgets
+tools/package.sh           # release archives for all five targets in dist/
+```
+
+Pushing a tag `v<version>` runs the tests on three systems, builds the
+archives and attaches them to a GitHub release
+(`.github/workflows/release.yml`).
+
 ## Configuration
 
 `.build.ps1` seeds `zig-out\bin\mibi.ini` from `config/mibi.ini.example` the first
@@ -42,6 +55,7 @@ to a default. Unknown keys are ignored.
 [editor]
 tab_width = 2
 line_numbers = false
+soft_wrap = true
 syntax = true
 
 [theme]
@@ -109,7 +123,7 @@ packaging.
 | ------------------------- | ------------------------------------------------------------------------------------------- |
 | _type_                    | insert text                                                                                 |
 | `Enter`                   | new line                                                                                    |
-| `Tab`                     | insert 4 spaces                                                                             |
+| `Tab`                     | indent by `tab_width` spaces (the selected lines, if there is a selection)                  |
 | `Backspace` / `Delete`    | delete before / after the cursor                                                            |
 | arrows                    | move                                                                                        |
 | `Ctrl+arrows`             | move by word                                                                                |
@@ -208,7 +222,8 @@ packaging.
   (`sort`, `jq .`, `column -t`, a pipeline) and is replaced by what it
   prints, as one undo step. This stands in for a plugin system. A command
   that fails, or runs longer than 10 seconds, changes nothing.
-- Line numbers, status bar (name, dirty `[+]`, cursor, line count, size).
+- Line numbers, status bar (name, dirty `[+]`, line and column, line count,
+  line ending, language, number of cursors).
 - Multiple cursors (`Ctrl+Alt+Up` / `Ctrl+Alt+Down`): typing, backspace and
   delete apply at every cursor, movement moves them together, `Esc` drops
   them. Extra cursors are drawn as blocks like the main one.
