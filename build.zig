@@ -6,6 +6,7 @@
 //!   zig build -Dtarget=x86_64-linux-gnu        -> cross-compile
 //!   zig build -Dtarget=aarch64-macos
 //!   zig build -Dtarget=x86_64-windows-gnu
+//!   zig build web                              -> zig-out/web (wasm + page)
 //!
 //! mibi has no third-party dependencies; only Zig's std. The toolchain itself
 //! is vendored in tools/zig by tools/get-zig.ps1, so nothing is installed
@@ -31,7 +32,7 @@ pub fn build(b: *std.Build) void {
     //   platform  OS and terminal              imports ui (for the event types)
     //   mibi      the application (src/*.zig)  imports all three
     const libc = target.result.os.tag != .windows;
-    const layers = Layers.create(b, target, optimize, libc);
+    const layers = Layers.create(b, target, optimize, "src/platform/platform.zig", libc);
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -94,36 +95,12 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // --- web -----------------------------------------------------------------
-    // The same editor compiled to wasm, with the platform layer replaced by
-    // the virtual filesystem in src/platform/web.zig. The host is a static
-    // page (web/index.html) that drives it through the exports in
-    // src/web_main.zig.
-    const web_target = b.resolveTargetQuery(.{
-        .cpu_arch = .wasm32,
-        .os_tag = .freestanding,
-    });
-    const web_core = b.createModule(.{
-        .root_source_file = b.path("src/core/core.zig"),
-        .target = web_target,
-        .optimize = optimize,
-        .single_threaded = true,
-    });
-    const web_ui = b.createModule(.{
-        .root_source_file = b.path("src/ui/ui.zig"),
-        .target = web_target,
-        .optimize = optimize,
-        .single_threaded = true,
-    });
-    web_ui.addImport("core", web_core);
-    const web_platform = b.createModule(.{
-        .root_source_file = b.path("src/platform/web.zig"),
-        .target = web_target,
-        .optimize = optimize,
-        .single_threaded = true,
-        .strip = true,
-        .unwind_tables = .none,
-    });
-    web_platform.addImport("ui", web_ui);
+    // The same layers compiled to wasm32-freestanding, with the platform
+    // module swapped for src/platform/web.zig (an in-memory filesystem and
+    // three host calls) and src/web_main.zig as the entry: exports the page
+    // calls, instead of a loop. `zig build web` installs a static site.
+    const web_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
+    const web_layers = Layers.create(b, web_target, optimize, "src/platform/web.zig", false);
     const web_mod = b.createModule(.{
         .root_source_file = b.path("src/web_main.zig"),
         .target = web_target,
@@ -132,39 +109,27 @@ pub fn build(b: *std.Build) void {
         .strip = true,
         .unwind_tables = .none,
     });
-    web_mod.addImport("core", web_core);
-    web_mod.addImport("ui", web_ui);
-    web_mod.addImport("platform", web_platform);
-    const web_exe = b.addExecutable(.{
-        .name = "mibi",
-        .root_module = web_mod,
-    });
-    web_exe.entry = .disabled;
+    web_layers.addTo(web_mod);
+    const web_exe = b.addExecutable(.{ .name = "mibi", .root_module = web_mod });
+    web_exe.entry = .disabled; // no _start: the page calls the exports
     web_exe.rdynamic = true;
 
-    const web_step = b.step("web", "Build the WebAssembly editor and its static host into zig-out/web");
-    web_step.dependOn(&b.addInstallFile(web_exe.getEmittedBin(), "web/mibi.wasm").step);
-    web_step.dependOn(&b.addInstallFile(b.path("web/index.html"), "web/index.html").step);
-    web_step.dependOn(&b.addInstallFile(b.path("web/main.js"), "web/main.js").step);
-    web_step.dependOn(&b.addInstallFile(b.path("web/vendor/xterm.js"), "web/xterm.js").step);
-    web_step.dependOn(&b.addInstallFile(b.path("web/vendor/xterm.css"), "web/xterm.css").step);
-    web_step.dependOn(&b.addInstallFile(b.path("web/vendor/addon-fit.js"), "web/addon-fit.js").step);
-    web_step.dependOn(&b.addInstallFile(b.path("web/vendor/LICENSE.xterm"), "web/LICENSE.xterm").step);
-    web_step.dependOn(&b.addInstallFile(b.path("web/vendor/LICENSE.addon-fit"), "web/LICENSE.addon-fit").step);
-    web_step.dependOn(&b.addInstallFile(b.path("web/vendor/MapleMono-NF-Regular.woff2"), "web/MapleMono-NF-Regular.woff2").step);
-    web_step.dependOn(&b.addInstallFile(b.path("web/vendor/LICENSE.MapleMono-NF.txt"), "web/LICENSE.MapleMono-NF.txt").step);
-    web_step.dependOn(&b.addInstallFile(b.path("config/mibi.ini.example"), "web/mibi.ini.example").step);
-    web_step.dependOn(&b.addInstallDirectory(.{
-        .source_dir = b.path("syntax.d"),
-        .install_dir = .prefix,
-        .install_subdir = "web/syntax.d",
-    }).step);
-    web_step.dependOn(&b.addInstallDirectory(.{
-        .source_dir = b.path("themes"),
-        .install_dir = .prefix,
-        .install_subdir = "web/themes",
-    }).step);
-    web_step.dependOn(&b.addInstallFile(b.path("web/assets.txt"), "web/assets.txt").step);
+    // web/site is the page as it is served; the data files come from the
+    // same directories the native build ships.
+    const web_step = b.step("web", "Build the WebAssembly editor and its page into zig-out/web");
+    const web_installs = [_]*std.Build.Step{
+        &b.addInstallFile(web_exe.getEmittedBin(), "web/mibi.wasm").step,
+        &b.addInstallDirectory(.{
+            .source_dir = b.path("web/site"),
+            .install_dir = .prefix,
+            .install_subdir = "web",
+        }).step,
+        &b.addInstallDirectory(.{ .source_dir = b.path("syntax.d"), .install_dir = .prefix, .install_subdir = "web/syntax.d" }).step,
+        &b.addInstallDirectory(.{ .source_dir = b.path("themes"), .install_dir = .prefix, .install_subdir = "web/themes" }).step,
+        &b.addInstallFile(b.path("config/mibi.ini.example"), "web/mibi.ini.example").step,
+        &b.addInstallFile(b.path("LICENSE"), "web/LICENSE").step,
+    };
+    for (web_installs) |step| web_step.dependOn(step);
 
     // `zig build test` runs the unit tests in the same sources. Tests build
     // in Debug unless told otherwise: the release mode turns off the bounds,
@@ -175,7 +140,7 @@ pub fn build(b: *std.Build) void {
         "Optimize mode for the tests (default Debug)",
     ) orelse .Debug;
     const test_step = b.step("test", "Run every layer's tests");
-    const test_layers = Layers.create(b, target, test_optimize, libc);
+    const test_layers = Layers.create(b, target, test_optimize, "src/platform/platform.zig", libc);
     const app_test_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -190,6 +155,13 @@ pub fn build(b: *std.Build) void {
         .{ .name = "test-ui", .about = "Run the widgets' tests", .module = test_layers.ui },
         .{ .name = "test-platform", .about = "Run the OS and terminal layer's tests", .module = test_layers.platform },
         .{ .name = "test-app", .about = "Run the application's tests", .module = app_test_mod },
+        // The web platform's filesystem has no host calls, so it is tested
+        // natively; the rest of the web build is tested from web/test.
+        .{ .name = "test-web", .about = "Run the web platform's filesystem tests", .module = b.createModule(.{
+            .root_source_file = b.path("src/platform/web/vfs.zig"),
+            .target = target,
+            .optimize = test_optimize,
+        }) },
     };
     for (suites) |suite| {
         const run = b.addRunArtifact(b.addTest(.{ .root_module = suite.module }));
@@ -208,23 +180,29 @@ const Layers = struct {
         b: *std.Build,
         target: std.Build.ResolvedTarget,
         optimize: std.builtin.OptimizeMode,
+        platform_root: []const u8,
         libc: bool,
     ) Layers {
+        // wasm has no threads; saying so drops the atomics and locks.
+        const single_threaded: ?bool = if (target.result.cpu.arch.isWasm()) true else null;
         const core = b.createModule(.{
             .root_source_file = b.path("src/core/core.zig"),
             .target = target,
             .optimize = optimize,
+            .single_threaded = single_threaded,
         });
         const ui = b.createModule(.{
             .root_source_file = b.path("src/ui/ui.zig"),
             .target = target,
             .optimize = optimize,
+            .single_threaded = single_threaded,
         });
         ui.addImport("core", core);
         const platform = b.createModule(.{
-            .root_source_file = b.path("src/platform/platform.zig"),
+            .root_source_file = b.path(platform_root),
             .target = target,
             .optimize = optimize,
+            .single_threaded = single_threaded,
             .link_libc = libc,
         });
         platform.addImport("ui", ui);

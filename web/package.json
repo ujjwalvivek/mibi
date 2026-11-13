@@ -1,8 +1,10 @@
 {
   "name": "mibi-web",
   "private": true,
-  "description": "Vendored xterm.js dependencies for the mibi web host",
+  "type": "module",
+  "description": "The mibi web host: vendored xterm.js, and the tests for the page's own code",
   "scripts": {
+    "test": "node --test test/web.test.mjs",
     "serve": "python -m http.server 8765 --directory ../zig-out/web"
   },
   "dependencies": {

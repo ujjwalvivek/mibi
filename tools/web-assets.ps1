@@ -1,4 +1,4 @@
-# Regenerate web/assets.txt, the list of syntax and theme files the web host
+# Regenerate web/site/assets.txt, the list of syntax and theme files the web host
 # fetches into the editor's virtual filesystem. Run it after adding a language
 # or a theme:
 #
@@ -19,6 +19,7 @@ Get-ChildItem (Join-Path $Root 'themes') -Filter *.ini |
     Sort-Object Name |
     ForEach-Object { $lines += "theme $($_.Name)" }
 
-$out = Join-Path $Root 'web/assets.txt'
-Set-Content -Encoding utf8 $out $lines
+$out = Join-Path $Root 'web/site/assets.txt'
+# No BOM: the host splits this file on blanks, and a BOM would ride along.
+[IO.File]::WriteAllText($out, ($lines -join "`n") + "`n")
 Write-Host "wrote $out ($($lines.Count) files)"

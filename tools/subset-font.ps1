@@ -9,9 +9,9 @@
 # Requires Python with fontTools and brotli:
 #   python -m pip install fonttools brotli
 #
-# The output is web/vendor/MapleMono-NF-Regular.woff2. The ranges are the
+# The output is web/site/vendor/MapleMono-NF-Regular.woff2. The ranges are the
 # editor's text plus the Nerd Font icons the file tree uses; see
-# web/vendor/LICENSE.MapleMono-NF.txt.
+# web/site/vendor/LICENSE.MapleMono-NF.txt.
 
 param(
     [string]$Source = "$env:LOCALAPPDATA\Microsoft\Windows\Fonts\MapleMono-NF-Regular.ttf"
@@ -19,7 +19,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path $PSScriptRoot -Parent
-$Out = Join-Path $Root 'web\vendor\MapleMono-NF-Regular.woff2'
+$Out = Join-Path $Root 'web\site\vendor\MapleMono-NF-Regular.woff2'
 
 if (-not (Test-Path $Source)) {
     throw "Font not found: $Source. Pass -Source with the MapleMono-NF-Regular.ttf path."

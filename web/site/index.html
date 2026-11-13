@@ -4,11 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>mibi</title>
-  <link rel="stylesheet" href="xterm.css">
+  <link rel="stylesheet" href="vendor/xterm.css">
   <style>
     @font-face {
       font-family: "Maple Mono NF";
-      src: url("MapleMono-NF-Regular.woff2") format("woff2");
+      src: url("vendor/MapleMono-NF-Regular.woff2") format("woff2");
       font-weight: 400;
       font-style: normal;
       font-display: swap;
@@ -76,9 +76,9 @@
         <button data-command="open" title="Find file (Ctrl+O)">Find file</button>
       </div>
       <div class="group">
-        <button id="new" title="New tab (Ctrl+T)">New</button>
-        <button id="close-tab" title="Close tab (Ctrl+W)">Close</button>
-        <button id="save" title="Save to the browser workspace (Ctrl+S)">Save</button>
+        <button data-command="new_tab" title="New tab (Ctrl+T)">New</button>
+        <button data-command="close_tab" title="Close tab (Ctrl+W)">Close</button>
+        <button data-command="save" title="Save (Ctrl+S)">Save</button>
         <button id="download" title="Download the current file">Download</button>
       </div>
       <div class="group">
@@ -124,41 +124,36 @@
   <div id="help" hidden>
     <h3>Web build: what is different</h3>
     <ul>
-      <li><strong>Files live in the browser or a real folder.</strong> In
-        Chromium, <em>Open folder</em> is a real folder and <em>Save</em> writes
-        back to it. Elsewhere, Open imports a snapshot into a virtual
-        workspace; use <em>Download</em> to put the current file on disk.</li>
+      <li><strong>Files.</strong> In Chromium-based browsers, <em>Open folder</em>
+        is a real folder: saves go to disk, and changes made elsewhere show up
+        within a few seconds (a tab with unsaved changes keeps them). If a file
+        changed on disk after the editor read it, a save does not overwrite it:
+        the tab stays unsaved and the next save does. Other browsers import a
+        copy that lives in this browser; <em>Download</em> writes the current
+        file out.</li>
       <li><strong>No external commands.</strong> Formatters (<code>F4</code>) and
-        the filter (<code>Alt+X</code>) need to spawn a process, which a browser
-        cannot do.</li>
-      <li><strong>No automatic live reload.</strong> In a real folder, use
-        <em>Refresh</em> to pick up changes made outside the editor; a snapshot
-        cannot see them at all.</li>
-      <li><strong>Some browser shortcuts win.</strong> <code>Ctrl+W</code>,
-        <code>Ctrl+T</code>, <code>Ctrl+N</code>, <code>Ctrl+R</code>,
-        <code>F5</code> and <code>F12</code> are reserved by the browser; the
-        editor cannot always prevent them. The toolbar duplicates every editor
-        key that matters, including Find, Replace, splits, panes, tabs, Keys
-        and Quit.</li>
-      <li><strong>Kitty keyboard protocol is unavailable.</strong> xterm.js does
-        not implement it, so <code>kitty_keys</code> has no effect here.</li>
-      <li><strong>The terminal font is bundled.</strong> The page uses a WOFF2
-        subset of Maple Mono NF, so the file tree's Nerd Font icons work without
-        installing anything. Glyphs outside the subset fall back to the
-        browser's fonts.</li>
-      <li><strong>Storage is small.</strong> Snapshot workspaces and sessions
-        are kept in <code>localStorage</code> (about 5 MB); a real folder's
-        files are on disk. Download important snapshot files.</li>
+        the filter (<code>Alt+X</code>) run programs, which a page cannot.</li>
+      <li><strong>Some keys belong to the browser.</strong> <code>Ctrl+W</code>,
+        <code>Ctrl+T</code>, <code>Ctrl+N</code> and a few more never reach the
+        page. The toolbar has every editor key that matters.</li>
+      <li><strong>No kitty keyboard protocol.</strong> xterm.js does not
+        implement it, so <code>kitty_keys</code> has no effect.</li>
+      <li><strong>One tab at a time.</strong> A second tab offers to take the
+        editor over, so two never overwrite each other's session.</li>
+      <li><strong>Storage.</strong> The session, unsaved text and imported
+        files are kept in this browser's private storage (OPFS). Clearing the
+        site's data clears them.</li>
     </ul>
-    <p class="muted">Terminal font: Maple Mono NF (subset), OFL-1.1; see
-      <a href="LICENSE.MapleMono-NF.txt">LICENSE.MapleMono-NF.txt</a>.
-      xterm.js and its fit addon are MIT licensed; see
-      <a href="LICENSE.xterm">LICENSE.xterm</a> and
-      <a href="LICENSE.addon-fit">LICENSE.addon-fit</a>.</p>
+    <p>Settings: <code>/mibi.ini</code>, or a <code>mibi.ini</code> in your
+      folder. Licences: <a href="LICENSE">mibi</a> (MIT),
+      <a href="vendor/LICENSE.xterm">xterm.js</a> and
+      <a href="vendor/LICENSE.addon-fit">its fit addon</a> (MIT), and the
+      terminal font, a subset of Maple Mono NF
+      (<a href="vendor/LICENSE.MapleMono-NF.txt">OFL-1.1</a>).</p>
   </div>
 
-  <script src="xterm.js"></script>
-  <script src="addon-fit.js"></script>
-  <script src="main.js"></script>
+  <script src="vendor/xterm.js"></script>
+  <script src="vendor/addon-fit.js"></script>
+  <script type="module" src="main.js"></script>
 </body>
 </html>

@@ -2,7 +2,7 @@ Maple Mono NF
 =============
 
 The web build bundles a WOFF2 subset of Maple Mono NF, used as the terminal
-font (the CSS family is "mibi Mono"). The subset covers Basic Latin, Latin-1,
+font (the CSS family is "Maple Mono NF"). The subset covers Basic Latin, Latin-1,
 general punctuation, arrows, box drawing, block elements, geometric shapes, the
 Nerd Font icon ranges used by the file tree, and variation selectors. It was
 generated with `fontTools.subset` from `MapleMono-NF-Regular.ttf`.

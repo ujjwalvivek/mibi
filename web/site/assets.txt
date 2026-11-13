@@ -69,11 +69,11 @@ theme nightfox.ini
 theme nord.ini
 theme one-dark.ini
 theme oxocarbon.ini
+theme rose-pine.ini
 theme rose-pine-dawn.ini
 theme rose-pine-moon.ini
-theme rose-pine.ini
 theme solarized-dark.ini
-theme tokyonight-storm.ini
 theme tokyonight.ini
+theme tokyonight-storm.ini
 theme vs-dark.ini
 theme vs-light.ini
