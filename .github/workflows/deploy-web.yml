@@ -23,11 +23,17 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+      # Never deploy a page whose own code fails its tests.
+      - run: zig build test-web
       - run: zig build web
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: node --test web/test/web.test.mjs
       - uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
