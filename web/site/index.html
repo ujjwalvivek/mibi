@@ -61,6 +61,7 @@
     .brand img { width: 22px; height: 22px; display: block; }
     .brand div { min-width: 0; }
     .brand h1 { margin: 0; font-size: 14px; line-height: 1.1; font-weight: 700; letter-spacing: 0.02em; }
+    .status[hidden] { display: none; }
     .status { margin: 1px 0 0; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .dot { display: inline-block; width: 6px; height: 6px; margin: 0 6px 1px 0; border-radius: 50%; background: var(--faint); vertical-align: middle; }
     .status[data-tone="ok"] .dot { background: var(--ok); }
@@ -86,10 +87,10 @@
     button:hover kbd { color: var(--muted); }
 
     /* --- the editor -------------------------------------------------------- */
-    /* The editor's own bars run edge to edge, as in a terminal window: no
-       padding, and no xterm scrollbar (there is no scrollback to scroll; the
+    /* A small inset on the left, as a terminal window keeps, and no xterm
+       scrollbar (there is no scrollback to scroll; the
        wheel goes to the editor as mouse reports). */
-    #terminal { flex: 1; min-height: 0; overflow: hidden; background: var(--ground); }
+    #terminal { flex: 1; min-height: 0; overflow: hidden; padding-left: 8px; background: var(--ground); }
     #terminal .xterm { height: 100%; }
     #terminal .xterm-viewport { background: var(--ground) !important; overflow-y: hidden !important; scrollbar-width: none; }
     #terminal .xterm-viewport::-webkit-scrollbar { display: none; }
@@ -147,7 +148,7 @@
         <img src="mibi.svg" alt="">
         <div>
           <h1>mibi</h1>
-          <p class="status" id="status" data-tone="idle"><span class="dot"></span><span id="status-text">starting</span></p>
+          <p class="status" id="status" data-tone="idle" hidden><span class="dot"></span><span id="status-text"></span></p>
         </div>
       </div>
       <nav class="actions" aria-label="mibi">

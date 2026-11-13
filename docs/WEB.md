@@ -168,13 +168,12 @@ the first then saves and stops, so two never overwrite each other's session.
 ## The page
 
 The page follows the house style for browser tools (UV Web Tools, Monochrome
-ground). One 40px top bar holds the mark, the name, a status line saying where
-the files are and how they are (`files kept in this browser`, `projA · in
-sync with the folder`, `needs permission; saves wait`, with a dot whose colour
-always comes with those words), and a few actions: Open files, Download,
-Commands (the palette), Keys, `?` and one accent action, Open folder. Keys and
-`?` open floating panels; Escape or a click elsewhere closes them and gives the
-editor its keys back. Everything else is the editor.
+ground). One 40px top bar holds the mark and the name, a status line only when there
+is something to say (the open folder's name, or a problem such as `needs
+permission; saves wait`, with a dot whose colour always comes with words),
+and a few actions: Open files, Download, Commands (the palette), Keys, `?` and
+one accent action, Open folder. Keys and `?` open floating panels; Escape or a
+click elsewhere closes them and gives the editor its keys back. Everything else is the editor.
 
 The page uses the editor's own accent, the green of its status bar, and sets
 everything in the terminal's font, Maple Mono NF, so chrome and editor read as

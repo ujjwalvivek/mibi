@@ -93,7 +93,7 @@ async function boot() {
 
     await seedAssets();
     if (handle) await attachFolder(handle);
-    else setStatus("files kept in this browser", "ok");
+    else setStatus("");
     // Outside /workspace, so it is never mistaken for the user's files.
     if (!saved && !handle) editor.put("/welcome.txt", welcome);
     editor.clean();
@@ -422,7 +422,8 @@ function persist() {
       persistAgain = true;
       if (!storageFailed) say(`could not keep the session in this browser (${err?.name || err})`);
       storageFailed = true;
-      ui.statusText.textContent = `${workspaceStatus[0]} · session not stored (${err?.name || err})`;
+      ui.statusText.textContent = [workspaceStatus[0], `session not stored (${err?.name || err})`].filter(Boolean).join(" · ");
+      ui.status.hidden = false;
       ui.status.dataset.tone = "danger";
     });
   return saving;
@@ -449,6 +450,8 @@ let storageFailed = false;
 function setStatus(text, tone = "idle") {
   workspaceStatus = [text, tone];
   if (storageFailed) return;
+  // Only when there is something to say: the folder, or a problem.
+  ui.status.hidden = !text;
   ui.statusText.textContent = text;
   ui.status.dataset.tone = tone;
   ui.status.title = text;
@@ -482,7 +485,7 @@ async function attachFolder(handle) {
   pendingHandle = null;
   const report = await folder.scan();
   editor.track(true);
-  setStatus(`${handle.name} · in sync with the folder`, "ok");
+  setStatus(handle.name, "ok");
   ui.closeFolder.hidden = false;
   if (folder.truncated) say(`${handle.name}: only the first ${folder.options.maxFiles} files were read`);
   else if (report.skipped) say(`${handle.name}: ${report.skipped} binary or large files are not shown`);
@@ -497,7 +500,7 @@ async function reconnectFolder() {
     pendingHandle = null;
     await folder.scan();
     ui.reconnect.hidden = true;
-    setStatus(`${handle.name} · in sync with the folder`, "ok");
+    setStatus(handle.name, "ok");
     editor.tick();
     // Saves made while it was away are still recorded: write them now.
     pushFolder();
