@@ -27,6 +27,8 @@ x86_64-macos:220
 aarch64-macos:232
 x86_64-windows-gnu:264
 "
+# The browser build (zig build web), in KB; see check-size.ps1.
+wasm_budget=208
 
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
@@ -52,6 +54,21 @@ for entry in $targets; do
     fi
     printf '%-20s %9s %9s  %s\n' "$t" "$size" "$budget" "$status"
 done
+
+budget=$((wasm_budget * KB))
+if ! log=$($ZIG build web -p "$out/wasm32" 2>&1); then
+    echo "BUILD FAILED: wasm32"
+    echo "$log" | tail -8 | sed 's/^/  /'
+    failed=1
+else
+    size=$(wc -c < "$out/wasm32/web/mibi.wasm" | tr -d ' ')
+    status=ok
+    if [ "$size" -gt "$budget" ] || [ "$size" -gt "$ceiling" ]; then
+        status=OVER
+        failed=1
+    fi
+    printf '%-20s %9s %9s  %s\n' wasm32 "$size" "$budget" "$status"
+fi
 
 if [ "$failed" -ne 0 ]; then
     echo "size gate: FAILED"

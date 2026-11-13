@@ -37,6 +37,9 @@ if (-not (Test-Path $Zig)) {
 # on 16 KB pages, so a few hundred bytes of new code can step the file up by a
 # whole page (adding the Unix file stamp moved it 200,616 from 184,200 while
 # the x86_64-macos build grew 65 bytes for the same change).
+#
+# wasm32 is the browser build (`zig build web`), set at 201,124 bytes when
+# the web platform was reworked for 0.2.0.
 $targets = [ordered]@{
     'x86_64-linux-gnu'   = @{ budget = 208 * $KB; exe = 'mibi' }
     'aarch64-linux-gnu'  = @{ budget = 184 * $KB; exe = 'mibi' }
@@ -44,6 +47,7 @@ $targets = [ordered]@{
     'aarch64-macos'      = @{ budget = 232 * $KB; exe = 'mibi' }
     'x86_64-windows'     = @{ budget = 264 * $KB; exe = 'mibi.exe' }
     'x86_64-windows-gnu' = @{ budget = 264 * $KB; exe = 'mibi.exe' }
+    'wasm32'             = @{ budget = 208 * $KB; exe = '..\web\mibi.wasm'; build = @('web') }
 }
 
 $rows = @()
@@ -63,7 +67,8 @@ foreach ($t in $targets.Keys) {
                 continue
             }
         }
-        $out = & $Zig build "-Dtarget=$t" 2>&1
+        $buildArgs = @(if ($spec.build) { $spec.build } else { "-Dtarget=$t" })
+        $out = & $Zig build @buildArgs 2>&1
         if ($LASTEXITCODE -ne 0) {
             Write-Host "BUILD FAILED: $t" -ForegroundColor Red
             $out | Select-Object -Last 8 | ForEach-Object { Write-Host "  $_" }

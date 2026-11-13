@@ -28,7 +28,13 @@ jobs:
           version: 0.16.0
       - run: zig build test
       - run: zig build
+      # The browser build, driven through the page's own host code with an
+      # in-memory folder standing in for the File System Access API.
       - run: zig build web
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test web/test/web.test.mjs
       # The real thing in a pseudo-terminal: raw mode, the run loop, resize,
       # save, and the terminal handed back. (Windows has no pty to script.)
       - if: runner.os != 'Windows'
