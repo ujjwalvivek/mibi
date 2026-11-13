@@ -50,7 +50,7 @@ pub fn build(b: *std.Build) void {
         .name = "mibi",
         .root_module = exe_mod,
     });
-    // Windows builds carry the app icon (assets/mibi.ico) as a resource, and
+    // Windows builds carry the app icon (assets/icons/mibi.ico) as a resource, and
     // use a message box when started without a terminal.
     if (target.result.os.tag == .windows) {
         exe_mod.addWin32ResourceFile(.{ .file = b.path("assets/mibi.rc") });
@@ -60,12 +60,12 @@ pub fn build(b: *std.Build) void {
     // Packaging assets: icons under share/mibi/icons, the Windows Terminal
     // profile under share/mibi/windows-terminal.
     b.installDirectory(.{
-        .source_dir = b.path("assets/png"),
+        .source_dir = b.path("assets/icons/png"),
         .install_dir = .prefix,
         .install_subdir = "share/mibi/icons/png",
     });
-    b.installFile("assets/mibi.ico", "share/mibi/icons/mibi.ico");
-    b.installFile("assets/mibi.svg", "share/mibi/icons/mibi.svg");
+    b.installFile("assets/icons/mibi.ico", "share/mibi/icons/mibi.ico");
+    b.installFile("assets/icons/mibi.svg", "share/mibi/icons/mibi.svg");
     b.installFile("LICENSE", "share/mibi/LICENSE");
     b.installDirectory(.{
         .source_dir = b.path("assets/windows-terminal"),
@@ -128,7 +128,7 @@ pub fn build(b: *std.Build) void {
         &b.addInstallDirectory(.{ .source_dir = b.path("themes"), .install_dir = .prefix, .install_subdir = "web/themes" }).step,
         &b.addInstallFile(b.path("config/mibi.ini.example"), "web/mibi.ini.example").step,
         &b.addInstallFile(b.path("LICENSE"), "web/LICENSE").step,
-        &b.addInstallFile(b.path("assets/mibi.svg"), "web/mibi.svg").step,
+        &b.addInstallFile(b.path("assets/icons/mibi.svg"), "web/mibi.svg").step,
     };
     for (web_installs) |step| web_step.dependOn(step);
 

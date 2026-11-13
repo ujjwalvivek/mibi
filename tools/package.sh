@@ -51,6 +51,7 @@ for entry in $targets; do
     cp config/mibi.ini.example "$stage/mibi.ini.example"
     case "$t" in
     *windows*)
+        cp -R assets/icons "$stage/icons"
         cp -R assets/windows-terminal "$stage/windows-terminal"
         (cd "$work/stage" && zip -q -r "$dist/$name.zip" "$name")
         ;;

@@ -1,6 +1,6 @@
 # mibi
 
-<img src="assets/png/mibi-128.png" width="96" alt="mibi">
+<img src="assets/icons/png/mibi-128.png" width="96" alt="mibi">
 
 A tiny, modern terminal text editor. Non-modal, in the spirit of nano/micro,
 built in Zig with no third-party dependencies.
@@ -135,7 +135,7 @@ then exits.
 
 ## Icons
 
-`assets/` holds the app icon (`mibi.svg`, `mibi.ico` and PNGs from 16 to
+`assets/icons/` holds the app icon (`mibi.svg`, `mibi.ico` and PNGs from 16 to
 1024 px). Windows builds embed `mibi.ico` as a resource, and
 `.\build.ps1` installs the icons under `zig-out/share/mibi/icons` for
 packaging.

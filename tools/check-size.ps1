@@ -8,7 +8,7 @@
 #   .\tools\check-size.ps1 -NoBuild     # check whatever is already in zig-out
 #
 # A budget jump almost always means a size trap crept back in: a fallible
-# `main`, `std.debug`, or `std.Io.Threaded` (see experiments/README.md).
+# `main`, `std.debug`, or `std.Io.Threaded` (see docs/SIZE.md).
 
 [CmdletBinding()]
 param([switch]$NoBuild)

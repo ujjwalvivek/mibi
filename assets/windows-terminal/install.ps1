@@ -30,16 +30,10 @@ if ($Font) {
 }
 Set-Content -Path (Join-Path $dest 'mibi.json') -Value $json -Encoding UTF8
 
-$iconCandidates = @(
-    (Join-Path $PSScriptRoot '..\icons\png\mibi-128.png'),
-    (Join-Path $PSScriptRoot '..\png\mibi-128.png')
-)
-$icoCandidates = @(
-    (Join-Path $PSScriptRoot '..\icons\mibi.ico'),
-    (Join-Path $PSScriptRoot '..\mibi.ico')
-)
-foreach ($c in $iconCandidates) { if (Test-Path $c) { Copy-Item $c $dest -Force; break } }
-foreach ($c in $icoCandidates) { if (Test-Path $c) { Copy-Item $c $dest -Force; break } }
+$icon = Join-Path $PSScriptRoot '..\icons\png\mibi-128.png'
+$ico = Join-Path $PSScriptRoot '..\icons\mibi.ico'
+if (Test-Path $icon) { Copy-Item $icon $dest -Force }
+if (Test-Path $ico) { Copy-Item $ico $dest -Force }
 
 Write-Host "Installed the mibi profile in $dest"
 if ($Exe) { Write-Host "  commandline: $Exe" } else { Write-Host "  commandline: mibi.exe (put it on PATH or pass -Exe)" }

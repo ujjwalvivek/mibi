@@ -56,7 +56,7 @@ if ($licence) { Copy-Item $licence (Join-Path $Target 'LICENSE') -Force }
 # The vector icon is handy for shortcuts and docs; nothing else is copied.
 $svg = @(
     (Join-Path $src '..\share\mibi\icons\mibi.svg'),
-    (Join-Path $Root 'assets\mibi.svg')
+    (Join-Path $Root 'assets\icons\mibi.svg')
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($svg) { Copy-Item $svg (Join-Path $Target 'mibi.svg') -Force }
 
@@ -76,7 +76,7 @@ if ($fragSrc) {
     Set-Content -Path (Join-Path $fragDest 'mibi.json') -Value $json -Encoding UTF8
     foreach ($icon in @(
         (Join-Path $src '..\share\mibi\icons\png\mibi-128.png'),
-        (Join-Path $Root 'assets\png\mibi-128.png')
+        (Join-Path $Root 'assets\icons\png\mibi-128.png')
     )) {
         if (Test-Path $icon) { Copy-Item $icon $fragDest -Force; break }
     }

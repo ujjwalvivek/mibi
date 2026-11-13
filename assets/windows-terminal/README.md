@@ -1,10 +1,15 @@
 # Windows Terminal profile
 
-A terminal app cannot draw or remove the window chrome — the window belongs to
-the terminal emulator. What mibi *can* do is make sure it opens **inside your
-configured terminal** (with your profile, font, colours and icon) instead of a
-bare `conhost` window, and set the tab title so the chrome reads
-`mibi - notes.txt`.
+This folder is optional Windows packaging. It is not used by the editor at
+runtime; it makes sure mibi opens **inside your configured terminal** (with
+your profile, font, colours and icon) instead of a bare `conhost` window, and
+sets the tab title so the chrome reads `mibi - notes.txt`.
+
+| File | What it is |
+| --- | --- |
+| `mibi.json` | A Windows Terminal **fragment**: the `mibi` profile and its colour scheme. The icon path is inside the installed fragment folder. |
+| `install.ps1` | Copies the fragment under `% LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\mibi`, fills in the built `mibi.exe` path and the font face, and copies the 128 px icon and `.ico`. Per-user, no admin. |
+| `mibi.cmd` | A development launcher for a source checkout: runs `zig-out\bin\mibi.exe` through `wt.exe` when Windows Terminal is installed, otherwise directly. |
 
 ## Install the profile (per user, no admin)
 
@@ -17,8 +22,12 @@ This copies `mibi.json` and the icons into
 Terminal and "mibi" appears in the profile dropdown (and in the new-tab menu)
 with its own colour scheme matching `mibi.ini`'s defaults.
 
-If `mibi.exe` is not on your `PATH`, edit `commandline` in `mibi.json` to the
-full path of the executable.
+If `mibi.exe` is not on your `PATH`, pass `-Exe` or edit `commandline` in
+`mibi.json` to the full path of the executable.
+
+The profile defaults to the `Maple Mono NF` face. If the file tree's Nerd Font
+icons clip in Windows Terminal, install the mono-icon variant (NFo/NFMono) and
+pass it to the installer: `install.ps1 -Font 'Maple Mono NFo'`.
 
 ## Launching
 
@@ -52,3 +61,6 @@ gets to "custom chrome":
 - `"tabWidthMode": "compact"` — narrower tabs.
 - mibi draws its own tab bar (top row), status line and help panel, so the
   in-window chrome is already ours.
+
+The release archive includes this folder together with the `icons/` directory
+next to it, so `install.ps1` can find the artwork.

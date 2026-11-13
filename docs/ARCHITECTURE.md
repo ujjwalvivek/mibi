@@ -13,7 +13,7 @@ Measured at `d57e27a` (2026-11-06), the newest commit on GitHub.
 | --- | --- |
 | Only Windows compiled | `src/term.zig` passed a `u32` poll timeout where `std.posix.poll` takes `i32`; every Linux and macOS target failed |
 | Tests could not run on Unix | the test module in `build.zig` did not link libc |
-| 2 of 136 tests were Windows-only by accident | one wrote into `experiments/out/screens/`, one expected `findstr` output from `cat -n` |
+| 2 of 136 tests were Windows-only by accident | one wrote into a probe output directory, one expected `findstr` output from `cat -n` |
 | No CI | no `.github/`; the size gate and screen tests are PowerShell and ConPTY only |
 | `src/main.zig` is 4,506 of 12,108 lines | input decoding, prompts, session file, mouse, tabs, tree, pickers, help and all drawing in one file; 67 of the tests live there |
 | The plan and the repo disagree | `PLAN.md` describes v0.0.4; more than ten commits were reverted, leaving the repo between v0.0.2 and v0.0.3 with `src/pty.zig` still in it. Phase 5b and 6 are rebuilt from the plan, not recovered |
@@ -30,7 +30,7 @@ These were good decisions and the measurements still hold.
 
 - **Zig 0.16, std only, no dependencies.** The size floor and the two 480 KB
   traps (`main` returning an error, `std.Io.Threaded`) are real and documented
-  in `experiments/README.md`.
+  in [SIZE.md](SIZE.md).
 - **A raw OS layer** (`os.zig`): kernel32 on Windows, libc on Unix.
 - **A cell grid with a diff** as the renderer.
 - **Data, not code,** for languages (`syntax.d`), themes and config (INI).
