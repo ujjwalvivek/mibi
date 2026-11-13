@@ -128,6 +128,7 @@ pub fn build(b: *std.Build) void {
         &b.addInstallDirectory(.{ .source_dir = b.path("themes"), .install_dir = .prefix, .install_subdir = "web/themes" }).step,
         &b.addInstallFile(b.path("config/mibi.ini.example"), "web/mibi.ini.example").step,
         &b.addInstallFile(b.path("LICENSE"), "web/LICENSE").step,
+        &b.addInstallFile(b.path("assets/mibi.svg"), "web/mibi.svg").step,
     };
     for (web_installs) |step| web_step.dependOn(step);
 

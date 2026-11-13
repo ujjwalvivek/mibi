@@ -3,156 +3,230 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="mibi, a small terminal text editor, running in the browser. Private: files stay on your disk or in this browser.">
   <title>mibi</title>
+  <link rel="icon" href="mibi.svg" type="image/svg+xml">
   <link rel="stylesheet" href="vendor/xterm.css">
   <style>
+    /* UV Web Tools roles, Monochrome ground (house style), with mibi's one
+       accent: the green of the editor's own status bar. */
     @font-face {
       font-family: "Maple Mono NF";
       src: url("vendor/MapleMono-NF-Regular.woff2") format("woff2");
       font-weight: 400;
-      font-style: normal;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "Maple Mono NF";
+      src: url("vendor/MapleMono-NF-Bold.woff2") format("woff2");
+      font-weight: 700;
       font-display: swap;
     }
-    :root { color-scheme: dark; }
-    html, body { margin: 0; height: 100%; background: #0e0e0e; color: #d8dee9; }
-    body { font: 13px/1.4 "Maple Mono NF"; overflow: hidden; }
+    :root {
+      --ground: #0e0e0e;
+      --panel: #151515;
+      --raised: #222222;
+      --line: #202020;
+      --line-strong: #303030;
+      --text: #d8d8d8;
+      --muted: #a0a0a0;
+      --faint: #7a7a7a;
+      --accent: #8bd450;
+      --accent-ink: #0e0e0e;
+      --accent-soft: rgba(139, 212, 80, 0.12);
+      --accent-line: rgba(139, 212, 80, 0.4);
+      --danger: #d06c70;
+      --warn: #c49a5a;
+      --ok: var(--accent);
+      --mono: "Maple Mono NF", ui-monospace, "Cascadia Mono", Consolas, monospace;
+      --topbar-height: 40px;
+      --control: 28px;
+      --shadow-float: 0 20px 60px rgba(0, 0, 0, 0.28);
+      --ease: 0.15s ease;
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--ground); color: var(--text); }
+    body { font: 12px/1.45 var(--mono); overflow: hidden; }
     #app { display: flex; flex-direction: column; height: 100%; }
-    #bar {
-      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-      padding: 6px 10px; background: #1a1a24; border-bottom: 1px solid #2a2a38;
-      user-select: none;
+
+    /* --- ToolTopbar ------------------------------------------------------ */
+    .topbar {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      min-height: var(--topbar-height); padding: 6px 8px;
+      background: var(--panel); border-bottom: 1px solid var(--line);
     }
-    #bar .name { font-weight: 600; letter-spacing: .02em; margin-right: 4px; }
-    #bar .group {
-      display: flex; align-items: center; gap: 4px;
-      padding-right: 8px; border-right: 1px solid #3a3a4a;
+    .brand { display: flex; align-items: center; gap: 10px; flex: 1 1 160px; min-width: 160px; }
+    .brand img { width: 22px; height: 22px; display: block; }
+    .brand div { min-width: 0; }
+    .brand h1 { margin: 0; font-size: 14px; line-height: 1.1; font-weight: 700; letter-spacing: 0.02em; }
+    .status { margin: 1px 0 0; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .dot { display: inline-block; width: 6px; height: 6px; margin: 0 6px 1px 0; border-radius: 50%; background: var(--faint); vertical-align: middle; }
+    .status[data-tone="ok"] .dot { background: var(--ok); }
+    .status[data-tone="warn"] .dot { background: var(--warn); }
+    .status[data-tone="danger"] .dot { background: var(--danger); }
+    .actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .sep { width: 1px; height: 18px; background: var(--line-strong); margin: 0 2px; }
+
+    button {
+      font: inherit; font-size: 12px; color: var(--muted); background: none;
+      height: var(--control); padding: 0 10px; border: 1px solid var(--line-strong);
+      border-radius: 2px; cursor: pointer; white-space: nowrap;
+      transition: border-color var(--ease), background var(--ease), color var(--ease);
     }
-    #bar button {
-      font: inherit; color: #d8dee9; background: #282838; border: 1px solid #3a3a4a;
-      border-radius: 5px; padding: 4px 7px; cursor: pointer;
+    button:hover { color: var(--text); border-color: #4a4a4a; background: var(--raised); }
+    button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+    button[aria-expanded="true"] { color: var(--text); background: var(--accent-soft); border-color: var(--accent-line); }
+    button.primary { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); font-weight: 700; }
+    button.primary:hover { background: #a0df6c; border-color: #a0df6c; }
+    button.warn { color: var(--warn); border-color: rgba(196, 154, 90, 0.45); }
+    button.icon { width: var(--control); padding: 0; }
+    kbd { font: inherit; font-size: 10px; color: var(--faint); margin-left: 6px; }
+    button:hover kbd { color: var(--muted); }
+
+    /* --- the editor -------------------------------------------------------- */
+    #terminal { flex: 1; min-height: 0; padding: 4px 0 0 6px; }
+    #terminal .xterm { height: 100%; }
+    #terminal .xterm-viewport { background: var(--ground) !important; }
+
+    /* --- floating panels ---------------------------------------------------- */
+    .float {
+      position: fixed; z-index: 9; top: calc(var(--topbar-height) + 8px); right: 8px;
+      width: min(420px, calc(100vw - 16px)); max-height: calc(100vh - var(--topbar-height) - 24px); overflow: auto;
+      background: var(--panel); border: 1px solid var(--line-strong); box-shadow: var(--shadow-float);
+      padding: 14px 16px 16px;
     }
-    #bar button:hover { background: #333348; }
-    #bar .spacer { flex: 1; }
-    #bar .hint { color: #8892a4; font-size: 12px; }
-    #terminal { flex: 1; min-height: 0; }
-    #terminal .xterm { height: 100%; padding: 4px 6px 6px; }
-    #overlay {
-      position: fixed; inset: 0; display: grid; place-items: center;
-      background: rgba(14, 14, 14, .82); z-index: 10;
+    .float[hidden], #overlay[hidden] { display: none; }
+    .label { margin: 16px 0 6px; font-size: 9px; letter-spacing: 2px; text-transform: uppercase; color: var(--faint); }
+    .label:first-child { margin-top: 0; }
+    .float p, .float li { color: var(--muted); }
+    .float p { margin: 0 0 8px; }
+    .float strong { color: var(--text); font-weight: 400; }
+    .float em { font-style: normal; color: var(--text); }
+    .float ul { margin: 0; padding: 0; list-style: none; }
+    .float li { padding: 6px 0; border-top: 1px dashed var(--line-strong); }
+    .float li:first-child { border-top: 0; }
+    .float code { color: var(--text); }
+    .float a { color: var(--text); text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 2px; }
+    .float a:hover { text-decoration-color: var(--accent); }
+    .keys li { padding: 0; border: 0; }
+    .keys button {
+      display: flex; width: 100%; justify-content: space-between; align-items: center;
+      height: 26px; padding: 0 8px; border-color: transparent; color: var(--text);
     }
-    #overlay[hidden] { display: none; }
-    #overlay .box {
-      max-width: 560px; padding: 20px 22px; background: #1a1a24;
-      border: 1px solid #3a3a4a; border-radius: 8px; line-height: 1.5;
+    .keys button:hover { border-color: var(--line-strong); }
+    .keys kbd { font-size: 11px; color: var(--muted); }
+    .keys kbd.browser { text-decoration: line-through; color: var(--faint); }
+
+    /* --- dialogs ------------------------------------------------------------ */
+    #overlay { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; background: rgba(14, 14, 14, 0.82); }
+    .dialog {
+      width: min(460px, calc(100vw - 32px)); padding: 18px 20px 20px;
+      background: var(--panel); border: 1px solid var(--line-strong); box-shadow: var(--shadow-float);
     }
-    #overlay h2 { margin: 0 0 8px; font-size: 16px; }
-    #overlay p { margin: 0 0 12px; color: #b9c0cc; }
-    #overlay button.alt { color: #d8dee9; background: #282838; border: 1px solid #3a3a4a; margin-left: 6px; }
-    #overlay button {
-      font: inherit; color: #0e0e0e; background: #8bd450; border: 0;
-      border-radius: 5px; padding: 6px 12px; cursor: pointer;
-    }
-    #help {
-      position: fixed; right: 12px; bottom: 12px; width: min(460px, calc(100vw - 24px));
-      max-height: min(60vh, 520px); overflow: auto; padding: 14px 16px;
-      background: #1a1a24; border: 1px solid #3a3a4a; border-radius: 8px;
-      font-size: 12px; line-height: 1.5; z-index: 9;
-    }
-    #help[hidden] { display: none; }
-    #help h3 { margin: 0 0 6px; font-size: 13px; }
-    #help ul { margin: 0; padding-left: 18px; }
-    #help li { margin: 4px 0; }
-    #help code { color: #c6d0e0; }
+    .dialog h2 { margin: 0 0 8px; font-size: 14px; font-weight: 700; }
+    .dialog p { margin: 0 0 16px; color: var(--muted); }
+    .dialog .row { display: flex; gap: 8px; flex-wrap: wrap; }
     .hidden-file { display: none; }
+
+    @media (max-width: 720px) {
+      .wide, button kbd { display: none; }
+      .actions { flex: 1 1 100%; justify-content: flex-end; }
+    }
   </style>
 </head>
 <body>
   <div id="app">
-    <div id="bar">
-      <span class="name">mibi</span>
-      <div class="group">
-        <button id="open-files" title="Import files into the browser workspace">Open files</button>
-        <button id="open-folder" title="Open a real folder (Chromium) or import a snapshot">Open folder</button>
-        <button id="folder-action" title="Read the folder again now" hidden>Refresh</button>
-        <button id="close-folder" title="Back to the files kept in this browser" hidden>Close folder</button>
-        <button data-command="open" title="Find file (Ctrl+O)">Find file</button>
+    <header class="topbar">
+      <div class="brand">
+        <img src="mibi.svg" alt="">
+        <div>
+          <h1>mibi</h1>
+          <p class="status" id="status" data-tone="idle"><span class="dot"></span><span id="status-text">starting</span></p>
+        </div>
       </div>
-      <div class="group">
-        <button data-command="new_tab" title="New tab (Ctrl+T)">New</button>
-        <button data-command="close_tab" title="Close tab (Ctrl+W)">Close</button>
-        <button data-command="save" title="Save (Ctrl+S)">Save</button>
-        <button id="download" title="Download the current file">Download</button>
-      </div>
-      <div class="group">
-        <button data-command="find" title="Find (Ctrl+F)">Find</button>
-        <button data-command="replace" title="Replace all (Ctrl+R)">Replace</button>
-        <button data-command="goto" title="Go to line (Ctrl+G)">Go to</button>
-        <button data-command="command_palette" title="Command palette (Ctrl+P)">Palette</button>
-      </div>
-      <div class="group">
-        <button data-command="toggle_tree" title="File tree (Ctrl+B)">Tree</button>
-        <button data-command="split_columns" title="Split side by side (F5)">Split</button>
-        <button data-command="split_rows" title="Split stacked (F7)">Split down</button>
-        <button data-command="close_pane" title="Close the focused pane (Shift+F5)">Close pane</button>
-      </div>
-      <div class="group">
-        <button data-command="prev_tab" title="Previous tab (Ctrl+PgUp)">‹ Tab</button>
-        <button data-command="next_tab" title="Next tab (Ctrl+PgDn)">Tab ›</button>
-        <button data-command="prev_pane" title="Previous pane (Shift+F6)">‹ Pane</button>
-        <button data-command="next_pane" title="Next pane (F6)">Pane ›</button>
-      </div>
-      <div class="group">
-        <button data-command="help" title="Editor keys (F1)">Keys</button>
-        <button data-command="quit" title="Quit and save the session (Ctrl+Q)">Quit</button>
-      </div>
-      <span class="spacer"></span>
-      <span id="hint" class="hint">web build</span>
-      <button id="help-button" title="What the web build cannot do">?</button>
-    </div>
-    <div id="terminal"></div>
+      <nav class="actions" aria-label="mibi">
+        <button id="reconnect" class="warn" hidden>Reconnect</button>
+        <button id="close-folder" hidden title="Back to the files kept in this browser">Close folder</button>
+        <button id="open-files" class="wide" title="Copy files into this browser (or drop them on the page)">Open files</button>
+        <button id="download" class="wide" title="Download the focused file">Download</button>
+        <span class="sep wide"></span>
+        <button data-command="command_palette" title="Every command, by name">Commands<kbd>ctrl+p</kbd></button>
+        <button id="keys-button" aria-expanded="false" aria-controls="keys" title="Keys the browser keeps, and their stand-ins">Keys</button>
+        <button id="help-button" class="icon" aria-expanded="false" aria-controls="help" title="What is different in the browser">?</button>
+        <button id="open-folder" class="primary" title="Edit a folder on your disk">Open folder</button>
+      </nav>
+    </header>
+    <main id="terminal" aria-label="editor"></main>
   </div>
 
   <input id="file-input" class="hidden-file" type="file" multiple>
   <input id="folder-input" class="hidden-file" type="file" multiple webkitdirectory>
 
-  <div id="overlay" hidden>
-    <div class="box">
-      <h2 id="overlay-title">mibi</h2>
-      <p id="overlay-text"></p>
-      <button id="overlay-button">Reopen</button>
-      <button id="overlay-alt" class="alt" hidden></button>
-    </div>
+  <div id="keys" class="float keys" hidden>
+    <p class="label">instead of the browser's keys</p>
+    <ul>
+      <li><button data-command="new_tab"><span>New tab</span><span><kbd class="browser">ctrl+t</kbd><kbd>alt+t</kbd></span></button></li>
+      <li><button data-command="close_tab"><span>Close tab</span><span><kbd class="browser">ctrl+w</kbd><kbd>alt+w</kbd></span></button></li>
+      <li><button data-command="next_tab"><span>Next tab</span><span><kbd class="browser">ctrl+pgdn</kbd><kbd>alt+pgdn</kbd></span></button></li>
+      <li><button data-command="prev_tab"><span>Previous tab</span><span><kbd class="browser">ctrl+pgup</kbd><kbd>alt+pgup</kbd></span></button></li>
+    </ul>
+    <p class="label">the same as native</p>
+    <ul>
+      <li><button data-command="find"><span>Find</span><kbd>ctrl+f</kbd></button></li>
+      <li><button data-command="replace"><span>Replace</span><kbd>ctrl+r</kbd></button></li>
+      <li><button data-command="goto"><span>Go to line</span><kbd>ctrl+g</kbd></button></li>
+      <li><button data-command="open"><span>Find file</span><kbd>ctrl+o</kbd></button></li>
+      <li><button data-command="toggle_tree"><span>File tree</span><kbd>ctrl+b</kbd></button></li>
+      <li><button data-command="split_columns"><span>Split side by side</span><kbd>f5</kbd></button></li>
+      <li><button data-command="split_rows"><span>Split stacked</span><kbd>f7</kbd></button></li>
+      <li><button data-command="next_pane"><span>Next pane</span><kbd>f6</kbd></button></li>
+      <li><button data-command="theme_picker"><span>Choose theme</span><kbd>f2</kbd></button></li>
+      <li><button data-command="help"><span>Every key</span><kbd>f1</kbd></button></li>
+      <li><button data-command="quit"><span>Quit</span><kbd>ctrl+q</kbd></button></li>
+    </ul>
   </div>
 
-  <div id="help" hidden>
-    <h3>Web build: what is different</h3>
+  <div id="help" class="float" hidden>
+    <p class="label">in the browser</p>
     <ul>
-      <li><strong>Files.</strong> In Chromium-based browsers, <em>Open folder</em>
-        is a real folder: saves go to disk, and changes made elsewhere show up
-        within a few seconds (a tab with unsaved changes keeps them). If a file
-        changed on disk after the editor read it, a save does not overwrite it:
-        the tab stays unsaved and the next save does. Other browsers import a
-        copy that lives in this browser; <em>Download</em> writes the current
-        file out.</li>
-      <li><strong>No external commands.</strong> Formatters (<code>F4</code>) and
-        the filter (<code>Alt+X</code>) run programs, which a page cannot.</li>
-      <li><strong>Some keys belong to the browser.</strong> <code>Ctrl+W</code>,
-        <code>Ctrl+T</code>, <code>Ctrl+N</code> and a few more never reach the
-        page. The toolbar has every editor key that matters.</li>
-      <li><strong>No kitty keyboard protocol.</strong> xterm.js does not
-        implement it, so <code>kitty_keys</code> has no effect.</li>
-      <li><strong>One tab at a time.</strong> A second tab offers to take the
-        editor over, so two never overwrite each other's session.</li>
-      <li><strong>Storage.</strong> The session, unsaved text and imported
-        files are kept in this browser's private storage (OPFS). Clearing the
-        site's data clears them.</li>
+      <li><strong>Files.</strong> <em>Open folder</em> edits a folder on your disk
+        (Chromium-based browsers). Saves go to disk, and changes made elsewhere
+        show up within seconds; a tab with unsaved changes keeps them. If a file
+        changed on disk since it was read, a save does not overwrite it: the tab
+        stays unsaved and the next save does. Elsewhere, files are copied into
+        this browser; <em>Download</em> writes one out.</li>
+      <li><strong>Sessions.</strong> The browser's files and each folder keep
+        their own tabs and unsaved text, in this browser's private storage.
+        Clearing the site's data clears them.</li>
+      <li><strong>No programs.</strong> Formatters (<code>f4</code>) and the
+        filter (<code>alt+x</code>) need a process, which a page cannot start.</li>
+      <li><strong>Keys.</strong> The browser keeps <code>ctrl+t</code>,
+        <code>ctrl+w</code> and <code>ctrl+pgup/pgdn</code>; <code>alt</code>
+        stands in for <code>ctrl</code> on those. Every other key is native.</li>
+      <li><strong>One tab.</strong> A second tab offers to take the editor over,
+        so two never overwrite each other.</li>
     </ul>
-    <p>Settings: <code>/mibi.ini</code>, or a <code>mibi.ini</code> in your
-      folder. Licences: <a href="LICENSE">mibi</a> (MIT),
-      <a href="vendor/LICENSE.xterm">xterm.js</a> and
-      <a href="vendor/LICENSE.addon-fit">its fit addon</a> (MIT), and the
-      terminal font, a subset of Maple Mono NF
-      (<a href="vendor/LICENSE.MapleMono-NF.txt">OFL-1.1</a>).</p>
+    <p class="label">settings</p>
+    <p><code>/mibi.ini</code>, shared by every workspace; a <code>mibi.ini</code>
+      in your folder wins.</p>
+    <p class="label">licences</p>
+    <p><a href="LICENSE">mibi</a> (MIT) · <a href="vendor/LICENSE.xterm">xterm.js</a>
+      and <a href="vendor/LICENSE.addon-fit">its fit addon</a> (MIT) ·
+      Maple Mono NF, subset (<a href="vendor/LICENSE.MapleMono-NF.txt">OFL-1.1</a>).
+      No analytics. Nothing leaves your machine.</p>
+  </div>
+
+  <div id="overlay" hidden>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="overlay-title">
+      <h2 id="overlay-title">mibi</h2>
+      <p id="overlay-text"></p>
+      <div class="row">
+        <button id="overlay-button" class="primary">Reopen</button>
+        <button id="overlay-alt" hidden></button>
+      </div>
+    </div>
   </div>
 
   <script src="vendor/xterm.js"></script>

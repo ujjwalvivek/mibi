@@ -28,8 +28,10 @@ const ui = {
   help: $("help"),
   fileInput: $("file-input"),
   folderInput: $("folder-input"),
-  folderAction: $("folder-action"),
-  hint: $("hint"),
+  keys: $("keys"),
+  status: $("status"),
+  statusText: $("status-text"),
+  reconnect: $("reconnect"),
 };
 
 let editor = null;
@@ -48,25 +50,27 @@ let scanning = false;
 let flushTimer = 0;
 let pushTimer = 0;
 
-const welcome = `mibi on the web
-==============
+const welcome = `mibi
+====
 
-The same editor as the terminal build, compiled to WebAssembly and running in
-xterm.js. Everything in the editor works as it does natively: tabs, splits,
-search and replace, the file tree, the pickers, themes, the mouse, the
-session. F1 lists the keys.
+The terminal editor, compiled to WebAssembly. The same keys, tabs, splits,
+search, file tree and themes as natively. f1 lists every key; ctrl+p finds
+any command by name.
 
-Your files: Open folder works on a real folder in Chromium-based browsers;
-saves go straight to disk and changes made elsewhere show up here. Other
-browsers import a copy (Open files, Open folder, or drop files on the page)
-that stays in this browser; Download writes the current file out.
+Files
+  Open folder    a folder on your disk (Chromium-based browsers). Saves go
+                 to disk; changes made elsewhere show up within seconds.
+  Open files     copies kept in this browser, as are files dropped on the
+                 page. Download writes the focused one out.
 
-Settings live in /mibi.ini (Ctrl+O, then type /mibi.ini). A mibi.ini in
-your folder wins, as it does natively.
+Keys the browser keeps
+  alt+t          new tab          (ctrl+t)
+  alt+w          close tab        (ctrl+w)
+  alt+pgdn/pgup  next/previous    (ctrl+pgdn/pgup)
 
-Not here: formatters and the filter command (a page cannot run programs),
-and the keys the browser keeps for itself. The toolbar has those keys, and
-the ? button says what else differs.
+Settings are in /mibi.ini (ctrl+o, then /mibi.ini); a mibi.ini in your
+folder wins. Formatters and the filter need a program, which a page cannot
+run. The ? button lists the rest.
 `;
 
 // --- start -------------------------------------------------------------------
@@ -89,6 +93,7 @@ async function boot() {
 
     await seedAssets();
     if (handle) await attachFolder(handle);
+    else setStatus("files kept in this browser", "ok");
     // Outside /workspace, so it is never mistaken for the user's files.
     if (!saved && !handle) editor.put("/welcome.txt", welcome);
     editor.clean();
@@ -193,7 +198,8 @@ async function setupTerminal() {
     scrollback: 0,
     fontFamily: '"Maple Mono NF", monospace',
     fontSize: 14,
-    theme: { background: "#0e0e0e", foreground: "#d8dee9", cursor: "#d8dee9", selectionBackground: "#334566" },
+    // The page's ground and ink; the editor paints its own theme over them.
+    theme: { background: "#0e0e0e", foreground: "#d8d8d8", cursor: "#d8d8d8", selectionBackground: "#303030" },
     macOptionIsMeta: true,
   });
   fit = new FitAddon.FitAddon();
@@ -207,19 +213,9 @@ function wire() {
   term.onData(input);
   term.onResize(({ cols, rows }) => !editor.stopped && editor.resize(cols, rows));
 
-  // Keep the editor's keys from the browser where the browser allows it.
-  // Ctrl+W, Ctrl+T, Ctrl+N and a few more it never gives up: the toolbar
-  // has those.
-  term.attachCustomKeyEventHandler((event) => {
-    if (event.type !== "keydown") return true;
-    if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.length === 1) {
-      if ("sopfbkdgtwnqrazy".includes(event.key.toLowerCase())) event.preventDefault();
-    }
-    if (event.key === "F1" || event.key === "F5" || event.key === "F6" || event.key === "F7") event.preventDefault();
-    return true;
-  });
+  term.attachCustomKeyEventHandler(keydown);
 
-  // The window, and the toolbar wrapping onto another row, both change the
+  // The window, and the top bar wrapping onto another row, both change the
   // terminal's size. Fit again now too: it may have moved before this.
   new ResizeObserver(() => fit.fit()).observe($("terminal"));
   fit.fit();
@@ -227,15 +223,20 @@ function wire() {
 
   $("open-files").addEventListener("click", () => ui.fileInput.click());
   $("open-folder").addEventListener("click", openFolder);
-  ui.folderAction.addEventListener("click", () => (pendingHandle ? reconnectFolder() : scanFolder()));
+  ui.reconnect.addEventListener("click", reconnectFolder);
   ui.closeFolder.addEventListener("click", () => switchTo(null));
   $("download").addEventListener("click", download);
   for (const button of document.querySelectorAll("[data-command]")) {
-    button.addEventListener("click", () => command(button.dataset.command));
+    button.addEventListener("click", () => {
+      closePanels();
+      command(button.dataset.command);
+    });
   }
-  $("help-button").addEventListener("click", () => {
-    ui.help.hidden = !ui.help.hidden;
-    if (ui.help.hidden) term.focus();
+  $("keys-button").addEventListener("click", () => togglePanel(ui.keys, $("keys-button")));
+  $("help-button").addEventListener("click", () => togglePanel(ui.help, $("help-button")));
+  document.addEventListener("keydown", (event) => event.key === "Escape" && closePanels() && event.preventDefault());
+  document.addEventListener("pointerdown", (event) => {
+    if (!event.target.closest(".float, [aria-controls]")) closePanels();
   });
 
   ui.fileInput.addEventListener("change", async () => {
@@ -266,6 +267,54 @@ function wire() {
     editor.checkpoint();
     persist();
   });
+}
+
+// --- keys and panels -----------------------------------------------------------
+
+/**
+ * Before xterm.js sees a key. The browser never hands over ctrl+t, ctrl+w
+ * and ctrl+pgup/pgdn, so alt stands in for ctrl on those four. Every other
+ * key the editor binds is kept from the browser (reload, print, find, the
+ * address bar), except ctrl+v: paste arrives as its own event.
+ */
+const standIns = { t: "new_tab", w: "close_tab", PageDown: "next_tab", PageUp: "prev_tab" };
+
+function keydown(event) {
+  if (event.type !== "keydown") return true;
+  // Escape closes a panel first; the editor gets the next one.
+  if (event.key === "Escape" && closePanels()) return false;
+  const plainAlt = event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey;
+  const name = standIns[event.key.length === 1 ? event.key.toLowerCase() : event.key];
+  if (plainAlt && name) {
+    event.preventDefault();
+    command(name);
+    return false;
+  }
+  const ctrl = event.ctrlKey || event.metaKey;
+  if (ctrl && !(event.key.toLowerCase() === "v" && !event.altKey)) event.preventDefault();
+  if (/^F([1-9]|10)$/.test(event.key)) event.preventDefault();
+  return true;
+}
+
+function togglePanel(panel, button) {
+  const open = panel.hidden;
+  closePanels(false);
+  if (!open) return;
+  panel.hidden = false;
+  button.setAttribute("aria-expanded", "true");
+}
+
+/** Close any open panel, and give the editor the keys back. True when one was open. */
+function closePanels(refocus = true) {
+  let was = false;
+  for (const button of document.querySelectorAll("[aria-controls]")) {
+    const panel = $(button.getAttribute("aria-controls"));
+    if (!panel.hidden) was = true;
+    panel.hidden = true;
+    button.setAttribute("aria-expanded", "false");
+  }
+  if (was && refocus && term) term.focus();
+  return was;
 }
 
 // --- the editor ---------------------------------------------------------------
@@ -367,10 +416,14 @@ function persist() {
   persistAgain = false;
   saving = saving
     .then(() => store.save(bytes))
+    .then(() => storageFailed && (storageFailed = false, setStatus(...workspaceStatus)))
     .catch((err) => {
       console.warn("mibi: could not save the session", err);
       persistAgain = true;
-      say(`could not keep the session in this browser (${err?.name || err})`);
+      if (!storageFailed) say(`could not keep the session in this browser (${err?.name || err})`);
+      storageFailed = true;
+      ui.statusText.textContent = `${workspaceStatus[0]} · session not stored (${err?.name || err})`;
+      ui.status.dataset.tone = "danger";
     });
   return saving;
 }
@@ -389,10 +442,16 @@ async function settle() {
 
 // --- real folders --------------------------------------------------------------
 
-function showFolder(text, action) {
-  ui.hint.textContent = text;
-  ui.folderAction.hidden = !action;
-  if (action) ui.folderAction.textContent = action;
+/** The line under the title: where the files are, and how they are. */
+let workspaceStatus = ["starting", "idle"];
+let storageFailed = false;
+
+function setStatus(text, tone = "idle") {
+  workspaceStatus = [text, tone];
+  if (storageFailed) return;
+  ui.statusText.textContent = text;
+  ui.status.dataset.tone = tone;
+  ui.status.title = text;
 }
 
 async function openFolder() {
@@ -423,7 +482,7 @@ async function attachFolder(handle) {
   pendingHandle = null;
   const report = await folder.scan();
   editor.track(true);
-  showFolder(`folder: ${handle.name}`, "Refresh");
+  setStatus(`${handle.name} · in sync with the folder`, "ok");
   ui.closeFolder.hidden = false;
   if (folder.truncated) say(`${handle.name}: only the first ${folder.options.maxFiles} files were read`);
   else if (report.skipped) say(`${handle.name}: ${report.skipped} binary or large files are not shown`);
@@ -437,7 +496,8 @@ async function reconnectFolder() {
     folder = new FolderSync(editor, handle);
     pendingHandle = null;
     await folder.scan();
-    showFolder(`folder: ${handle.name}`, "Refresh");
+    ui.reconnect.hidden = true;
+    setStatus(`${handle.name} · in sync with the folder`, "ok");
     editor.tick();
     // Saves made while it was away are still recorded: write them now.
     pushFolder();
@@ -498,13 +558,14 @@ function folderFailed(err) {
     // Keep recording writes: they go out after Reconnect.
     pendingHandle = folder.handle;
     folder = null;
-    showFolder(`folder: ${pendingHandle.name} (needs permission)`, "Reconnect");
+    ui.reconnect.hidden = false;
+    setStatus(`${pendingHandle.name} · needs permission; saves wait`, "warn");
     say("the folder needs permission again: press Reconnect");
   } else if (err?.name === "NotFoundError") {
     const name = folder.name;
     folder = null;
     editor.track(false);
-    showFolder(`folder: ${name} (gone)`, null);
+    setStatus(`${name} · folder gone; tabs keep their text`, "danger");
     say(`the folder ${name} is gone; open tabs keep their text`);
   }
 }
