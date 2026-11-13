@@ -52,7 +52,7 @@
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; background: var(--ground); color: var(--text); }
-    body { font: 12px/1.45 var(--mono); overflow: hidden; }
+    body { font: 12px/1.45 var(--mono); overflow: hidden; overscroll-behavior: none; }
     #app { display: flex; flex-direction: column; height: 100%; }
 
     /* --- ToolTopbar ------------------------------------------------------ */
@@ -94,8 +94,8 @@
     /* A small inset on the left, as a terminal window keeps, and no xterm
        scrollbar (there is no scrollback to scroll; the
        wheel goes to the editor as mouse reports). */
-    #terminal { flex: 1; min-height: 0; overflow: hidden; padding-left: 4px;  background: var(--editor-bg); }
-    #terminal .xterm { height: 100%; }
+    #terminal { flex: 1; min-height: 0; overflow: hidden; padding-left: 4px;  background: var(--editor-bg); touch-action: none; }
+    #terminal .xterm { height: 100%; touch-action: none; }
     #terminal .xterm-viewport { background: var(--editor-bg) !important; overflow-y: hidden !important; scrollbar-width: none; }
     #terminal .xterm-viewport::-webkit-scrollbar { display: none; }
 

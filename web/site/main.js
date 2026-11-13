@@ -209,8 +209,121 @@ async function setupTerminal() {
   term.onTitleChange((title) => title && (document.title = title));
 }
 
+// xterm.js keeps no scrollback here (the editor scrolls itself), so a touch
+// drag has nothing to move and never reaches the editor. Translate one-finger
+// drags into the wheel reports the editor already understands, and a tap into
+// a left click: vertical drags scroll the pane, horizontal drags become
+// shift+wheel (the editor's sideways scroll), taps still place the cursor and
+// select tree rows or tabs.
+function setupTouch() {
+  const surface = $("terminal");
+  const step = 24; // pixels per wheel notch
+  let touch = null;
+
+  const cellAt = (clientX, clientY) => {
+    const screen = term.element && term.element.querySelector(".xterm-screen");
+    if (!screen) return { x: 1, y: 1 };
+    const rect = screen.getBoundingClientRect();
+    const cell_w = rect.width / term.cols;
+    const cell_h = rect.height / term.rows;
+    const x = Math.floor((clientX - rect.left) / cell_w) + 1;
+    const y = Math.floor((clientY - rect.top) / cell_h) + 1;
+    return {
+      x: Math.min(term.cols, Math.max(1, x)),
+      y: Math.min(term.rows, Math.max(1, y)),
+    };
+  };
+
+  // SGR wheel: 64/65 vertical; 68/69 are shift+wheel, which the editor treats
+  // as sideways scroll.
+  const wheel = (cell, code) => input(`\x1b[<${code};${cell.x};${cell.y}M`);
+  const click = (cell, release) => input(`\x1b[<0;${cell.x};${cell.y}${release ? "m" : "M"}`);
+
+  surface.addEventListener(
+    "touchstart",
+    (event) => {
+      if (event.touches.length !== 1) {
+        touch = null;
+        return;
+      }
+      const t = event.touches[0];
+      touch = {
+        start_x: t.clientX,
+        start_y: t.clientY,
+        x: t.clientX,
+        y: t.clientY,
+        cell: cellAt(t.clientX, t.clientY),
+        acc_x: 0,
+        acc_y: 0,
+        moved: false,
+        at: Date.now(),
+      };
+      event.preventDefault();
+      event.stopPropagation();
+    },
+    { passive: false, capture: true },
+  );
+
+  surface.addEventListener(
+    "touchmove",
+    (event) => {
+      if (!touch || event.touches.length !== 1) return;
+      const t = event.touches[0];
+      const dx = t.clientX - touch.x;
+      const dy = t.clientY - touch.y;
+      touch.x = t.clientX;
+      touch.y = t.clientY;
+      if (Math.abs(t.clientX - touch.start_x) + Math.abs(t.clientY - touch.start_y) > 6) {
+        touch.moved = true;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (Math.abs(dx) > Math.abs(dy)) {
+        touch.acc_x += dx;
+        while (Math.abs(touch.acc_x) >= step) {
+          // Finger right scrolls the text left; finger left scrolls it right.
+          wheel(touch.cell, touch.acc_x > 0 ? 68 : 69);
+          touch.acc_x -= Math.sign(touch.acc_x) * step;
+        }
+      } else {
+        touch.acc_y += dy;
+        while (Math.abs(touch.acc_y) >= step) {
+          // Finger up scrolls the text down, as a touch surface does.
+          wheel(touch.cell, touch.acc_y > 0 ? 64 : 65);
+          touch.acc_y -= Math.sign(touch.acc_y) * step;
+        }
+      }
+    },
+    { passive: false, capture: true },
+  );
+
+  const end = (event) => {
+    if (!touch) return;
+    const was_tap = !touch.moved && Date.now() - touch.at < 500;
+    const cell = touch.cell;
+    touch = null;
+    event.preventDefault();
+    event.stopPropagation();
+    if (was_tap) {
+      click(cell, false);
+      click(cell, true);
+      term.focus();
+    }
+  };
+
+  surface.addEventListener("touchend", end, { passive: false, capture: true });
+  surface.addEventListener(
+    "touchcancel",
+    () => {
+      touch = null;
+    },
+    { capture: true },
+  );
+}
+
 function wire() {
   term.onData(input);
+  setupTouch();
   term.onResize(({ cols, rows }) => !editor.stopped && editor.resize(cols, rows));
 
   term.attachCustomKeyEventHandler(keydown);
