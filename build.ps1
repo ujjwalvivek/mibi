@@ -58,7 +58,7 @@ try {
 
 # Keep the installed copy (if any) in step with the build, so `mibi` from the
 # profile always runs the binary you just built.
-if (-not ($args -contains 'test') -and -not ($args -contains 'size')) {
+if (-not ($args -contains 'test') -and -not ($args -contains 'size') -and -not ($args -contains 'web')) {
     $installed = Join-Path $env:LOCALAPPDATA 'Programs\Mibi\mibi.exe'
     if (Test-Path $installed) {
         try {

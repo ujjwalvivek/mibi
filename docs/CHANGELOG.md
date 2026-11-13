@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- The web build: the editor compiles to `wasm32-freestanding` and runs in a
+  browser through xterm.js, with a virtual workspace, session persistence,
+  syntax/themes and the same keys. In Chromium, Open folder is a real folder
+  and saves sync back through the File System Access API; elsewhere it imports
+  a snapshot. The toolbar mirrors the keys a browser reserves, and a WOFF2
+  subset of Maple Mono NF is bundled. See [WEB.md](WEB.md). External commands,
+  live reload and the kitty keyboard protocol are the deliberate gaps.
+- `Unsupported` errors (the web build's missing child processes) say "not
+  available in this build" in the status line.
 - Kitty keyboard protocol, opt-in with `kitty_keys = true` in `[editor]`.
   On terminals that implement it, `Ctrl+Shift` chords and `Escape` arrive as
   distinct keys instead of colliding with other control bytes, and key

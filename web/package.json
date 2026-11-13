@@ -1,0 +1,12 @@
+{
+  "name": "mibi-web",
+  "private": true,
+  "description": "Vendored xterm.js dependencies for the mibi web host",
+  "scripts": {
+    "serve": "python -m http.server 8765 --directory ../zig-out/web"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0"
+  }
+}

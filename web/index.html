@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mibi</title>
+  <link rel="stylesheet" href="xterm.css">
+  <style>
+    @font-face {
+      font-family: "Maple Mono NF";
+      src: url("MapleMono-NF-Regular.woff2") format("woff2");
+      font-weight: 400;
+      font-style: normal;
+      font-display: swap;
+    }
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; background: #0e0e0e; color: #d8dee9; }
+    body { font: 13px/1.4 "Maple Mono NF"; overflow: hidden; }
+    #app { display: flex; flex-direction: column; height: 100%; }
+    #bar {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      padding: 6px 10px; background: #1a1a24; border-bottom: 1px solid #2a2a38;
+      user-select: none;
+    }
+    #bar .name { font-weight: 600; letter-spacing: .02em; margin-right: 4px; }
+    #bar .group {
+      display: flex; align-items: center; gap: 4px;
+      padding-right: 8px; border-right: 1px solid #3a3a4a;
+    }
+    #bar button {
+      font: inherit; color: #d8dee9; background: #282838; border: 1px solid #3a3a4a;
+      border-radius: 5px; padding: 4px 7px; cursor: pointer;
+    }
+    #bar button:hover { background: #333348; }
+    #bar .spacer { flex: 1; }
+    #bar .hint { color: #8892a4; font-size: 12px; }
+    #terminal { flex: 1; min-height: 0; }
+    #terminal .xterm { height: 100%; padding: 4px 6px 6px; }
+    #overlay {
+      position: fixed; inset: 0; display: grid; place-items: center;
+      background: rgba(14, 14, 14, .82); z-index: 10;
+    }
+    #overlay[hidden] { display: none; }
+    #overlay .box {
+      max-width: 560px; padding: 20px 22px; background: #1a1a24;
+      border: 1px solid #3a3a4a; border-radius: 8px; line-height: 1.5;
+    }
+    #overlay h2 { margin: 0 0 8px; font-size: 16px; }
+    #overlay p { margin: 0 0 12px; color: #b9c0cc; }
+    #overlay button {
+      font: inherit; color: #0e0e0e; background: #8bd450; border: 0;
+      border-radius: 5px; padding: 6px 12px; cursor: pointer;
+    }
+    #help {
+      position: fixed; right: 12px; bottom: 12px; width: min(460px, calc(100vw - 24px));
+      max-height: min(60vh, 520px); overflow: auto; padding: 14px 16px;
+      background: #1a1a24; border: 1px solid #3a3a4a; border-radius: 8px;
+      font-size: 12px; line-height: 1.5; z-index: 9;
+    }
+    #help[hidden] { display: none; }
+    #help h3 { margin: 0 0 6px; font-size: 13px; }
+    #help ul { margin: 0; padding-left: 18px; }
+    #help li { margin: 4px 0; }
+    #help code { color: #c6d0e0; }
+    .hidden-file { display: none; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="bar">
+      <span class="name">mibi</span>
+      <div class="group">
+        <button id="open-files" title="Import files into the browser workspace">Open files</button>
+        <button id="open-folder" title="Open a real folder (Chromium) or import a snapshot">Open folder</button>
+        <button id="folder-action" title="Refresh the open folder" hidden>Refresh</button>
+        <button data-command="open" title="Find file (Ctrl+O)">Find file</button>
+      </div>
+      <div class="group">
+        <button id="new" title="New tab (Ctrl+T)">New</button>
+        <button id="close-tab" title="Close tab (Ctrl+W)">Close</button>
+        <button id="save" title="Save to the browser workspace (Ctrl+S)">Save</button>
+        <button id="download" title="Download the current file">Download</button>
+      </div>
+      <div class="group">
+        <button data-command="find" title="Find (Ctrl+F)">Find</button>
+        <button data-command="replace" title="Replace all (Ctrl+R)">Replace</button>
+        <button data-command="goto" title="Go to line (Ctrl+G)">Go to</button>
+        <button data-command="command_palette" title="Command palette (Ctrl+P)">Palette</button>
+      </div>
+      <div class="group">
+        <button data-command="toggle_tree" title="File tree (Ctrl+B)">Tree</button>
+        <button data-command="split_columns" title="Split side by side (F5)">Split</button>
+        <button data-command="split_rows" title="Split stacked (F7)">Split down</button>
+        <button data-command="close_pane" title="Close the focused pane (Shift+F5)">Close pane</button>
+      </div>
+      <div class="group">
+        <button data-command="prev_tab" title="Previous tab (Ctrl+PgUp)">‹ Tab</button>
+        <button data-command="next_tab" title="Next tab (Ctrl+PgDn)">Tab ›</button>
+        <button data-command="prev_pane" title="Previous pane (Shift+F6)">‹ Pane</button>
+        <button data-command="next_pane" title="Next pane (F6)">Pane ›</button>
+      </div>
+      <div class="group">
+        <button data-command="help" title="Editor keys (F1)">Keys</button>
+        <button data-command="quit" title="Quit and save the session (Ctrl+Q)">Quit</button>
+      </div>
+      <span class="spacer"></span>
+      <span id="hint" class="hint">web build</span>
+      <button id="help-button" title="What the web build cannot do">?</button>
+    </div>
+    <div id="terminal"></div>
+  </div>
+
+  <input id="file-input" class="hidden-file" type="file" multiple>
+  <input id="folder-input" class="hidden-file" type="file" multiple webkitdirectory>
+
+  <div id="overlay" hidden>
+    <div class="box">
+      <h2 id="overlay-title">mibi</h2>
+      <p id="overlay-text"></p>
+      <button id="overlay-button">Reopen</button>
+    </div>
+  </div>
+
+  <div id="help" hidden>
+    <h3>Web build: what is different</h3>
+    <ul>
+      <li><strong>Files live in the browser or a real folder.</strong> In
+        Chromium, <em>Open folder</em> is a real folder and <em>Save</em> writes
+        back to it. Elsewhere, Open imports a snapshot into a virtual
+        workspace; use <em>Download</em> to put the current file on disk.</li>
+      <li><strong>No external commands.</strong> Formatters (<code>F4</code>) and
+        the filter (<code>Alt+X</code>) need to spawn a process, which a browser
+        cannot do.</li>
+      <li><strong>No automatic live reload.</strong> In a real folder, use
+        <em>Refresh</em> to pick up changes made outside the editor; a snapshot
+        cannot see them at all.</li>
+      <li><strong>Some browser shortcuts win.</strong> <code>Ctrl+W</code>,
+        <code>Ctrl+T</code>, <code>Ctrl+N</code>, <code>Ctrl+R</code>,
+        <code>F5</code> and <code>F12</code> are reserved by the browser; the
+        editor cannot always prevent them. The toolbar duplicates every editor
+        key that matters, including Find, Replace, splits, panes, tabs, Keys
+        and Quit.</li>
+      <li><strong>Kitty keyboard protocol is unavailable.</strong> xterm.js does
+        not implement it, so <code>kitty_keys</code> has no effect here.</li>
+      <li><strong>The terminal font is bundled.</strong> The page uses a WOFF2
+        subset of Maple Mono NF, so the file tree's Nerd Font icons work without
+        installing anything. Glyphs outside the subset fall back to the
+        browser's fonts.</li>
+      <li><strong>Storage is small.</strong> Snapshot workspaces and sessions
+        are kept in <code>localStorage</code> (about 5 MB); a real folder's
+        files are on disk. Download important snapshot files.</li>
+    </ul>
+    <p class="muted">Terminal font: Maple Mono NF (subset), OFL-1.1; see
+      <a href="LICENSE.MapleMono-NF.txt">LICENSE.MapleMono-NF.txt</a>.
+      xterm.js and its fit addon are MIT licensed; see
+      <a href="LICENSE.xterm">LICENSE.xterm</a> and
+      <a href="LICENSE.addon-fit">LICENSE.addon-fit</a>.</p>
+  </div>
+
+  <script src="xterm.js"></script>
+  <script src="addon-fit.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>

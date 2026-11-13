@@ -10,6 +10,9 @@ tools/zig-linux/
 tools/dl/
 tools/__pycache__/
 
+# Web host dependencies (the vendored copies live in web/vendor)
+web/node_modules/
+
 # Probe build output
 experiments/out/
 
@@ -28,6 +31,9 @@ mibi-test.tmp
 mibi-*-test.*
 /session
 /buffer-*.txt
+
+# OpenChamber screenshots from local checks
+.openchamber/
 
 # Local design notes (kept out of the repo)
 PLAN.md

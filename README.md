@@ -10,7 +10,8 @@ layer that the build keeps apart, tested on Linux, macOS and Windows on every
 push. Archives for all three are on the
 [releases page](https://github.com/ujjwalvivek/mibi/releases). See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it is put together and why.
-Cross-platform (Linux, macOS, Windows).
+Cross-platform (Linux, macOS, Windows). It also compiles to WebAssembly and
+runs in a browser; see [docs/WEB.md](docs/WEB.md).
 
 ```
 mibi                # the last session in this directory, or a new buffer
@@ -27,6 +28,7 @@ toolchain (0.16.0) is fetched into `tools/zig` on first use.
 .\build.ps1 run                         # build and run
 .\build.ps1 test                        # unit tests
 .\build.ps1 size                        # build every target and check the size gate
+.\build.ps1 web                         # build the WebAssembly editor into zig-out\web
 .\build.ps1 -Doptimize=Debug
 .\build.ps1 -Dtarget=x86_64-linux-gnu   # cross-compile
 ```
@@ -36,6 +38,7 @@ On Linux and macOS, with Zig 0.16.0 on the path:
 ```sh
 zig build                  # -> zig-out/bin/mibi (ReleaseSmall)
 zig build test             # every layer's tests
+zig build web              # the browser build, in zig-out/web
 tools/check-size.sh        # build all five targets and check the size budgets
 tools/package.sh           # release archives for all five targets in dist/
 ```
@@ -43,6 +46,27 @@ tools/package.sh           # release archives for all five targets in dist/
 Pushing a tag `v<version>` runs the tests on three systems, builds the
 archives and attaches them to a GitHub release
 (`.github/workflows/release.yml`).
+
+## Web build
+
+The same editor compiles to WebAssembly and runs in a browser, with xterm.js as
+the terminal and a virtual workspace in place of a real folder:
+
+```powershell
+.\build.ps1 web
+python -m http.server 8765 --directory zig-out/web
+# http://localhost:8765/
+```
+
+The editor is unchanged; the browser gets a platform backend
+(`src/platform/web.zig`), an exported event-driven loop (`src/web_main.zig`) and
+a static host (`web/`). Syntax highlighting, themes, tabs, splits, the pickers,
+the mouse, paste, search and the session all work. In Chromium, **Open folder**
+is a real folder and **Save** writes back through the File System Access API;
+elsewhere it imports a snapshot. The toolbar duplicates the keys the browser
+reserves. The page bundles a WOFF2 subset of Maple Mono NF. External commands
+(formatters, the filter), live reload and the kitty keyboard protocol do not
+work; [docs/WEB.md](docs/WEB.md) has the full list and the architecture.
 
 ## Configuration
 

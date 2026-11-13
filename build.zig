@@ -93,6 +93,79 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Build and run mibi");
     run_step.dependOn(&run_cmd.step);
 
+    // --- web -----------------------------------------------------------------
+    // The same editor compiled to wasm, with the platform layer replaced by
+    // the virtual filesystem in src/platform/web.zig. The host is a static
+    // page (web/index.html) that drives it through the exports in
+    // src/web_main.zig.
+    const web_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+    const web_core = b.createModule(.{
+        .root_source_file = b.path("src/core/core.zig"),
+        .target = web_target,
+        .optimize = optimize,
+        .single_threaded = true,
+    });
+    const web_ui = b.createModule(.{
+        .root_source_file = b.path("src/ui/ui.zig"),
+        .target = web_target,
+        .optimize = optimize,
+        .single_threaded = true,
+    });
+    web_ui.addImport("core", web_core);
+    const web_platform = b.createModule(.{
+        .root_source_file = b.path("src/platform/web.zig"),
+        .target = web_target,
+        .optimize = optimize,
+        .single_threaded = true,
+        .strip = true,
+        .unwind_tables = .none,
+    });
+    web_platform.addImport("ui", web_ui);
+    const web_mod = b.createModule(.{
+        .root_source_file = b.path("src/web_main.zig"),
+        .target = web_target,
+        .optimize = optimize,
+        .single_threaded = true,
+        .strip = true,
+        .unwind_tables = .none,
+    });
+    web_mod.addImport("core", web_core);
+    web_mod.addImport("ui", web_ui);
+    web_mod.addImport("platform", web_platform);
+    const web_exe = b.addExecutable(.{
+        .name = "mibi",
+        .root_module = web_mod,
+    });
+    web_exe.entry = .disabled;
+    web_exe.rdynamic = true;
+
+    const web_step = b.step("web", "Build the WebAssembly editor and its static host into zig-out/web");
+    web_step.dependOn(&b.addInstallFile(web_exe.getEmittedBin(), "web/mibi.wasm").step);
+    web_step.dependOn(&b.addInstallFile(b.path("web/index.html"), "web/index.html").step);
+    web_step.dependOn(&b.addInstallFile(b.path("web/main.js"), "web/main.js").step);
+    web_step.dependOn(&b.addInstallFile(b.path("web/vendor/xterm.js"), "web/xterm.js").step);
+    web_step.dependOn(&b.addInstallFile(b.path("web/vendor/xterm.css"), "web/xterm.css").step);
+    web_step.dependOn(&b.addInstallFile(b.path("web/vendor/addon-fit.js"), "web/addon-fit.js").step);
+    web_step.dependOn(&b.addInstallFile(b.path("web/vendor/LICENSE.xterm"), "web/LICENSE.xterm").step);
+    web_step.dependOn(&b.addInstallFile(b.path("web/vendor/LICENSE.addon-fit"), "web/LICENSE.addon-fit").step);
+    web_step.dependOn(&b.addInstallFile(b.path("web/vendor/MapleMono-NF-Regular.woff2"), "web/MapleMono-NF-Regular.woff2").step);
+    web_step.dependOn(&b.addInstallFile(b.path("web/vendor/LICENSE.MapleMono-NF.txt"), "web/LICENSE.MapleMono-NF.txt").step);
+    web_step.dependOn(&b.addInstallFile(b.path("config/mibi.ini.example"), "web/mibi.ini.example").step);
+    web_step.dependOn(&b.addInstallDirectory(.{
+        .source_dir = b.path("syntax.d"),
+        .install_dir = .prefix,
+        .install_subdir = "web/syntax.d",
+    }).step);
+    web_step.dependOn(&b.addInstallDirectory(.{
+        .source_dir = b.path("themes"),
+        .install_dir = .prefix,
+        .install_subdir = "web/themes",
+    }).step);
+    web_step.dependOn(&b.addInstallFile(b.path("web/assets.txt"), "web/assets.txt").step);
+
     // `zig build test` runs the unit tests in the same sources. Tests build
     // in Debug unless told otherwise: the release mode turns off the bounds,
     // overflow and aliasing checks that tests exist to trip.

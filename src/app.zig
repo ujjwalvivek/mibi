@@ -724,6 +724,7 @@ pub fn describe(err: anyerror) []const u8 {
         error.IsDir => "that is a directory",
         error.FileTooBig => "file too large",
         error.NoPath => "the file has no name yet",
+        error.Unsupported => "not available in this build",
         error.NotATerminal => "not a terminal (run it in a terminal window, not through a pipe)",
         else => @errorName(err),
     };

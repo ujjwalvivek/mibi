@@ -321,3 +321,42 @@ codes and event types (`CSI > 3 u`) while the alternate screen is up, and the
 push is undone on every exit path (`CSI < u`). `Esc` then arrives as
 `CSI 27u`, so the decoder's lone-ESC timeout only matters on terminals that do
 not implement the protocol.
+
+## The web build
+
+The browser build reuses the same four layers. Only the platform module and the
+entry point differ:
+
+```
+src/core, src/ui, src/app      unchanged
+src/platform/web.zig           web platform module
+src/platform/web/os.zig        virtual filesystem, clock, host calls
+src/web_main.zig               exported ABI: init, input, flush, resize, tick,
+                               frames, and the virtual filesystem
+web/index.html, web/main.js    xterm.js host
+```
+
+`build.zig` has a `web` step that resolves `wasm32-freestanding`, builds
+`core`/`ui` for it, swaps in `src/platform/web.zig` for the platform module and
+emits `zig-out/web/mibi.wasm` next to the host. There is no libc and no
+`std.Io`; `std.heap.wasm_allocator` is the allocator.
+
+Two decisions made this port small:
+
+- **The ANSI renderer is the interface.** The editor already writes a cell
+  grid as ANSI, and xterm.js already understands the alternate screen, SGR
+  mouse reports, focus reports, bracketed paste and true colour. The host feeds
+  `onData` bytes into `mibi_input` and writes the frame back; no renderer or
+  widget changed. The input path is the same `ansi.Decoder` as the Unix build.
+- **The loop is inverted.** `main.zig` blocks in `poll`; wasm cannot. The host
+  calls `mibi_input`, `mibi_resize` and `mibi_tick`, and each returns a frame.
+  A 30 ms host timer calls `mibi_flush` for a lone ESC, matching the native
+  escape wait.
+
+The virtual filesystem lives in the wasm module (`platform/web/os.zig`): files
+in a string map, directories inferred, stamps for reload, and a small binary
+serialisation (`MIBIVFS1`) that the host keeps in `localStorage`. The host
+seeds `/syntax.d` and `/themes` from the site on every load. `runCommand`
+returns `error.Unsupported`, which is how formatters and the filter report that
+a browser has no child processes. `docs/WEB.md` has the feature-by-feature
+parity list.
