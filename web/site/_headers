@@ -1,0 +1,9 @@
+# Cloudflare Pages reads this file from the site root; it is ignored elsewhere.
+# Nothing here is fingerprinted, so every file revalidates (ETag makes that cheap).
+/*
+  Cache-Control: public, max-age=0, must-revalidate
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+
+/mibi.wasm
+  Content-Type: application/wasm

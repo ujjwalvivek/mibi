@@ -1,0 +1,35 @@
+name: deploy-web
+
+# Builds the browser editor and uploads it to Cloudflare Pages (mibi.ujjwalvivek.com).
+# Cloudflare's own build image has no Zig 0.16, so it is built here and uploaded
+# as finished files. Needs two repository secrets: CLOUDFLARE_API_TOKEN (Pages: Edit)
+# and CLOUDFLARE_ACCOUNT_ID.
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [main]
+    paths: ["src/**", "web/site/**", "syntax.d/**", "themes/**", "config/**", "build.zig", "LICENSE"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-web
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: zig build web
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy zig-out/web --project-name=mibi --branch=main --commit-dirty=true
