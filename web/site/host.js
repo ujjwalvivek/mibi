@@ -93,6 +93,12 @@ export class Editor {
     this.x.mibi_checkpoint();
   }
 
+  /** The theme's background as "#rrggbb", or null when it is the terminal's. */
+  get background() {
+    const rgb = this.x.mibi_background();
+    return rgb < 0 ? null : "#" + rgb.toString(16).padStart(6, "0");
+  }
+
   get quit() {
     return this.x.mibi_quit() !== 0;
   }

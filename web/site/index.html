@@ -9,8 +9,8 @@
   <link rel="icon" href="mibi.svg" type="image/svg+xml">
   <link rel="stylesheet" href="vendor/xterm.css">
   <style>
-    /* UV Web Tools roles, Monochrome ground (house style), with mibi's one
-       accent: the green of the editor's own status bar. */
+    /* UV Native roles in Horizon Bold, the editor's default theme on the
+       web (themes/horizon.ini): the same ground, ink and rose accent. */
     @font-face {
       font-family: "Maple Mono NF";
       src: url("vendor/MapleMono-NF-Regular.woff2") format("woff2");
@@ -24,21 +24,25 @@
       font-display: swap;
     }
     :root {
-      --ground: #0e0e0e;
-      --panel: #151515;
-      --raised: #222222;
-      --line: #202020;
-      --line-strong: #303030;
-      --text: #d8d8d8;
-      --muted: #a0a0a0;
-      --faint: #7a7a7a;
-      --accent: #8bd450;
-      --accent-ink: #0e0e0e;
-      --accent-soft: rgba(139, 212, 80, 0.12);
-      --accent-line: rgba(139, 212, 80, 0.4);
+      --ground: #1c1e26;          /* app-background */
+      --panel: #20222c;           /* panel-background */
+      --raised: #2b2d3a;          /* surface-hover */
+      --selected: #352d39;        /* surface-selected */
+      --line: #2e303e;            /* the editor's own pane line */
+      --line-strong: #434550;     /* border */
+      --text: #d5d8da;
+      --muted: #9ba0a6;
+      --faint: #6f747d;           /* text-disabled: labels that repeat */
+      --accent: #e95678;
+      --accent-hover: #e56d8a;
+      --focus: #e2849a;
+      --accent-ink: #1c1e26;
+      --accent-soft: var(--selected);
+      --accent-line: #8a364b;     /* border-strong */
       --danger: #d06c70;
-      --warn: #c49a5a;
-      --ok: var(--accent);
+      --warn: #fab795;
+      --ok: #73b88a;
+      --editor-bg: var(--ground); /* follows the editor's theme */
       --mono: "Maple Mono NF", ui-monospace, "Cascadia Mono", Consolas, monospace;
       --topbar-height: 40px;
       --control: 28px;
@@ -76,12 +80,12 @@
       border-radius: 2px; cursor: pointer; white-space: nowrap;
       transition: border-color var(--ease), background var(--ease), color var(--ease);
     }
-    button:hover { color: var(--text); border-color: #4a4a4a; background: var(--raised); }
-    button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+    button:hover { color: var(--text); border-color: var(--line-strong); background: var(--raised); }
+    button:focus-visible { outline: 1px solid var(--focus); outline-offset: 1px; }
     button[aria-expanded="true"] { color: var(--text); background: var(--accent-soft); border-color: var(--accent-line); }
     button.primary { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); font-weight: 700; }
-    button.primary:hover { background: #a0df6c; border-color: #a0df6c; }
-    button.warn { color: var(--warn); border-color: rgba(196, 154, 90, 0.45); }
+    button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+    button.warn { color: var(--warn); border-color: rgba(250, 183, 149, 0.45); }
     button.icon { width: var(--control); padding: 0; }
     kbd { font: inherit; font-size: 10px; color: var(--faint); margin-left: 6px; }
     button:hover kbd { color: var(--muted); }
@@ -90,9 +94,9 @@
     /* A small inset on the left, as a terminal window keeps, and no xterm
        scrollbar (there is no scrollback to scroll; the
        wheel goes to the editor as mouse reports). */
-    #terminal { flex: 1; min-height: 0; overflow: hidden; padding-left: 8px; background: var(--ground); }
+    #terminal { flex: 1; min-height: 0; overflow: hidden; padding-left: 8px; background: var(--editor-bg); }
     #terminal .xterm { height: 100%; }
-    #terminal .xterm-viewport { background: var(--ground) !important; overflow-y: hidden !important; scrollbar-width: none; }
+    #terminal .xterm-viewport { background: var(--editor-bg) !important; overflow-y: hidden !important; scrollbar-width: none; }
     #terminal .xterm-viewport::-webkit-scrollbar { display: none; }
 
     /* --- floating panels ---------------------------------------------------- */
@@ -115,6 +119,7 @@
     .float code { color: var(--text); }
     .float a { color: var(--text); text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 2px; }
     .float a:hover { text-decoration-color: var(--accent); }
+    .float code, .keys kbd:not(.browser) { color: var(--text); }
     .keys li { padding: 0; border: 0; }
     .keys button {
       display: flex; width: 100%; justify-content: space-between; align-items: center;
@@ -125,7 +130,7 @@
     .keys kbd.browser { text-decoration: line-through; color: var(--faint); }
 
     /* --- dialogs ------------------------------------------------------------ */
-    #overlay { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; background: rgba(14, 14, 14, 0.82); }
+    #overlay { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; background: rgba(28, 30, 38, 0.86); }
     .dialog {
       width: min(460px, calc(100vw - 32px)); padding: 18px 20px 20px;
       background: var(--panel); border: 1px solid var(--line-strong); box-shadow: var(--shadow-float);

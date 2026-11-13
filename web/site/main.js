@@ -199,7 +199,7 @@ async function setupTerminal() {
     fontFamily: '"Maple Mono NF", monospace',
     fontSize: 14,
     // The page's ground and ink; the editor paints its own theme over them.
-    theme: { background: "#0e0e0e", foreground: "#d8d8d8", cursor: "#d8d8d8", selectionBackground: "#303030" },
+    theme: { background: "#1c1e26", foreground: "#d5d8da", cursor: "#d5d8da", selectionBackground: "#2e303e" },
     macOptionIsMeta: true,
   });
   fit = new FitAddon.FitAddon();
@@ -319,10 +319,19 @@ function closePanels(refocus = true) {
 
 // --- the editor ---------------------------------------------------------------
 
+let editorBg = null;
+
 function write(bytes) {
   if (!bytes.length) return;
   copyToClipboard(bytes);
   term.write(bytes);
+  // The strips around the cell grid take the editor's theme background.
+  const bg = editor.background || "#1c1e26";
+  if (bg !== editorBg) {
+    editorBg = bg;
+    document.documentElement.style.setProperty("--editor-bg", bg);
+    term.options.theme = { ...term.options.theme, background: bg };
+  }
 }
 
 function input(data) {
@@ -623,16 +632,13 @@ async function seedAssets() {
     });
   // The settings next to the "binary", as native ships them: the user's own
   // edits, kept once for every workspace, or the example on a first visit.
+  // On the web the default theme is Horizon. Settings never edited (still
+  // the plain example) move to the web default too.
   settingsSaved = await kvGet("settings").catch(() => null);
-  if (settingsSaved) editor.put("/mibi.ini", settingsSaved);
-  else {
-    jobs.push(
-      fetch("mibi.ini.example")
-        .then((r) => (r.ok ? r.arrayBuffer() : null))
-        .then((buf) => buf && editor.put("/mibi.ini", new Uint8Array(buf)))
-        .catch(() => {}),
-    );
-  }
+  const example = await fetch("mibi.ini.example").then((r) => (r.ok ? r.text() : null), () => null);
+  const plain = example && new TextEncoder().encode(example);
+  if (settingsSaved && !(plain && sameBytes(settingsSaved, plain))) editor.put("/mibi.ini", settingsSaved);
+  else if (example) editor.put("/mibi.ini", example.replace("; theme = catppuccin-mocha", "theme = horizon"));
   await Promise.all(jobs);
 }
 

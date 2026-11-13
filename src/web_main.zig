@@ -179,6 +179,17 @@ export fn mibi_tick() void {
     }
 }
 
+/// The theme's background as 0xRRGGBB, or -1 when the theme leaves it to
+/// the terminal. The page paints the strips around the cell grid with it, so
+/// a theme change does not leave a band of the old colour at the edges.
+export fn mibi_background() i32 {
+    const s = live() orelse return -1;
+    return switch (s.app.config.theme.background) {
+        .rgb => |c| @as(i32, c.r) << 16 | @as(i32, c.g) << 8 | c.b,
+        else => -1,
+    };
+}
+
 /// Save the session now, not at the next autosave: the page is being hidden
 /// or closed, and storage gets one chance.
 export fn mibi_checkpoint() void {
