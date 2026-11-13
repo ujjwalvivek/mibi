@@ -324,39 +324,57 @@ not implement the protocol.
 
 ## The web build
 
-The browser build reuses the same four layers. Only the platform module and the
-entry point differ:
+The browser build is the same four layers. Only the platform module and the
+entry point are its own; `build.zig` compiles `core`, `ui` and the app for
+`wasm32-freestanding` with `src/platform/web.zig` in place of
+`src/platform/platform.zig`. Nothing in `core`, `ui` or `src/app` knows which
+one it got. [WEB.md](WEB.md) has the details; these are the decisions.
 
-```
-src/core, src/ui, src/app      unchanged
-src/platform/web.zig           web platform module
-src/platform/web/os.zig        virtual filesystem, clock, host calls
-src/web_main.zig               exported ABI: init, input, flush, resize, tick,
-                               frames, and the virtual filesystem
-web/index.html, web/main.js    xterm.js host
-```
-
-`build.zig` has a `web` step that resolves `wasm32-freestanding`, builds
-`core`/`ui` for it, swaps in `src/platform/web.zig` for the platform module and
-emits `zig-out/web/mibi.wasm` next to the host. There is no libc and no
-`std.Io`; `std.heap.wasm_allocator` is the allocator.
-
-Two decisions made this port small:
-
-- **The ANSI renderer is the interface.** The editor already writes a cell
-  grid as ANSI, and xterm.js already understands the alternate screen, SGR
-  mouse reports, focus reports, bracketed paste and true colour. The host feeds
-  `onData` bytes into `mibi_input` and writes the frame back; no renderer or
-  widget changed. The input path is the same `ansi.Decoder` as the Unix build.
-- **The loop is inverted.** `main.zig` blocks in `poll`; wasm cannot. The host
-  calls `mibi_input`, `mibi_resize` and `mibi_tick`, and each returns a frame.
-  A 30 ms host timer calls `mibi_flush` for a lone ESC, matching the native
-  escape wait.
-
-The virtual filesystem lives in the wasm module (`platform/web/os.zig`): files
-in a string map, directories inferred, stamps for reload, and a small binary
-serialisation (`MIBIVFS1`) that the host keeps in `localStorage`. The host
-seeds `/syntax.d` and `/themes` from the site on every load. `runCommand`
-returns `error.Unsupported`, which is how formatters and the filter report that
-a browser has no child processes. `docs/WEB.md` has the feature-by-feature
-parity list.
+- **The terminal stays the interface.** The editor already writes a cell
+  grid as ANSI and reads input as terminal bytes, and xterm.js speaks both:
+  the alternate screen, SGR mouse, focus, bracketed paste, true colour. So the
+  page feeds xterm.js `onData` into the same `ansi.Decoder` Unix uses and
+  writes frames back. No renderer or widget changed. A canvas renderer of the
+  cell grid stays possible later; it was not needed to get parity.
+- **Freestanding wasm, not WASI.** A page is not a POSIX process; WASI would
+  add a shim layer to emulate files and a clock the browser does not have,
+  and still leave the loop to invert. The module imports three functions
+  (clock, console, exit) and exports the rest.
+- **The loop is inverted, not emulated.** `src/main.zig` blocks in `poll`;
+  `src/web_main.zig` exports one function per event (`mibi_input`,
+  `mibi_resize`, `mibi_tick`, `mibi_flush`) with the same handling, burst
+  cap and autosave cadence, and each leaves a frame. The ABI is numbers and
+  pointers only; variable-length results come back through one result buffer.
+  `web/site/host.js` is its only caller and hands every frame to one callback,
+  because a dropped diff frame would leave the screen wrong.
+- **The filesystem lives in the module.** `platform/web/vfs.zig` holds files
+  by absolute path with stamps, and implements the platform interface the app
+  already uses (read, atomic write, delete, list, stamp). Writes carry an
+  origin: the editor's writes to `/workspace` are recorded for a real folder,
+  the page's (assets, imports, a folder read in) never are, so nothing is
+  written back that came from there. The VFS makes no host calls, so it is
+  tested natively in `zig build test`.
+- **A real folder is kept in step, not mounted.** The File System Access API
+  is asynchronous and the editor's file calls are not, so the folder is
+  mirrored: read in, checked for changes every few seconds, and written to
+  after saves. Outside changes then reach the editor exactly as on native,
+  through stamps and its idle reload. Before a write, the file's size and
+  modification time are compared with what was last read; a file changed
+  since is not overwritten, and the tab goes back to unsaved instead. That is
+  stricter than native, whose save simply wins, because here a few seconds
+  separate the last look from the write.
+- **Storage is OPFS, one blob.** The session (and, without a real folder, the
+  workspace) is serialised whole and written with `createWritable`, which
+  swaps the file in atomically; IndexedDB holds it where a page cannot write
+  OPFS files. `localStorage` was a 5 MB, string-only, synchronous limit. One
+  Web Lock keeps a second tab from overwriting the first tab's session.
+- **xterm.js is the one dependency, and only on the web side.** The Zig
+  build still has none. xterm.js (MIT) and the Maple Mono NF subset (OFL-1.1)
+  are vendored under `web/site/vendor` with their licences, served with the
+  site, so a build needs no network. Writing a terminal emulator for the page
+  would be a second editor-sized project for no gain in the editor.
+- **Same budgets.** `mibi.wasm` is held to a size budget in the size gate
+  like every native target (about 200 KB, under the 1 MB ceiling), and the
+  web tests run in CI on all three systems: the Zig VFS tests, and Node tests
+  that drive the built module through `host.js` and `folder.js` against an
+  in-memory folder with the same handle API.

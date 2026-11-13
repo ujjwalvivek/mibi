@@ -3,12 +3,19 @@
 ## Unreleased
 
 - The web build: the editor compiles to `wasm32-freestanding` and runs in a
-  browser through xterm.js, with a virtual workspace, session persistence,
-  syntax/themes and the same keys. In Chromium, Open folder is a real folder
-  and saves sync back through the File System Access API; elsewhere it imports
-  a snapshot. The toolbar mirrors the keys a browser reserves, and a WOFF2
-  subset of Maple Mono NF is bundled. See [WEB.md](WEB.md). External commands,
-  live reload and the kitty keyboard protocol are the deliberate gaps.
+  browser through xterm.js, with the same keys, tabs, splits, pickers,
+  themes and session. See [WEB.md](WEB.md).
+  - In Chromium-based browsers, Open folder works on a real folder: saves are
+    written to disk, changes made elsewhere come in within a few seconds
+    (clean tabs reload, tabs with unsaved changes keep them), deleted files
+    leave the workspace, and a save never overwrites a file that changed on
+    disk since it was read: the tab goes back to unsaved instead.
+  - Elsewhere, imported files stay in the browser; Download writes one out.
+  - The session lives in the origin private file system (IndexedDB as a
+    fallback), not `localStorage`; an old `localStorage` session is moved
+    over. One tab runs the editor at a time.
+  - Formatters, the filter and the kitty keyboard protocol are not available.
+  - Published to GitHub Pages by the release workflow.
 - `Unsupported` errors (the web build's missing child processes) say "not
   available in this build" in the status line.
 - Kitty keyboard protocol, opt-in with `kitty_keys = true` in `[editor]`.

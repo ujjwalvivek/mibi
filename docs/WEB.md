@@ -1,211 +1,167 @@
 # The web build
 
-mibi also runs in a browser. It is the **same Zig editor** compiled to
-WebAssembly, with the terminal replaced by [xterm.js](https://xtermjs.org/) and
-the operating system replaced by a virtual filesystem. The text model, widgets,
-commands, keybindings, syntax highlighting and themes are the native ones; the
-web build is a platform backend and a static host, not a second editor.
+mibi also runs in a browser. It is the same Zig editor compiled to
+WebAssembly, with [xterm.js](https://xtermjs.org/) as the terminal and an
+in-memory filesystem in place of the operating system. The text model,
+widgets, commands, keys, syntax highlighting and themes are the native ones;
+the web build is a platform module, an entry point and a static page.
 
-This is the "terminal in a page" surface: every editor feature that does not
-need a real process or a real folder works exactly as it does on the desktop.
+Each release publishes it to GitHub Pages (`.github/workflows/release.yml`).
 
 ## Build and run
 
 ```powershell
 .\build.ps1 web
 python -m http.server 8765 --directory zig-out/web
-# open http://localhost:8765/
+# http://localhost:8765/
 ```
 
-On Linux and macOS:
+On Linux and macOS, `zig build web` and `python3 -m http.server` the same way.
+Any static server works; the page needs nothing from it but files.
 
-```sh
-zig build web
-python3 -m http.server 8765 --directory zig-out/web
-```
+`zig build web` installs the whole site in `zig-out/web`:
 
-`zig build web` installs a self-contained site in `zig-out/web`:
-
-| File | What it is |
+| Path | What it is |
 | --- | --- |
-| `mibi.wasm` | the editor, `wasm32-freestanding`, no libc and no `std.Io` |
-| `index.html`, `main.js` | the host: xterm.js, input, frames, storage, file import/export |
-| `xterm.js`, `xterm.css`, `addon-fit.js` | vendored xterm.js 5.5.0 and fit addon 0.10.0 (MIT) |
-| `MapleMono-NF-Regular.woff2` | a WOFF2 subset of Maple Mono NF, the terminal font (OFL-1.1) |
-| `syntax.d/`, `themes/`, `assets.txt` | the data files the host seeds into the virtual filesystem |
-| `mibi.ini.example` | seeded as `/workspace/mibi.ini` on a first visit |
+| `mibi.wasm` | the editor: `wasm32-freestanding`, no libc, about 200 KB |
+| `index.html`, `main.js` | the page: toolbar, xterm.js, storage, folders |
+| `host.js` | the wasm editor as a JavaScript object; the only caller of its exports |
+| `folder.js` | a real folder kept in step with the editor, both ways |
+| `storage.js` | the session in the origin private file system (or IndexedDB) |
+| `vendor/` | xterm.js 5.5.0, its fit addon, the Maple Mono NF subset, their licences ([web/VENDOR.md](../web/VENDOR.md)) |
+| `syntax.d/`, `themes/`, `assets.txt` | the native data files, and the list the page fetches |
+| `mibi.ini.example`, `LICENSE` | the default settings, and mibi's licence |
 
-`tools/web-assets.ps1` regenerates `web/assets.txt` after adding a language or a
-theme. The vendored xterm files are updated from `web/node_modules`; see
-`web/vendor/README.md`.
+Source lives in `web/site/` (served as is), `src/platform/web/` and
+`src/web_main.zig`. After adding a language or a theme, run
+`tools/web-assets.ps1` to update `web/site/assets.txt`; a test fails until you
+do.
 
 ## How it fits together
 
 ```
-src/core, src/ui, src/app      unchanged
-src/platform/web.zig           the web platform module
-src/platform/web/os.zig        virtual filesystem, clock, host calls
-src/web_main.zig               exported ABI: init, input, tick, frames, VFS
-web/index.html, web/main.js    xterm.js host and the page
+src/core, src/ui, src/app        unchanged
+src/platform/web.zig             the platform module the wasm build selects
+src/platform/web/vfs.zig         the in-memory filesystem (no host calls; native tests)
+src/platform/web/os.zig          the platform interface over it, plus three host calls
+src/web_main.zig                 the exports the page calls: the loop, inverted
+web/site/host.js                 those exports as an Editor object
+web/site/folder.js, storage.js   real folders and persistence
+web/site/main.js, index.html     the page
 ```
 
-The native loop blocks in `poll`; the browser cannot. `src/web_main.zig` is the
-event-driven equivalent:
+The native loop blocks in `poll`; a page cannot. The page calls in with each
+event instead (`mibi_input` with the bytes from xterm.js `onData`,
+`mibi_resize`, `mibi_tick` every 500 ms, `mibi_flush` 30 ms after an
+unfinished escape sequence) and writes each frame that comes back to xterm.js.
+The input is decoded by the same `ansi.Decoder` as on Unix, so the editor sees
+the bytes a terminal would send. xterm.js already speaks everything the
+renderer writes: the alternate screen, SGR mouse reports, focus reports,
+bracketed paste and true colour. The page turns the editor's OSC 52 copy into
+a clipboard write and its OSC 2 title into `document.title`.
 
-- `mibi_init(cols, rows)` builds the app, loads `/syntax.d`, restores the
-  session and returns the first frame.
-- `mibi_input(bytes)` feeds terminal bytes through the same `ansi.Decoder` the
-  Unix build uses, handles every event, and returns a frame.
-- `mibi_flush()` resolves a lone ESC or a split sequence after 30 ms.
-- `mibi_resize(cols, rows)` and `mibi_tick()` mirror the native resize and idle
-  tick, including the two-second session autosave.
-- `mibi_frame_ptr()` / `mibi_frame_len()` expose the ANSI frame; the host writes
-  it to xterm.js.
-- `mibi_vfs_*` seed, read and serialise the virtual filesystem, and report the
-  `/workspace` paths a real folder still has to receive.
+`host.js` hands every frame to one callback, whoever caused it. The renderer
+sends only what changed since the last frame, so a frame that never reached
+xterm.js would leave the screen wrong; one path for frames makes that
+impossible.
 
-The host is deliberately thin. xterm.js supplies the terminal emulation (the
-alternate screen, SGR mouse reports, focus reports, bracketed paste, true
-colour) and `onData` gives the editor the same bytes a real terminal would.
-The host also turns the editor's OSC 52 copy sequence into a browser clipboard
-write, and OSC 2 into `document.title`.
+## Files
 
-## What works
+The editor sees one filesystem:
 
-| Feature | Web |
-| --- | --- |
-| Editing, UTF-8, undo/redo, selections, multi-cursor | yes |
-| Tabs, splits, pane focus, layout restore | yes |
-| Search/replace, regex, go-to-line | yes |
-| File tree, fuzzy picker, command palette, theme picker | yes, over the virtual workspace |
-| Syntax highlighting, themes, `mibi.ini`, keybindings | yes |
-| Mouse click/drag/wheel, bracketed paste, focus | yes, through xterm.js |
-| Soft wrap, matching brackets, line operations, comment toggle | yes |
-| Session restore (tabs, splits, cursors, unsaved buffers) | yes, in this browser |
-| Internal clipboard and OSC 52 to the system clipboard | yes, where the browser allows clipboard writes |
-| Open folder in Chromium | a real folder; Save writes back through the File System Access API |
-| Open files, and Open folder elsewhere | a snapshot in the virtual workspace; Download exports |
-| Toolbar for browser-reserved keys | yes: Find, Replace, Go to, Palette, Tree, Split, panes, tabs, Keys, Quit |
-| Drag and drop files onto the page | yes, files (not folders) |
+```
+/workspace/      the user's files: a real folder, or imported files
+/state/          the session: tabs, panes, cursors, unsaved text
+/mibi.ini        default settings, as shipped next to the native binary
+/syntax.d/, /themes/   fetched from the site on every load, never stored
+/welcome.txt     the first visit's tab
+```
 
-## Real folders (Chromium)
+`/workspace` is the working directory, so a `mibi.ini` there wins over
+`/mibi.ini`, as natively.
 
-`Open folder` uses `showDirectoryPicker` when the browser has it. The handle is
-stored in IndexedDB; after a reload the browser asks for permission again and
-the toolbar shows **Reconnect**. Import reads text files into `/workspace`,
-skipping `.git`, `node_modules`, `.zig-cache`, `zig-out`, `target`, `dist`,
-`build`, `.next`, files over 2 MB, files that do not decode as UTF-8, and stops
-at 2,000 files.
+### A real folder (Chromium-based browsers)
 
-Saves, theme changes and `mibi.ini` edits are written back through
-`createWritable`: the web platform records every changed `/workspace` path and
-the host writes them to the folder about 300 ms after the keystroke. **Refresh**
-re-reads the folder; it updates files but does not remove files deleted on
-disk. There is no conflict detection: if another program changes a file while
-the editor has it open, the next save wins. A closed tab can lose a keystroke
-that had not reached the 300 ms sync.
+**Open folder** uses `showDirectoryPicker`. The folder is read into
+`/workspace` (text files only: binary files, files over 4 MB and `.git`,
+`node_modules`, build output and similar directories are skipped; at most
+5,000 files). From then on `folder.js` keeps the two in step:
 
-Browsers without the File System Access API use the `webkitdirectory` snapshot
-instead, and the workspace is kept in `localStorage` like before.
+- **Saves go to disk** about 300 ms later, through `createWritable`, which
+  writes a swap file and replaces the original whole. The filesystem records
+  each `/workspace` path the editor writes or deletes; reading the folder in
+  is never recorded, so it is never written back.
+- **Changes made elsewhere come in.** The folder is checked every 2.5 seconds
+  while the page is visible, and when it regains focus. A new or changed file
+  is read in and gets a new stamp; the editor's own idle tick then does what
+  it does natively: a clean tab reloads, a tab with unsaved changes keeps them
+  and says the file changed on disk. Deleted files and directories leave the
+  workspace.
+- **A save never overwrites someone else's change.** Before writing, the size
+  and modification time on disk are compared with what was last read. If the
+  file changed since (another program saved between two checks), the save is
+  not written: the folder's version comes into the editor, the tab goes back
+  to unsaved with the user's text in it, and the status line says so. Saving
+  again is then a deliberate overwrite. Deleting works the same way.
+- **Failures are kept.** A write that fails (quota, a locked file) goes back
+  on the list and is tried with the next one; the status line says so. If the
+  browser withdraws permission, the toolbar offers **Reconnect**; if the
+  folder disappears, tabs keep their text.
 
-## Toolbar
+Folder checks and writes never run at once: each waits for the one before.
+The folder handle is kept in IndexedDB; after a reload the browser asks for
+permission again (**Reconnect**).
 
-The toolbar duplicates the keys a browser reserves, so they have a mouse
-equivalent: `Ctrl+W`/`Ctrl+T` (Close/New), `Ctrl+R` (Replace), `Ctrl+F` (Find),
-`Ctrl+G` (Go to), `Ctrl+P` (Palette), `Ctrl+B` (Tree), `Ctrl+PgUp`/`PgDn`
-(previous/next tab), `F5`/`F7` (split), `Shift+F5` (close pane), `F6`/`Shift+F6`
-(panes), `F1` (Keys) and `Ctrl+Q` (Quit). It also has the host's own actions:
-Open files, Open folder, Download and the web notes.
+### Without a real folder
 
-## Font
-
-The page bundles a WOFF2 subset of **Maple Mono NF** and uses it for the whole
-surface. The subset covers Latin, punctuation, arrows, box drawing and the
-Nerd Font icon ranges the file tree uses, so the icons work without installing
-anything. It is OFL-1.1; see `LICENSE.MapleMono-NF.txt` in the built site.
-`tools/subset-font.ps1` regenerates the subset from a full Maple Mono NF TTF.
-
-## What cannot be the same
-
-These are flagged in the page's `?` panel as well.
-
-- **External commands.** Formatters (`F4`) and the filter (`Alt+X`) spawn a
-  child process. A browser cannot. The command reports "not available in this
-  build" in the status line.
-- **A real folder is Chromium-only.** Firefox and Safari import a snapshot
-  instead. Even in Chromium, Refresh does not delete files removed on disk, and
-  a file changed outside the editor can be overwritten by the next save.
-  Files over 2 MB, binary files and heavy directories are skipped on import.
-  The folder handle survives a reload in IndexedDB, but the permission has to
-  be granted again with the Reconnect button.
-- **The kitty keyboard protocol.** xterm.js does not implement it, so
-  `kitty_keys` has no effect in the browser.
-- **Some browser shortcuts.** `Ctrl+W`, `Ctrl+T`, `Ctrl+N`, `Ctrl+R`, `F5` and
-  `F12` are reserved by the browser and cannot always be intercepted. The
-  toolbar duplicates every editor key that matters, including Find, Replace,
-  splits, panes, tabs, Keys and Quit.
-- **Nerd Font icons.** The web build bundles a subset of Maple Mono NF, so the
-  file tree's icons work without installing a font. Glyphs outside the subset
-  fall back to the browser's fonts.
-- **Quit.** `Ctrl+Q` does not close the tab. It saves the session and shows a
-  "Session saved" overlay with a Reopen button.
-- **Storage size.** The workspace and session are serialised into
-  `localStorage` (about 5 MB). Download important files. IndexedDB or OPFS is
-  the next step for larger workspaces.
-- **Multiple browser tabs.** Each tab is its own wasm instance; they share the
-  same `localStorage` key, so the last writer wins. Use one editor tab.
-- **Binary files, file permissions, symlinks, printing, process environment.**
-  Not applicable to the virtual filesystem.
-- **Mobile keyboards.** xterm.js has a hidden textarea and generally works, but
-  the toolbar is the reliable way to open/save on a phone; this is untested.
+**Open files**, **Open folder** (in browsers without the picker) and dropping
+files on the page import copies into `/workspace`. They stay in this browser
+with the session. **Download** writes the focused file out.
 
 ## Storage
 
-The virtual filesystem is seeded at every load:
+The page keeps one blob: the persisted files serialised by
+`Vfs.serialize` (`MIBIVFS1`: a count, then path and data pairs). With a real
+folder only `/state` and `/mibi.ini` are in it; without one, the workspace too.
+It goes to `mibi-state.bin` in the origin private file system, or IndexedDB
+where a page cannot write OPFS files. It is written at most once a second
+while something changes, and when the page is hidden (the last moment a
+closing tab can be relied on). Before that, the session is saved into the
+filesystem (`mibi_checkpoint`), not left for the next autosave. The page asks
+the browser to keep the storage persistent. A blob that does not parse whole is
+ignored rather than half-loaded. The first run moves an old `localStorage`
+session over and deletes it.
 
-- `/syntax.d/*.ini` and `/themes/*.ini` come from the site (`assets.txt`).
-- `/workspace/mibi.ini` comes from `mibi.ini.example` if the user has not
-  edited one.
-- `/workspace/welcome.txt` is created on a first visit.
+Only one tab runs the editor (a Web Lock). A second tab offers to take over;
+the first then saves and stops, so two never overwrite each other's session.
 
-The workspace and session are persisted, not the seeded assets:
+## What is different from native
 
+| | Web |
+| --- | --- |
+| Editing, tabs, splits, search and replace, the tree, pickers, themes, mouse, paste, wrap, session | the same |
+| Files | a real folder in Chromium-based browsers; imported copies elsewhere |
+| Formatters (`F4`) and the filter (`Alt+X`) | "not available in this build": a page cannot run programs |
+| Kitty keyboard protocol | no effect: xterm.js does not implement it |
+| Keys the browser keeps | `Ctrl+W`, `Ctrl+T`, `Ctrl+N` and a few more never reach the page; the toolbar has every editor key that matters |
+| `Ctrl+Q` | saves the session and shows a Reopen button; a page cannot close its tab |
+| Font | a bundled subset of Maple Mono NF, so the tree's icons need no installed font |
+
+## Tests
+
+```sh
+zig build test-web                  # the filesystem, natively (part of zig build test)
+zig build web
+node --test web/test/web.test.mjs   # the page's own code, on the real mibi.wasm
 ```
-/workspace/*      imported and saved files, mibi.ini
-/state/session    tabs, panes, cursors, tree state
-/state/buffer-*   unsaved buffers
-```
 
-Without a real folder, the host serialises both as a small binary blob
-(`MIBIVFS1`), base64-encodes it and stores it under `mibi.vfs` in
-`localStorage`, at most every two seconds and on `beforeunload`. With a real
-folder, only `/state` is serialised: the workspace is already on disk.
-`localStorage.removeItem('mibi.vfs')` resets the session (and, without a
-folder, the workspace).
+The Node tests load the built `mibi.wasm` through `host.js` and drive it as
+the page does: typing, saving, line endings, the session across a reload, a
+damaged blob, and `folder.js` against an in-memory folder that implements the
+same handle API (`web/test/memfs.mjs`): reading a folder in, saves, new
+directories, outside changes to clean and dirty tabs, the save conflict,
+deletions, failed writes and ordering. CI runs them on Linux, macOS and
+Windows; the size gate holds `mibi.wasm` to its budget.
 
-## Testing hook
-
-`?send=` feeds URL-encoded bytes through the same `mibi_input` path as a
-keyboard, which is useful for smoke tests and for checking a build without a
-keyboard:
-
-```
-http://localhost:8765/?send=%13                 # Ctrl+S
-http://localhost:8765/?send=%0fmibi%0d          # Ctrl+O, type "mibi", Enter
-http://localhost:8765/?send=%1b[15~             # F5 (split)
-```
-
-`?opfs=1` creates and imports a small directory in the origin private file
-system, which exercises the real-folder import/sync path without a native
-directory picker. It is for development only.
-
-This is a debug hook, not part of the editor's normal interface.
-
-## Next steps
-
-- Delete and conflict handling for real folders: remove files deleted on disk
-  and warn when a file changed outside while it is open.
-- OPFS/IndexedDB instead of `localStorage` for large snapshot workspaces.
-- A canvas renderer if the terminal-in-a-page look is not what is wanted; the
-  cell grid in `src/ui/screen.zig` can be drawn directly.
-- LSP over a WebSocket transport, once the native client exists.
+`?send=` feeds URL-encoded bytes in as if typed, for checking a deployed
+build: `?send=%0f` is `Ctrl+O`.

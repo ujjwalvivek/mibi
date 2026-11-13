@@ -49,24 +49,20 @@ archives and attaches them to a GitHub release
 
 ## Web build
 
-The same editor compiles to WebAssembly and runs in a browser, with xterm.js as
-the terminal and a virtual workspace in place of a real folder:
+The same editor compiles to WebAssembly and runs in a browser, with xterm.js
+as the terminal. Each release publishes it to GitHub Pages; to run it locally:
 
 ```powershell
-.\build.ps1 web
+.uild.ps1 web
 python -m http.server 8765 --directory zig-out/web
 # http://localhost:8765/
 ```
 
-The editor is unchanged; the browser gets a platform backend
-(`src/platform/web.zig`), an exported event-driven loop (`src/web_main.zig`) and
-a static host (`web/`). Syntax highlighting, themes, tabs, splits, the pickers,
-the mouse, paste, search and the session all work. In Chromium, **Open folder**
-is a real folder and **Save** writes back through the File System Access API;
-elsewhere it imports a snapshot. The toolbar duplicates the keys the browser
-reserves. The page bundles a WOFF2 subset of Maple Mono NF. External commands
-(formatters, the filter), live reload and the kitty keyboard protocol do not
-work; [docs/WEB.md](docs/WEB.md) has the full list and the architecture.
+In Chromium-based browsers **Open folder** edits a real folder: saves go to
+disk, changes made elsewhere show up, and a save never overwrites a file that
+changed on disk meanwhile. Other browsers keep imported files in the browser.
+Formatters and the filter need a process and are not available.
+[docs/WEB.md](docs/WEB.md) has the details.
 
 ## Configuration
 
