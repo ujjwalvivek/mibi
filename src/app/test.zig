@@ -1274,6 +1274,9 @@ test "shift and wheel, or a horizontal wheel, scrolls sideways without moving th
     h.mouseWith(.wheel_left, 10, 2, .{});
     h.mouseWith(.wheel_up, 10, 2, .{ .shift = true });
     try testing.expectEqual(@as(usize, 0), h.app.view().scroll_col);
+    h.mouseWith(.wheel_down, 10, 2, .{ .alt = true }); // alt works too, for terminals that keep shift
+    try testing.expectEqual(@as(usize, 4), h.app.view().scroll_col);
+    h.mouseWith(.wheel_up, 10, 2, .{ .alt = true });
     h.mouseWith(.wheel_left, 10, 2, .{}); // stops at the left edge
     try testing.expectEqual(@as(usize, 0), h.app.view().scroll_col);
     // It stops at the end of the widest visible line.

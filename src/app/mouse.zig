@@ -94,9 +94,9 @@ pub fn handle(app: *App, m: event.Mouse) !void {
             app.tabbar.hover = if (y == 0) app.tabbar.hit(x) else .none;
         },
         .wheel_up, .wheel_down, .wheel_left, .wheel_right => {
-            // Shift turns the vertical wheel sideways, for mice without a
+            // Shift or Alt turns the vertical wheel sideways, for mice without a
             // horizontal one; terminals with one send left and right.
-            const sideways = m.kind == .wheel_left or m.kind == .wheel_right or m.mods.shift;
+            const sideways = m.kind == .wheel_left or m.kind == .wheel_right or m.mods.shift or m.mods.alt;
             const down = m.kind == .wheel_down or m.kind == .wheel_right;
             if (sideways) {
                 // Only the editor panes scroll sideways, and not with soft
