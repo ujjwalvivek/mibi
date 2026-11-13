@@ -16,6 +16,10 @@
     fallback), not `localStorage`; an old `localStorage` session is moved
     over. Settings are shared between workspaces. One tab runs the editor at
     a time.
+  - The page is one top bar in the house style: where the files are and how
+    they are, Open folder, Open files, Download, the command palette, and a
+    keys panel. `alt+t`, `alt+w` and `alt+pgup/pgdn` stand in for the four
+    keys a browser never hands over; every other key works as natively.
   - Formatters, the filter and the kitty keyboard protocol are not available.
   - Deployed to Cloudflare Pages at <https://mibi.ujjwalvivek.com> after the
     web tests pass.

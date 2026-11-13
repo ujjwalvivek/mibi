@@ -61,7 +61,9 @@ python -m http.server 8765 --directory zig-out/web
 In Chromium-based browsers **Open folder** edits a real folder: saves go to
 disk, changes made elsewhere show up, and a save never overwrites a file that
 changed on disk meanwhile. Other browsers keep imported files in the browser.
-Formatters and the filter need a process and are not available.
+Formatters and the filter need a process and are not available, and since a
+browser keeps `ctrl+t`, `ctrl+w` and `ctrl+pgup/pgdn`, `alt` stands in for
+`ctrl` on those.
 [docs/WEB.md](docs/WEB.md) has the details.
 
 ## Configuration

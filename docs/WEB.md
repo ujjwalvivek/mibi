@@ -26,7 +26,8 @@ Any static server works; the page needs nothing from it but files.
 | Path | What it is |
 | --- | --- |
 | `mibi.wasm` | the editor: `wasm32-freestanding`, no libc, about 200 KB |
-| `index.html`, `main.js` | the page: toolbar, xterm.js, storage, folders |
+| `index.html`, `main.js` | the page: top bar, xterm.js, storage, folders |
+| `mibi.svg` | the mark, used as the favicon and in the top bar |
 | `host.js` | the wasm editor as a JavaScript object; the only caller of its exports |
 | `folder.js` | a real folder kept in step with the editor, both ways |
 | `storage.js` | the session in the origin private file system (or IndexedDB) |
@@ -108,7 +109,7 @@ The editor sees one filesystem:
   again is then a deliberate overwrite. Deleting works the same way.
 - **Failures are kept.** A write that fails (quota, a locked file) goes back
   on the list and is tried with the next one; the status line says so. If the
-  browser withdraws permission while the folder is open, the toolbar offers
+  browser withdraws permission while the folder is open, the top bar offers
   **Reconnect**, and saves made meanwhile go out after it. If the folder
   disappears, tabs keep their text.
 
@@ -160,9 +161,25 @@ the first then saves and stops, so two never overwrite each other's session.
 | Files | a real folder in Chromium-based browsers; imported copies elsewhere |
 | Formatters (`F4`) and the filter (`Alt+X`) | "not available in this build": a page cannot run programs |
 | Kitty keyboard protocol | no effect: xterm.js does not implement it |
-| Keys the browser keeps | `Ctrl+W`, `Ctrl+T`, `Ctrl+N` and a few more never reach the page; the toolbar has every editor key that matters |
+| Keys the browser keeps | `ctrl+t`, `ctrl+w` and `ctrl+pgup/pgdn` never reach a page, so `alt` stands in for `ctrl` on those four; every other key is kept from the browser and works as natively |
 | `Ctrl+Q` | saves the session and shows a Reopen button; a page cannot close its tab |
 | Font | a bundled subset of Maple Mono NF, so the tree's icons need no installed font |
+
+## The page
+
+The page follows the house style for browser tools (UV Web Tools, Monochrome
+ground). One 40px top bar holds the mark, the name, a status line saying where
+the files are and how they are (`files kept in this browser`, `projA · in
+sync with the folder`, `needs permission; saves wait`, with a dot whose colour
+always comes with those words), and a few actions: Open files, Download,
+Commands (the palette), Keys, `?` and one accent action, Open folder. Keys and
+`?` open floating panels; Escape or a click elsewhere closes them and gives the
+editor its keys back. Everything else is the editor.
+
+The page uses the editor's own accent, the green of its status bar, and sets
+everything in the terminal's font, Maple Mono NF, so chrome and editor read as
+one surface. Corners are square (2px), depth is borders and grey steps, and
+the only shadow is on floating panels.
 
 ## Tests
 
