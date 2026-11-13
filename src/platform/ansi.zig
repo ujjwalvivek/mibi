@@ -378,7 +378,13 @@ fn parseMouse(body: []const u8, final: u8, len: usize) Parsed {
         else => .none,
     };
     if (code & 64 != 0) {
-        mouse.kind = if (code & 1 == 0) .wheel_up else .wheel_down;
+        // Buttons 64 to 67: up, down, then the horizontal pair.
+        mouse.kind = switch (code & 3) {
+            0 => .wheel_up,
+            1 => .wheel_down,
+            2 => .wheel_left,
+            else => .wheel_right,
+        };
     } else if (code & 32 != 0) {
         mouse.kind = if (button == .none) .move else .drag;
         mouse.button = button;
@@ -489,6 +495,7 @@ test "mouse reports" {
     try expectDecodes("\x1b[<32;10;2M", "mouse drag left 9,1\n");
     try expectDecodes("\x1b[<35;10;2M", "mouse move none 9,1\n");
     try expectDecodes("\x1b[<64;1;1M\x1b[<65;1;1M", "mouse wheel_up none 0,0\nmouse wheel_down none 0,0\n");
+    try expectDecodes("\x1b[<66;1;1M\x1b[<67;1;1M", "mouse wheel_left none 0,0\nmouse wheel_right none 0,0\n");
     try expectDecodes("\x1b[<16;2;2M", "mouse press left 1,1 ctrl\n");
     // Malformed reports are dropped.
     try expectDecodes("\x1b[<0;5Ma", "a\n");

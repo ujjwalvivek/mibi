@@ -21,6 +21,8 @@ const drag_threshold = 3;
 const click_ms = 500;
 /// Lines one notch of the wheel scrolls.
 const wheel_lines = 3;
+/// Cells one notch of the horizontal wheel (or shift and wheel) scrolls.
+const wheel_cols = 4;
 
 pub const DropSide = enum { left, right, top, bottom };
 
@@ -91,8 +93,20 @@ pub fn handle(app: *App, m: event.Mouse) !void {
         .move => {
             app.tabbar.hover = if (y == 0) app.tabbar.hit(x) else .none;
         },
-        .wheel_up, .wheel_down => {
-            const down = m.kind == .wheel_down;
+        .wheel_up, .wheel_down, .wheel_left, .wheel_right => {
+            // Shift turns the vertical wheel sideways, for mice without a
+            // horizontal one; terminals with one send left and right.
+            const sideways = m.kind == .wheel_left or m.kind == .wheel_right or m.mods.shift;
+            const down = m.kind == .wheel_down or m.kind == .wheel_right;
+            if (sideways) {
+                // Only the editor panes scroll sideways, and not with soft
+                // wrap on, where every line already fits the window.
+                const id = app.layout.paneAt(x, y) orelse return;
+                const p = &app.panes[id].?;
+                p.view.scrollColBy(if (down) wheel_cols else -@as(isize, wheel_cols), app.rows);
+                p.reveal = false;
+                return;
+            }
             if (y == 0) return app.tabbar.scrollBy(if (down) 1 else -1);
             if (app.tree) |*t| {
                 if (x < drawing.sidebarWidth(app)) {

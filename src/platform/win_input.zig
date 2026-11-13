@@ -28,6 +28,7 @@ pub const BUTTON_MIDDLE: u32 = 0x0004;
 pub const MOUSE_MOVED: u32 = 0x0001;
 pub const DOUBLE_CLICK: u32 = 0x0002;
 pub const MOUSE_WHEELED: u32 = 0x0004;
+pub const MOUSE_HWHEELED: u32 = 0x0008;
 
 pub const KeyRecord = struct {
     vk: u16,
@@ -133,6 +134,11 @@ pub const Translator = struct {
         const buttons = rec.buttons & (BUTTON_LEFT | BUTTON_RIGHT | BUTTON_MIDDLE);
         const was = self.held;
 
+        if (rec.flags & MOUSE_HWHEELED != 0) {
+            const delta: i16 = @bitCast(@as(u16, @truncate(rec.buttons >> 16)));
+            out.kind = if (delta > 0) .wheel_right else .wheel_left;
+            return out;
+        }
         if (rec.flags & MOUSE_WHEELED != 0) {
             // The wheel delta is the high word of the button state, signed.
             const delta: i16 = @bitCast(@as(u16, @truncate(rec.buttons >> 16)));

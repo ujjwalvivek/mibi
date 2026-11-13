@@ -89,6 +89,12 @@ const Harness = struct {
         self.draw();
     }
 
+    fn mouseWith(self: *Harness, kind: event.Mouse.Kind, x: u16, y: u16, mods: event.Mods) void {
+        self.app.now_ms += 10;
+        self.app.handle(.{ .mouse = .{ .kind = kind, .x = x, .y = y, .mods = mods } });
+        self.draw();
+    }
+
     fn click(self: *Harness, x: u16, y: u16) void {
         self.mouse(.press, x, y);
         self.mouse(.release, x, y);
@@ -1252,4 +1258,41 @@ test "alt+x pipes the selection, or everything, through a shell command" {
     try h.keys("alt+x esc alt+x enter");
     try testing.expect(h.app.prompt == null);
     try h.expectText("apple\nfig\n");
+}
+
+test "shift and wheel, or a horizontal wheel, scrolls sideways without moving the cursor" {
+    var h = try Harness.initSized("0123456789abcdefghijklmnopqrstuvwxyz\nshort", 20, 6);
+    defer h.deinit();
+    const at = h.head();
+    h.mouseWith(.wheel_down, 10, 2, .{ .shift = true });
+    try testing.expectEqual(@as(usize, 4), h.app.view().scroll_col);
+    try testing.expectEqual(@as(usize, 0), h.app.view().scroll_row); // not vertical
+    try testing.expectEqual(at, h.head());
+    try testing.expectEqualStrings("1 456789abcdefghijkl", h.row(1));
+    h.mouseWith(.wheel_right, 10, 2, .{});
+    try testing.expectEqual(@as(usize, 8), h.app.view().scroll_col);
+    h.mouseWith(.wheel_left, 10, 2, .{});
+    h.mouseWith(.wheel_up, 10, 2, .{ .shift = true });
+    try testing.expectEqual(@as(usize, 0), h.app.view().scroll_col);
+    h.mouseWith(.wheel_left, 10, 2, .{}); // stops at the left edge
+    try testing.expectEqual(@as(usize, 0), h.app.view().scroll_col);
+    // It stops at the end of the widest visible line.
+    var i: usize = 0;
+    while (i < 30) : (i += 1) h.mouseWith(.wheel_right, 10, 2, .{});
+    try testing.expectEqual(@as(usize, 35), h.app.view().scroll_col);
+    // Typing brings the cursor back into view.
+    try h.typeText("x");
+    try testing.expectEqual(@as(usize, 1), h.app.view().scroll_col);
+}
+
+test "with soft wrap, shift and wheel does not scroll sideways" {
+    var h = try Harness.initSized("0123456789abcdefghijklmnopqrstuvwxyz", 20, 6);
+    defer h.deinit();
+    config_mod.apply(&h.app.config, "soft_wrap = true\n");
+    h.draw();
+    h.mouseWith(.wheel_down, 10, 2, .{ .shift = true });
+    h.mouseWith(.wheel_right, 10, 2, .{});
+    try testing.expectEqual(@as(usize, 0), h.app.view().scroll_col);
+    try testing.expectEqual(@as(usize, 0), h.app.view().scroll_row);
+    try testing.expectEqual(@as(usize, 0), h.app.view().scroll_sub);
 }

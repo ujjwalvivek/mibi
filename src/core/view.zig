@@ -215,6 +215,24 @@ pub const View = struct {
         self.scroll_sub = top.sub;
     }
 
+    /// Scroll sideways by cells (negative is left) without moving any
+    /// cursor. Stops at the widest line among the `rows` lines on screen,
+    /// so the window never scrolls past all the text. Does nothing with
+    /// soft wrap, where no line is wider than the window.
+    pub fn scrollColBy(self: *View, delta: isize, rows: usize) void {
+        if (self.wrap_cols > 0) return;
+        var widest: usize = 0;
+        var row = self.scroll_row;
+        const end = @min(self.scroll_row + rows, self.lastRow() + 1);
+        while (row < end) : (row += 1) widest = @max(widest, text.cellWidth(self.lineText(row), self.tab_width));
+        const limit = widest -| 1;
+        if (delta < 0) {
+            self.scroll_col -|= @abs(delta);
+        } else {
+            self.scroll_col = @min(self.scroll_col + @abs(delta), @max(limit, self.scroll_col));
+        }
+    }
+
     /// Keep the scroll position inside the document after it shrank, the
     /// window changed width, or wrap was switched.
     pub fn clampScroll(self: *View) void {

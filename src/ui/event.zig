@@ -199,7 +199,7 @@ pub const Key = struct {
 };
 
 pub const Mouse = struct {
-    pub const Kind = enum { press, release, drag, move, wheel_up, wheel_down };
+    pub const Kind = enum { press, release, drag, move, wheel_up, wheel_down, wheel_left, wheel_right };
     pub const Button = enum { left, middle, right, none };
 
     kind: Kind,

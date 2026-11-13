@@ -223,7 +223,9 @@ packaging.
   picker rows (click again to accept), click the status-bar hint for help;
   double click selects a word and triple a line, dragging selects, and
   `Ctrl+click` adds a cursor. The wheel scrolls three lines per notch without
-  moving the cursor. Over the tab bar the wheel scrolls the
+  moving the cursor; `Shift` with the wheel (or a horizontal wheel) scrolls
+  four columns sideways, except with soft wrap, where nothing is wider than
+  the window. Over the tab bar the wheel scrolls the
   strip instead. On Windows quick-edit mode is turned off so the console
   reports clicks; on Unix the terminal is asked for SGR mouse reports.
 - Bracketed paste: pasted text goes in as one undo step, exactly as it is.
