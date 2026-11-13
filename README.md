@@ -5,13 +5,14 @@
 A tiny, modern terminal text editor. Non-modal, in the spirit of nano/micro,
 built in Zig with no third-party dependencies.
 
-Status: **0.1.0**, the rebuilt editor: a text model, widgets and a platform
-layer that the build keeps apart, tested on Linux, macOS and Windows on every
-push. Archives for all three are on the
+Status: **0.2.0**, the rebuilt editor and its web build: a text model, widgets
+and a platform layer that the build keeps apart, tested on Linux, macOS and
+Windows on every push. Archives for all three are on the
 [releases page](https://github.com/ujjwalvivek/mibi/releases). See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it is put together and why.
 Cross-platform (Linux, macOS, Windows). It also compiles to WebAssembly and
-runs in a browser; see [docs/WEB.md](docs/WEB.md).
+runs in a browser at <https://mibi.ujjwalvivek.com>; see
+[docs/WEB.md](docs/WEB.md).
 
 ```
 mibi                # the last session in this directory, or a new buffer
@@ -315,15 +316,16 @@ budget; the hard ceiling is 1 MB.
 
 | Target            |   Bytes |
 | ----------------- | ------: |
-| aarch64-linux-gnu | 172,680 |
-| x86_64-linux-gnu  | 196,272 |
-| x86_64-macos      | 207,666 |
-| aarch64-macos     | 219,080 |
-| x86_64-windows    | 249,856 |
+| aarch64-linux-gnu | 180,424 |
+| x86_64-linux-gnu  | 205,264 |
+| x86_64-macos      | 216,129 |
+| aarch64-macos     | 236,808 |
+| x86_64-windows    | 258,048 |
+| wasm32 (web)      | 201,252 |
 
 ## Changelog
 
-See [docs/CHANGELOG.md](docs/CHANGELOG.md); the current release is **v0.1.0**.
+See [docs/CHANGELOG.md](docs/CHANGELOG.md); the current release is **v0.2.0**.
 
 ## Licence
 

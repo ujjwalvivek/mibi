@@ -1,6 +1,6 @@
 .{
     .name = .mibi,
-    .version = "0.0.2",
+    .version = "0.2.0",
     .fingerprint = 0xccabd0b40c275194,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},

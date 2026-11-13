@@ -38,7 +38,7 @@ if (-not (Test-Path $Zig)) {
 # whole page (adding the Unix file stamp moved it 200,616 from 184,200 while
 # the x86_64-macos build grew 65 bytes for the same change).
 #
-# wasm32 is the browser build (`zig build web`), set at 201,124 bytes when
+# wasm32 is the browser build (`zig build web`), set at 201,252 bytes when
 # the web platform was reworked for 0.2.0.
 $targets = [ordered]@{
     'x86_64-linux-gnu'   = @{ budget = 208 * $KB; exe = 'mibi' }

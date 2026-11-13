@@ -1,6 +1,6 @@
 name: release
 
-# Pushing a tag like v0.1.0 tests it, builds the archives for every target
+# Pushing a tag like v0.2.0 tests it, builds the archives for every target
 # and attaches them to a GitHub release. The tag must match the version the
 # binary reports, so a release can never carry the wrong number. The web
 # build is deployed by deploy-web.yml.

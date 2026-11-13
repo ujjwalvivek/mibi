@@ -38,7 +38,7 @@ pub const Config = config_mod.Config;
 const View = core.View;
 const Selection = core.Selection;
 
-pub const version = "0.1.0";
+pub const version = "0.2.0";
 
 /// One pane: a view of a document. Two panes may show the same document;
 /// each has its own cursors and scroll.

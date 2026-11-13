@@ -1,6 +1,6 @@
 # mibi architecture: decisions for the rebuild
 
-Status: **accepted**, 2026-11-12; all four steps are built and released as v0.1.0. This record reassesses the design from phase 0
+Status: **accepted**, 2026-11-12; all four steps are built and released as v0.1.0, and the web build followed in v0.2.0. This record reassesses the design from phase 0
 up. It says what stays, what is replaced, and why, and it fixes the order of
 the work. It supersedes section 3 of the local `PLAN.md`; the product scope in
 that plan (ox-lite, no plugins, no embedded terminal) is unchanged.

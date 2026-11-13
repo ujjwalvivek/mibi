@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.2.0
 
 - The web build: the editor compiles to `wasm32-freestanding` and runs in a
   browser through xterm.js, with the same keys, tabs, splits, pickers,
@@ -23,6 +23,10 @@
   - Formatters, the filter and the kitty keyboard protocol are not available.
   - Deployed to Cloudflare Pages at <https://mibi.ujjwalvivek.com> after the
     web tests pass.
+  - The file tree's Nerd Font icons use the NFMono subset, so they fit one
+    cell, including the bold selected row; they no longer clip.
+  - One-finger drags scroll the editor on phones, vertically and sideways; a
+    tap is still a click.
 - `Unsupported` errors (the web build's missing child processes) say "not
   available in this build" in the status line.
 - Kitty keyboard protocol, opt-in with `kitty_keys = true` in `[editor]`.
