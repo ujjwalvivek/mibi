@@ -47,6 +47,7 @@
     }
     #overlay h2 { margin: 0 0 8px; font-size: 16px; }
     #overlay p { margin: 0 0 12px; color: #b9c0cc; }
+    #overlay button.alt { color: #d8dee9; background: #282838; border: 1px solid #3a3a4a; margin-left: 6px; }
     #overlay button {
       font: inherit; color: #0e0e0e; background: #8bd450; border: 0;
       border-radius: 5px; padding: 6px 12px; cursor: pointer;
@@ -72,7 +73,8 @@
       <div class="group">
         <button id="open-files" title="Import files into the browser workspace">Open files</button>
         <button id="open-folder" title="Open a real folder (Chromium) or import a snapshot">Open folder</button>
-        <button id="folder-action" title="Refresh the open folder" hidden>Refresh</button>
+        <button id="folder-action" title="Read the folder again now" hidden>Refresh</button>
+        <button id="close-folder" title="Back to the files kept in this browser" hidden>Close folder</button>
         <button data-command="open" title="Find file (Ctrl+O)">Find file</button>
       </div>
       <div class="group">
@@ -118,6 +120,7 @@
       <h2 id="overlay-title">mibi</h2>
       <p id="overlay-text"></p>
       <button id="overlay-button">Reopen</button>
+      <button id="overlay-alt" class="alt" hidden></button>
     </div>
   </div>
 

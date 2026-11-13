@@ -3,10 +3,14 @@
 // The rest is what a browser has instead of an operating system: storage for
 // the session (storage.js), a real folder or imported files for /workspace
 // (folder.js), and buttons for the keys the browser keeps for itself.
+//
+// One workspace per page load. The files kept in the browser and each real
+// folder have their own session, so switching between them reloads the page
+// into the other one, as starting mibi in another directory does natively.
 
 import { Editor, decodeText } from "./host.js";
 import { FolderSync } from "./folder.js";
-import { openStore, kvGet, kvSet } from "./storage.js";
+import { openStore, folderKey, kvGet, kvSet } from "./storage.js";
 
 const PERSIST_MS = 1000; // at most this often while typing, and on hide
 const SCAN_MS = 2500; // how often a real folder is checked for changes
@@ -19,6 +23,8 @@ const ui = {
   overlayTitle: $("overlay-title"),
   overlayText: $("overlay-text"),
   overlayButton: $("overlay-button"),
+  overlayAlt: $("overlay-alt"),
+  closeFolder: $("close-folder"),
   help: $("help"),
   fileInput: $("file-input"),
   folderInput: $("folder-input"),
@@ -29,12 +35,14 @@ const ui = {
 let editor = null;
 let term = null;
 let fit = null;
-let store = null;
+let store = null; // this workspace's session
+let settingsSaved = null; // /mibi.ini as last stored, shared by every workspace
 let folder = null; // FolderSync, when a real folder is open
-let pendingHandle = null; // a folder from last time, waiting for permission
+let pendingHandle = null; // the folder lost its permission while open
+let notices = []; // status lines from before the editor started
 let lastPersist = 0;
 let persistTimer = 0;
-let persisting = false;
+let saving = Promise.resolve(); // storage writes, one after another
 let persistAgain = false; // the last save failed: try again even if nothing changed
 let scanning = false;
 let flushTimer = 0;
@@ -68,25 +76,27 @@ async function boot() {
     showOverlay("Starting mibi…", "Loading the editor.", null);
     if (!(await holdTabLock())) return;
     editor = await Editor.load(await fetch("mibi.wasm"));
-    setupTerminal();
+    await setupTerminal();
     editor.onFrame = write;
 
-    store = await openStore();
+    const handle = await folderFromLastTime();
+    store = await openStore(handle ? await folderKey(handle) : "browser");
     const saved = await store.load().catch((err) => {
       console.warn("mibi: could not read the saved session", err);
       return null;
     });
-    if (saved && !editor.deserialize(saved)) console.warn("mibi: the saved session was damaged and is ignored");
-    editor.clean();
+    if (saved && !editor.deserialize(saved)) say("the saved session was damaged and could not be restored");
 
     await seedAssets();
-    await restoreFolder();
+    if (handle) await attachFolder(handle);
     // Outside /workspace, so it is never mistaken for the user's files.
-    if (!saved) editor.put("/welcome.txt", welcome);
+    if (!saved && !handle) editor.put("/welcome.txt", welcome);
+    editor.clean();
 
     editor.init(term.cols, term.rows);
     wire();
     ui.overlay.hidden = true;
+    for (const text of notices.splice(0)) editor.notify(text);
     term.focus();
     setInterval(idle, 500);
     setInterval(() => folder && !document.hidden && scanFolder(), SCAN_MS);
@@ -99,6 +109,41 @@ async function boot() {
     console.error(err);
     showOverlay("mibi could not start", String(err?.message || err), "Reload");
   }
+}
+
+/** A status line now, or once the editor is up. */
+function say(text) {
+  if (editor && !editor.stopped && ui.overlay.hidden) editor.notify(text);
+  else notices.push(text);
+}
+
+/**
+ * The folder open last time, once the browser lets us use it again. The
+ * permission does not always survive a reload, and asking needs a click, so
+ * the page asks before the editor starts: the session belongs to the folder.
+ */
+async function folderFromLastTime() {
+  const handle = await kvGet("folder").catch(() => null);
+  if (!handle) return null;
+  try {
+    if ((await handle.queryPermission({ mode: "readwrite" })) === "granted") return handle;
+  } catch {
+    return null;
+  }
+  const choice = await new Promise((resolve) => {
+    showOverlay(
+      `Open ${handle.name} again?`,
+      "The browser needs your permission again to edit this folder. Without it, mibi opens the files kept in this browser instead.",
+      `Open ${handle.name}`,
+      async () => resolve(await handle.requestPermission({ mode: "readwrite" }).catch(() => "denied")),
+      "Use the browser's files",
+      () => resolve("skip"),
+    );
+  });
+  showOverlay("Starting mibi…", "Loading the editor.", null);
+  if (choice === "granted") return handle;
+  await kvSet("folder", null).catch(() => {});
+  return null;
 }
 
 /** One editor per browser: two tabs would overwrite each other's session. */
@@ -121,6 +166,8 @@ async function holdTabLock() {
     "Use it here",
     async () => {
       await take(true);
+      // The other tab saves as it stops; give that write a moment to land.
+      await new Promise((resolve) => setTimeout(resolve, 400));
       location.reload();
     },
   );
@@ -130,14 +177,17 @@ async function holdTabLock() {
 function lostTabLock() {
   if (!editor || editor.stopped) return;
   editor.checkpoint();
-  persist(true);
+  persist();
   editor.shutdown();
   showOverlay("mibi moved to another tab", "This tab has stopped so the two do not overwrite each other.", "Use it here", () =>
     location.reload(),
   );
 }
 
-function setupTerminal() {
+async function setupTerminal() {
+  // xterm.js measures a cell once, when it opens. Measured on the fallback
+  // font, the grid comes out wider than the page once the real one arrives.
+  await document.fonts.load('14px "Maple Mono NF"').catch(() => {});
   term = new Terminal({
     cursorBlink: true,
     scrollback: 0,
@@ -169,12 +219,16 @@ function wire() {
     return true;
   });
 
-  window.addEventListener("resize", () => fit.fit());
-  document.fonts.ready.then(() => fit.fit());
+  // The window, and the toolbar wrapping onto another row, both change the
+  // terminal's size. Fit again now too: it may have moved before this.
+  new ResizeObserver(() => fit.fit()).observe($("terminal"));
+  fit.fit();
+  editor.resize(term.cols, term.rows);
 
   $("open-files").addEventListener("click", () => ui.fileInput.click());
   $("open-folder").addEventListener("click", openFolder);
   ui.folderAction.addEventListener("click", () => (pendingHandle ? reconnectFolder() : scanFolder()));
+  ui.closeFolder.addEventListener("click", () => switchTo(null));
   $("download").addEventListener("click", download);
   for (const button of document.querySelectorAll("[data-command]")) {
     button.addEventListener("click", () => command(button.dataset.command));
@@ -203,14 +257,14 @@ function wire() {
     if (!document.hidden) return scanFolder();
     if (editor.stopped) return;
     editor.checkpoint();
-    persist(true);
+    persist();
     pushFolder();
   });
   window.addEventListener("focus", () => scanFolder());
   window.addEventListener("pagehide", () => {
     if (editor.stopped) return;
     editor.checkpoint();
-    persist(true);
+    persist();
   });
 }
 
@@ -260,7 +314,7 @@ function idle() {
 function quit() {
   editor.checkpoint();
   editor.shutdown();
-  persist(true);
+  persist();
   pushFolder();
   showOverlay("Session saved", "The editor has quit. Your tabs and unsaved text are kept in this browser.", "Reopen", () =>
     location.reload(),
@@ -294,24 +348,43 @@ function schedulePersist() {
   }, wait);
 }
 
-/** Write the session (and the workspace, without a real folder) to storage. */
-async function persist(force = false) {
-  if (!store || !(editor.dirty || persistAgain)) return;
-  if (persisting && !force) return schedulePersist();
-  persisting = true;
+/**
+ * Store the session (and the workspace, without a real folder) as it is now.
+ * Writes queue behind each other, so an older one never lands last. The
+ * promise settles when this one is stored.
+ */
+function persist() {
+  if (!store) return saving;
+  const settings = editor.read("/mibi.ini");
+  if (settings && !sameBytes(settings, settingsSaved)) {
+    settingsSaved = settings;
+    kvSet("settings", settings).catch((err) => console.warn("mibi: settings", err));
+  }
+  if (!(editor.dirty || persistAgain)) return saving;
   lastPersist = Date.now();
   const bytes = editor.serialize(!folder);
   editor.clean();
   persistAgain = false;
-  try {
-    await store.save(bytes);
-  } catch (err) {
-    console.warn("mibi: could not save the session", err);
-    persistAgain = true;
-    if (!editor.stopped) editor.notify(`could not keep the session in this browser (${err?.name || err})`);
-  } finally {
-    persisting = false;
-  }
+  saving = saving
+    .then(() => store.save(bytes))
+    .catch((err) => {
+      console.warn("mibi: could not save the session", err);
+      persistAgain = true;
+      say(`could not keep the session in this browser (${err?.name || err})`);
+    });
+  return saving;
+}
+
+function sameBytes(a, b) {
+  return !!b && a.length === b.length && a.every((x, i) => x === b[i]);
+}
+
+/** Everything written out and stored, before the page goes somewhere else. */
+async function settle() {
+  if (editor.stopped) return;
+  editor.checkpoint();
+  await pushFolder();
+  await persist();
 }
 
 // --- real folders --------------------------------------------------------------
@@ -324,7 +397,6 @@ function showFolder(text, action) {
 
 async function openFolder() {
   if (!window.showDirectoryPicker) return ui.folderInput.click();
-  if (!folder && workspaceHasFiles() && !confirm("Opening a folder replaces the files kept in this browser. Download anything you need first. Continue?")) return;
   let handle;
   try {
     handle = await window.showDirectoryPicker({ mode: "readwrite" });
@@ -332,51 +404,45 @@ async function openFolder() {
     if (err?.name === "AbortError") return;
     // An embedded or insecure page: fall back to a snapshot.
     if (err?.name === "SecurityError" || err?.name === "NotAllowedError") return ui.folderInput.click();
-    return editor.notify(`could not open the folder (${err?.message || err})`);
+    return say(`could not open the folder (${err?.message || err})`);
   }
-  await attachFolder(handle);
-  kvSet("folder", handle).catch(() => {});
-  term.focus();
+  if (folder && (await folder.handle.isSameEntry(handle))) return scanFolder();
+  await switchTo(handle);
 }
 
-function workspaceHasFiles() {
-  // The workspace blob is only kept without a folder; its size says enough.
-  return editor.serialize(true).length > editor.serialize(false).length;
+/** Reload into another workspace: a folder, or the browser's own files (null). */
+async function switchTo(handle) {
+  showOverlay("Switching workspace…", "Saving this one first.", null);
+  await settle();
+  await kvSet("folder", handle).catch(() => {});
+  location.reload();
 }
 
 async function attachFolder(handle) {
-  if (folder) await folder.push();
-  editor.removeTree("/workspace");
   folder = new FolderSync(editor, handle);
   pendingHandle = null;
   const report = await folder.scan();
   editor.track(true);
   showFolder(`folder: ${handle.name}`, "Refresh");
-  if (folder.truncated) editor.notify(`${handle.name}: only the first ${folder.options.maxFiles} files were read`);
-  else if (report.skipped) editor.notify(`${handle.name}: ${report.skipped} binary or large files are not shown`);
-  if (!editor.stopped) editor.tick();
-  persist(true);
+  ui.closeFolder.hidden = false;
+  if (folder.truncated) say(`${handle.name}: only the first ${folder.options.maxFiles} files were read`);
+  else if (report.skipped) say(`${handle.name}: ${report.skipped} binary or large files are not shown`);
 }
 
-async function restoreFolder() {
-  const handle = await kvGet("folder").catch(() => null);
-  if (!handle) return;
-  try {
-    if ((await handle.queryPermission({ mode: "readwrite" })) === "granted") return attachFolder(handle);
-  } catch (err) {
-    console.warn("mibi: folder from last time", err);
-    return;
-  }
-  pendingHandle = handle;
-  showFolder(`folder: ${handle.name} (needs permission)`, "Reconnect");
-}
-
+/** The same folder after the browser withdrew permission: no reload needed. */
 async function reconnectFolder() {
   try {
     if ((await pendingHandle.requestPermission({ mode: "readwrite" })) !== "granted") return;
-    await attachFolder(pendingHandle);
+    const handle = pendingHandle;
+    folder = new FolderSync(editor, handle);
+    pendingHandle = null;
+    await folder.scan();
+    showFolder(`folder: ${handle.name}`, "Refresh");
+    editor.tick();
+    // Saves made while it was away are still recorded: write them now.
+    pushFolder();
   } catch (err) {
-    editor.notify(`could not reconnect the folder (${err?.message || err})`);
+    say(`could not reconnect the folder (${err?.message || err})`);
   }
   term.focus();
 }
@@ -409,10 +475,11 @@ async function pushFolder() {
     const r = await folder.push();
     if (r.failed.length) {
       const { rel, err } = r.failed[0];
-      editor.notify(`could not write ${rel} to the folder (${err?.name || err}); it will be tried again`);
+      if (isFolderGone(err)) return folderFailed(err);
+      say(`could not write ${rel} to the folder (${err?.name || err}); it will be tried again`);
       schedulePush();
     } else if (r.deleted.length && !r.written.length) {
-      editor.notify(`deleted ${r.deleted.join(", ")} from the folder`);
+      say(`deleted ${r.deleted.join(", ")} from the folder`);
     }
     // A conflict has already said so in the status bar.
   } catch (err) {
@@ -420,20 +487,25 @@ async function pushFolder() {
   }
 }
 
+function isFolderGone(err) {
+  return err?.name === "NotAllowedError" || err?.name === "SecurityError";
+}
+
 function folderFailed(err) {
   console.warn("mibi: folder", err);
-  if (err?.name === "NotAllowedError" || err?.name === "SecurityError") {
+  if (!folder) return;
+  if (isFolderGone(err)) {
+    // Keep recording writes: they go out after Reconnect.
     pendingHandle = folder.handle;
     folder = null;
-    editor.track(false);
     showFolder(`folder: ${pendingHandle.name} (needs permission)`, "Reconnect");
-    editor.notify("the folder needs permission again: press Reconnect");
+    say("the folder needs permission again: press Reconnect");
   } else if (err?.name === "NotFoundError") {
     const name = folder.name;
     folder = null;
     editor.track(false);
-    showFolder("web build", null);
-    editor.notify(`the folder ${name} is gone; open tabs keep their text`);
+    showFolder(`folder: ${name} (gone)`, null);
+    say(`the folder ${name} is gone; open tabs keep their text`);
   }
 }
 
@@ -454,7 +526,7 @@ async function importFiles(files) {
   }
   if (first) editor.open(first);
   editor.tick();
-  if (skipped) editor.notify(`${skipped} binary files were not imported`);
+  if (skipped) say(`${skipped} binary files were not imported`);
   after();
   term.focus();
 }
@@ -485,9 +557,11 @@ async function seedAssets() {
         .then((buf) => editor.put("/" + path, new Uint8Array(buf)))
         .catch((err) => console.warn(`mibi: ${path}`, err));
     });
-  // The settings next to the "binary", as native ships them; the user's
-  // edits to /mibi.ini are kept.
-  if (!editor.has("/mibi.ini")) {
+  // The settings next to the "binary", as native ships them: the user's own
+  // edits, kept once for every workspace, or the example on a first visit.
+  settingsSaved = await kvGet("settings").catch(() => null);
+  if (settingsSaved) editor.put("/mibi.ini", settingsSaved);
+  else {
     jobs.push(
       fetch("mibi.ini.example")
         .then((r) => (r.ok ? r.arrayBuffer() : null))
@@ -500,13 +574,18 @@ async function seedAssets() {
 
 // --- overlay -------------------------------------------------------------------
 
-function showOverlay(title, text, button, onClick = () => location.reload()) {
+function showOverlay(title, text, button, onClick = () => location.reload(), alt = null, onAlt = null) {
   ui.overlayTitle.textContent = title;
   ui.overlayText.textContent = text;
   ui.overlayButton.hidden = !button;
   if (button) {
     ui.overlayButton.textContent = button;
     ui.overlayButton.onclick = onClick;
+  }
+  ui.overlayAlt.hidden = !alt;
+  if (alt) {
+    ui.overlayAlt.textContent = alt;
+    ui.overlayAlt.onclick = onAlt;
   }
   ui.overlay.hidden = false;
 }
