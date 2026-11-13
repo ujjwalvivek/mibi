@@ -86,9 +86,13 @@
     button:hover kbd { color: var(--muted); }
 
     /* --- the editor -------------------------------------------------------- */
-    #terminal { flex: 1; min-height: 0; padding: 4px 0 0 6px; }
+    /* The editor's own bars run edge to edge, as in a terminal window: no
+       padding, and no xterm scrollbar (there is no scrollback to scroll; the
+       wheel goes to the editor as mouse reports). */
+    #terminal { flex: 1; min-height: 0; overflow: hidden; background: var(--ground); }
     #terminal .xterm { height: 100%; }
-    #terminal .xterm-viewport { background: var(--ground) !important; }
+    #terminal .xterm-viewport { background: var(--ground) !important; overflow-y: hidden !important; scrollbar-width: none; }
+    #terminal .xterm-viewport::-webkit-scrollbar { display: none; }
 
     /* --- floating panels ---------------------------------------------------- */
     .float {
