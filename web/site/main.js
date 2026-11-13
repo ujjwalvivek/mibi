@@ -192,11 +192,11 @@ function lostTabLock() {
 async function setupTerminal() {
   // xterm.js measures a cell once, when it opens. Measured on the fallback
   // font, the grid comes out wider than the page once the real one arrives.
-  await document.fonts.load('14px "Maple Mono NF"').catch(() => {});
+  await document.fonts.load('14px "mibi Mono"').catch(() => {});
   term = new Terminal({
     cursorBlink: true,
     scrollback: 0,
-    fontFamily: '"Maple Mono NF", monospace',
+    fontFamily: '"mibi Mono", monospace',
     fontSize: 14,
     // The page's ground and ink; the editor paints its own theme over them.
     theme: { background: "#1c1e26", foreground: "#d5d8da", cursor: "#d5d8da", selectionBackground: "#2e303e" },
