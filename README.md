@@ -50,7 +50,7 @@ archives and attaches them to a GitHub release
 ## Web build
 
 The same editor compiles to WebAssembly and runs in a browser, with xterm.js
-as the terminal. Each release publishes it to GitHub Pages; to run it locally:
+as the terminal. It is live at <https://mibi.ujjwalvivek.com>; to run it locally:
 
 ```powershell
 .uild.ps1 web

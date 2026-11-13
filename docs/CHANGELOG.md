@@ -11,11 +11,14 @@
     leave the workspace, and a save never overwrites a file that changed on
     disk since it was read: the tab goes back to unsaved instead.
   - Elsewhere, imported files stay in the browser; Download writes one out.
-  - The session lives in the origin private file system (IndexedDB as a
+  - Each workspace (the browser's own files, and each real folder) has its
+    own session, in the origin private file system (IndexedDB as a
     fallback), not `localStorage`; an old `localStorage` session is moved
-    over. One tab runs the editor at a time.
+    over. Settings are shared between workspaces. One tab runs the editor at
+    a time.
   - Formatters, the filter and the kitty keyboard protocol are not available.
-  - Published to GitHub Pages by the release workflow.
+  - Deployed to Cloudflare Pages at <https://mibi.ujjwalvivek.com> after the
+    web tests pass.
 - `Unsupported` errors (the web build's missing child processes) say "not
   available in this build" in the status line.
 - Kitty keyboard protocol, opt-in with `kitty_keys = true` in `[editor]`.

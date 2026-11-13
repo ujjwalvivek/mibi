@@ -363,11 +363,15 @@ one it got. [WEB.md](WEB.md) has the details; these are the decisions.
   since is not overwritten, and the tab goes back to unsaved instead. That is
   stricter than native, whose save simply wins, because here a few seconds
   separate the last look from the write.
-- **Storage is OPFS, one blob.** The session (and, without a real folder, the
-  workspace) is serialised whole and written with `createWritable`, which
-  swaps the file in atomically; IndexedDB holds it where a page cannot write
-  OPFS files. `localStorage` was a 5 MB, string-only, synchronous limit. One
-  Web Lock keeps a second tab from overwriting the first tab's session.
+- **Storage is OPFS, one blob per workspace.** The session (and, without a
+  real folder, the workspace) is serialised whole and written with
+  `createWritable`, which swaps the file in atomically; IndexedDB holds it
+  where a page cannot write OPFS files. `localStorage` was a 5 MB,
+  string-only, synchronous limit. Each real folder has its own session, as
+  each working directory does natively, and switching folders reloads the
+  page: a session restored over the wrong folder could save one project's
+  text into another. One Web Lock keeps a second tab from overwriting the
+  first tab's session.
 - **xterm.js is the one dependency, and only on the web side.** The Zig
   build still has none. xterm.js (MIT) and the Maple Mono NF subset (OFL-1.1)
   are vendored under `web/site/vendor` with their licences, served with the

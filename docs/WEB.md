@@ -6,7 +6,9 @@ in-memory filesystem in place of the operating system. The text model,
 widgets, commands, keys, syntax highlighting and themes are the native ones;
 the web build is a platform module, an entry point and a static page.
 
-Each release publishes it to GitHub Pages (`.github/workflows/release.yml`).
+It is deployed to Cloudflare Pages at <https://mibi.ujjwalvivek.com> by
+`.github/workflows/deploy-web.yml`, on every push to `main` that touches the
+editor or the page and on every release tag, after the web tests pass.
 
 ## Build and run
 
@@ -31,6 +33,7 @@ Any static server works; the page needs nothing from it but files.
 | `vendor/` | xterm.js 5.5.0, its fit addon, the Maple Mono NF subset, their licences ([web/VENDOR.md](../web/VENDOR.md)) |
 | `syntax.d/`, `themes/`, `assets.txt` | the native data files, and the list the page fetches |
 | `mibi.ini.example`, `LICENSE` | the default settings, and mibi's licence |
+| `_headers` | caching and the wasm content type, for Cloudflare Pages |
 
 Source lives in `web/site/` (served as is), `src/platform/web/` and
 `src/web_main.zig`. After adding a language or a theme, run
@@ -105,12 +108,16 @@ The editor sees one filesystem:
   again is then a deliberate overwrite. Deleting works the same way.
 - **Failures are kept.** A write that fails (quota, a locked file) goes back
   on the list and is tried with the next one; the status line says so. If the
-  browser withdraws permission, the toolbar offers **Reconnect**; if the
-  folder disappears, tabs keep their text.
+  browser withdraws permission while the folder is open, the toolbar offers
+  **Reconnect**, and saves made meanwhile go out after it. If the folder
+  disappears, tabs keep their text.
 
 Folder checks and writes never run at once: each waits for the one before.
-The folder handle is kept in IndexedDB; after a reload the browser asks for
-permission again (**Reconnect**).
+
+The folder is remembered (its handle, in IndexedDB) and opens again on the
+next visit. When the browser wants permission again first, the page asks
+before the editor starts: open the folder, or use the browser's own files.
+**Close folder** goes back to the browser's files.
 
 ### Without a real folder
 
@@ -120,11 +127,21 @@ with the session. **Download** writes the focused file out.
 
 ## Storage
 
-The page keeps one blob: the persisted files serialised by
+Every workspace has its own session, as every working directory does
+natively: the browser's own files are one workspace, and each real folder
+another. Opening a different folder, or closing one, saves everything and
+reloads the page into the other workspace. A tab restored in the wrong folder
+could otherwise save one project's text into another. Folders are told apart
+with `isSameEntry`, the only comparison the API offers, so each folder ever
+opened is remembered with a random id.
+
+A workspace's session is one blob: the persisted files serialised by
 `Vfs.serialize` (`MIBIVFS1`: a count, then path and data pairs). With a real
-folder only `/state` and `/mibi.ini` are in it; without one, the workspace too.
-It goes to `mibi-state.bin` in the origin private file system, or IndexedDB
-where a page cannot write OPFS files. It is written at most once a second
+folder only `/state` is in it; without one, the workspace too. It goes to
+`mibi-<workspace>.bin` in the origin private file system, or IndexedDB where a
+page cannot write OPFS files. `/mibi.ini` is kept once, apart from the
+sessions, so settings follow you between workspaces. Writes queue behind each
+other, so an older blob never lands after a newer one. It is written at most once a second
 while something changes, and when the page is hidden (the last moment a
 closing tab can be relied on). Before that, the session is saved into the
 filesystem (`mibi_checkpoint`), not left for the next autosave. The page asks
